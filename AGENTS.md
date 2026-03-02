@@ -38,6 +38,7 @@ When multiple skills could apply:
 | Skill Name | One-Line Description | Activation Triggers |
 |------------|----------------------|---------------------|
 | **beadflow** | Autonomous task management using Beads issue tracker for multi-step project orchestration | Multi-step projects, PRD breakdown, complex implementations, dependency tracking, task management, autonomous planning |
+| **sculptor** | Collaborative idea polishing through structured dialogue and file-based annotation cycles | Idea exploration, brainstorming, concept refinement, PRD creation, spec writing, "I have an idea", "help me design this", "let's think through this" |
 
 ### Technical & Domain Skills
 
@@ -70,6 +71,31 @@ When multiple skills could apply:
 **Entry Point**: Run `bd ready --json` to check for actionable work or `bd init` to start a new project
 
 **File Location**: `beadflow/SKILL.md`
+
+### sculptor
+
+**Category**: Workflow
+**Full Name**: sculptor
+**Description**: Collaborative idea polishing through structured dialogue and file-based annotation cycles. Use when exploring, refining, or formalizing ideas into specs, PRDs, or implementation plans.
+
+**When to Activate**:
+- User has a vague idea they want to explore or refine
+- User says "I have an idea", "let's brainstorm", "help me think through this", "help me design this"
+- User wants to create a PRD, spec, or implementation plan from scratch
+- User needs to formalize a concept before implementation
+- User wants structured feedback on an idea through iterative annotation
+
+**Key Capabilities**:
+- Flexible research from any source (codebase, web, docs, dialogue)
+- Iterative file-based annotation cycles (user annotates in editor, agent addresses notes)
+- Scales document complexity to match idea complexity
+- Proposes multiple approaches with trade-offs
+- Optional escalation to PRD, technical spec, or implementation plan
+- Session continuity through persistent file artifacts
+
+**Entry Point**: Present an idea in any form — the skill will guide from there
+
+**File Location**: `sculptor/SKILL.md`
 
 ## Usage Guidelines for Agents
 
@@ -139,5 +165,5 @@ This catalog is maintained manually. When new skills are added:
 
 ---
 
-**Last Updated**: 2026-02-19
-**Total Skills**: 1 (1 workflow, 0 technical)
+**Last Updated**: 2026-02-27
+**Total Skills**: 2 (2 workflow, 0 technical)

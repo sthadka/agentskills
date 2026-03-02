@@ -40,6 +40,7 @@ Skills following the agentskills.io specification can be used with any compatibl
 | Name | Description | When to Use |
 |------|-------------|-------------|
 | [beadflow](./beadflow/SKILL.md) | Autonomous task management using Beads issue tracker | Multi-step projects, breaking down PRDs, managing complex implementations with dependency tracking |
+| [sculptor](./sculptor/SKILL.md) | Collaborative idea polishing through dialogue and annotation cycles | Exploring vague ideas, refining concepts, creating PRDs, specs, or implementation plans |
 
 ### Technical Skills
 
