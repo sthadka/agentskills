@@ -102,11 +102,25 @@ bd close <id1> <id2> <id3> --reason "Batch done" --json
 ```
 
 ### Dependencies
+
+> **CRITICAL: argument order for `bd dep add` is `<blocked-id> <blocker-id>` (blocked first, blocker second).**
+> Use `bd dep <blocker-id> --blocks <blocked-id>` to avoid confusion — it reads naturally and is unambiguous.
+
 ```bash
-bd dep add <blocker-id> <blocked-id> --json                    # blocker blocks blocked
-bd dep add <child-id> <parent-id> -t parent-child --json       # hierarchy
-bd dep add <id1> <id2> && bd dep add <id3> <id4> --json        # chain multiple
+# Preferred: unambiguous --blocks syntax
+bd dep <blocker-id> --blocks <blocked-id> --json               # blocker blocks blocked
+bd dep <child-id> --blocks <parent-id> -t parent-child --json  # WRONG for hierarchy (see below)
+
+# Hierarchy uses dep add (child depends on parent):
+bd dep add <child-id> <parent-id> -t parent-child --json       # child belongs to parent
+
+# Chain multiple with --blocks:
+bd dep <id1> --blocks <id2> && bd dep <id3> --blocks <id4>     # chain multiple blockers
 ```
+
+**Argument order reference:**
+- `bd dep add A B` → A depends on B (B blocks A). First arg is BLOCKED, second is BLOCKER.
+- `bd dep A --blocks B` → A blocks B. Reads naturally. Use this for all blocking deps.
 
 ### Comments
 ```bash
@@ -121,7 +135,7 @@ bd graph <epic-id>                          # Epic-specific graph
 
 ### Session End
 ```bash
-bd sync                                     # ALWAYS run before session end
+bd dolt push                                # ALWAYS run before session end (bd sync is deprecated)
 ```
 
 ## Command Chaining
@@ -228,9 +242,9 @@ Tests for register, login, logout, and token refresh in tests/test_auth.py.
 
 ```bash
 bd create -f plan.md --json
-# Parse returned IDs, then chain dependency additions:
-bd dep add <login-id> <user-model-id> && bd dep add <logout-id> <login-id> && bd dep add <tests-id> <logout-id>
-# Add hierarchy:
+# Parse returned IDs, then chain dependency additions using --blocks (blocker first, clear direction):
+bd dep <user-model-id> --blocks <login-id> && bd dep <login-id> --blocks <logout-id> && bd dep <logout-id> --blocks <tests-id>
+# Add hierarchy (dep add with parent-child type: child first, parent second):
 bd dep add <user-model-id> <epic-id> -t parent-child && bd dep add <login-id> <epic-id> -t parent-child
 ```
 
@@ -275,12 +289,14 @@ One command creates all issues. Parse the JSON output for ID mappings.
 ### 4. Add Dependencies
 Chain all dependency additions in one or two calls:
 ```bash
-# Cross-issue blocking dependencies
-bd dep add <task-b> <task-a> && bd dep add <task-c> <task-b> && ...
+# Cross-issue blocking dependencies — use --blocks (blocker first, reads naturally):
+bd dep <task-a> --blocks <task-b> && bd dep <task-b> --blocks <task-c> && ...
 
-# Parent-child hierarchy
+# Parent-child hierarchy — use dep add with -t parent-child (child first, parent second):
 bd dep add <task> <feature> -t parent-child && bd dep add <feature> <epic> -t parent-child && ...
 ```
+
+**NEVER use `bd dep add A B` for blocking** — the argument order (`blocked` first, `blocker` second) is unintuitive and causes reversed graphs. Always use `bd dep <blocker> --blocks <blocked>` for blocking relationships.
 
 ### 5. Validate
 ```bash
@@ -371,9 +387,9 @@ One chained call to assess full state:
 
 **ALWAYS RUN BEFORE SESSION ENDS:**
 ```bash
-bd sync
+bd dolt push
 ```
-This persists Beads state to git. Without this, changes may not sync to remote.
+This persists Beads state to git. Without this, changes may not sync to remote. (`bd sync` is deprecated — do not use it.)
 
 ## Error Handling
 
@@ -400,12 +416,13 @@ This persists Beads state to git. Without this, changes may not sync to remote.
 - Closing issues that aren't actually done (false progress)
 - Creating mega-tasks that take multiple sessions (decompose first)
 - Adding "nice to have" scope to existing issues (create separate issue)
-- Forgetting `bd sync` at session end (sync failure)
+- Forgetting `bd dolt push` at session end (sync failure) — `bd sync` is deprecated, do not use it
 - **Using individual `bd create` calls to plan multiple issues** (use `bd create -f` instead)
 - **Using `bd show` after `bd ready --json`** (JSON output already includes full details)
 - **Closing then calling `bd ready` separately** (use `bd close --suggest-next` instead)
 - **Omitting `--json` flag** (human-readable output is harder to parse and wastes tokens)
 - **Making separate Bash calls for related operations** (chain with `&&` instead)
+- **Using `bd dep add A B` for blocking deps** — argument order is `<blocked> <blocker>` (reversed from intuition). Use `bd dep <blocker> --blocks <blocked>` instead.
 
 ---
 
