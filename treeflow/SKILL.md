@@ -61,9 +61,9 @@ Determine `{plan-name}` for context directory naming:
 
 Initialize context and state management:
 ```bash
-python3 .beads/tf.py init {plan-name}
+python3 ~/.claude/skills/treeflow/tf.py init {plan-name}
 ```
-This creates `.beads/context-{plan-name}/` with `registry.json`.
+This creates `.beads/context-{plan-name}/` with `registry.json` and copies `tf.py` to `.beads/tf.py` for workers.
 
 ## Command Reference
 
@@ -72,7 +72,7 @@ All `bd` commands use the same syntax as beadflow. See [COMMANDS.md](COMMANDS.md
 Key difference: **always pipe through `jq -c`** to minimize token usage:
 ```bash
 bd ready --json | jq -c
-bd close <id> --reason "Done" --suggest-next --json | jq -c
+bd close <id> --reason "Done" --suggest-next --json | jq -c '.[0]'
 ```
 
 > **CRITICAL: For blocking deps, use `bd dep <blocker> --blocks <blocked>` — NOT `bd dep add A B`**
@@ -121,7 +121,7 @@ Follow beadflow's planning process: analyze goal, write plan file, `bd create -f
 
 After planning:
 
-1. Initialize state: `python3 .beads/tf.py init {plan-name}`
+1. Initialize state: `python3 ~/.claude/skills/treeflow/tf.py init {plan-name}`
 2. Write `worker-context.md` from [WORKER-CONTEXT-TEMPLATE.md](WORKER-CONTEXT-TEMPLATE.md) — fill in all sections, skip anything in CLAUDE.md
 3. Add skill routing: `python3 .beads/tf.py routing --add "pattern:domain:prefix"` for each file-domain mapping
 

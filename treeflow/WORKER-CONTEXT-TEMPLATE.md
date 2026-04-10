@@ -59,4 +59,7 @@
 - venv activation varies by OS — use `python -m` prefix for portability
 -->
 
+- `bd` CLI may not be in PATH inside worker subprocesses — if `bd` or `tf.py worker-close` fails with "command not found", note it in your summary and the orchestrator will handle bead closure
+- `bd close` returns a JSON array: use `jq -c '.[0].status'` not `jq -c '.status'`
+
 {Add project-specific gotchas here. Orchestrator appends more as workers discover recurring issues.}

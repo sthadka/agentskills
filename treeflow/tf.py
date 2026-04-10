@@ -14,6 +14,44 @@ from pathlib import Path
 
 REGISTRY_FILE = "registry.json"
 
+# Common locations where bd might be installed
+_BD_SEARCH_PATHS = [
+    Path.home() / ".local" / "bin" / "bd",
+    Path("/usr/local/bin/bd"),
+    Path.home() / "go" / "bin" / "bd",
+    Path.home() / ".cargo" / "bin" / "bd",
+]
+
+
+def _resolve_bd() -> str:
+    """Resolve bd binary path. Tries shutil.which, then common locations, then bare 'bd'."""
+    found = shutil.which("bd")
+    if found:
+        return found
+    for p in _BD_SEARCH_PATHS:
+        if p.exists() and os.access(p, os.X_OK):
+            return str(p)
+    return "bd"
+
+
+def _bd(registry_path: Path | None = None) -> str:
+    """Get bd binary path from registry, falling back to _resolve_bd()."""
+    if registry_path:
+        try:
+            with open(registry_path) as f:
+                reg = json.load(f)
+            bd_path = reg.get("bd_path", "")
+            if bd_path and (Path(bd_path).exists() or shutil.which(bd_path)):
+                return bd_path
+        except (json.JSONDecodeError, OSError):
+            pass
+    return _resolve_bd()
+
+
+def _bd_cmd(subcmd: str, registry_path: Path | None = None) -> str:
+    """Build a bd command using the resolved binary path."""
+    return f"{_bd(registry_path)} {subcmd}"
+
 
 def _beads_dir() -> Path:
     """Find .beads/ directory by walking up from cwd."""
@@ -82,8 +120,10 @@ def cmd_init(args: argparse.Namespace) -> None:
         _out({"ok": True, "msg": "already exists", "path": str(ctx)})
         return
 
+    bd_path = _resolve_bd()
     data = {
         "plan_name": args.plan_name,
+        "bd_path": bd_path,
         "workers": {},
         "routing": {},
         "phases": {},
@@ -96,7 +136,7 @@ def cmd_init(args: argparse.Namespace) -> None:
     if src != dst:
         shutil.copy2(src, dst)
 
-    _out({"ok": True, "path": str(ctx)})
+    _out({"ok": True, "path": str(ctx), "bd_path": bd_path})
 
 
 def cmd_dispatch(args: argparse.Namespace) -> None:
@@ -118,6 +158,8 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
 
 def cmd_worker_close(args: argparse.Namespace) -> None:
     """Worker calls this to validate and close a bead. Returns ok/errors."""
+    rp = _registry_path()
+    bd = _bd(rp)
     errors = []
 
     # 1. Check uncommitted changes in target files
@@ -145,7 +187,7 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
         return
 
     # 2. Check bead is in_progress
-    r = _run(f"bd show {args.bead_id} --json")
+    r = _run(f"{bd} show {args.bead_id} --json")
     if r.returncode != 0:
         _out({"ok": False, "errors": [f"bd show failed: {r.stderr.strip()[:100]}"]})
         return
@@ -170,13 +212,13 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
     reason = f"SUMMARY: {summary}. FILES: {files_str}. CONTEXT: {args.context_pct}%"
 
     # 4. Close bead
-    r = _run(f'bd close {args.bead_id} --reason "{reason}" --json')
+    r = _run(f'{bd} close {args.bead_id} --reason "{reason}" --json')
     if r.returncode != 0:
         _out({"ok": False, "errors": [f"bd close failed: {r.stderr.strip()[:100]}"]})
         return
 
     # 5. Verify close
-    r = _run(f"bd show {args.bead_id} --json")
+    r = _run(f"{bd} show {args.bead_id} --json")
     try:
         bead = json.loads(r.stdout)
     except json.JSONDecodeError:
@@ -184,8 +226,8 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
 
     if bead.get("status") != "closed":
         # Retry once
-        _run(f'bd close {args.bead_id} --reason "{reason}" --json')
-        r = _run(f"bd show {args.bead_id} --json")
+        _run(f'{bd} close {args.bead_id} --reason "{reason}" --json')
+        r = _run(f"{bd} show {args.bead_id} --json")
         try:
             bead = json.loads(r.stdout)
         except json.JSONDecodeError:
@@ -235,16 +277,28 @@ def cmd_notify(args: argparse.Namespace) -> None:
 def cmd_phase_gate(args: argparse.Namespace) -> None:
     """Check if a phase/epic is fully complete: all beads closed + all notifications received."""
     reg, rp = _load_registry()
+    bd = _bd(rp)
     blocking = []
 
     # Get all child beads of the epic
-    r = _run(f"bd list --parent {args.epic_id} --json")
+    r = _run(f"{bd} list --parent {args.epic_id} --json")
     if r.returncode != 0:
         # Fallback: list all open
-        r = _run("bd list --json")
+        r = _run(f"{bd} list --json")
+
+    stdout = r.stdout.strip()
+    if not stdout:
+        _out({"pass": False, "error": "bd list returned empty output"})
+        return
+
+    # Skip non-JSON prefix (bd may print status lines before JSON)
+    json_start = next((i for i, ch in enumerate(stdout) if ch in ("[", "{")), -1)
+    if json_start < 0:
+        _out({"pass": False, "error": "no JSON found in bd list output"})
+        return
 
     try:
-        beads = json.loads(r.stdout)
+        beads = json.loads(stdout[json_start:])
     except json.JSONDecodeError:
         _out({"pass": False, "error": "failed to parse bd list"})
         return
@@ -273,6 +327,8 @@ def cmd_phase_gate(args: argparse.Namespace) -> None:
 
 def cmd_smoke_test(args: argparse.Namespace) -> None:
     """Run build + wiring verification for completed beads."""
+    rp = _registry_path()
+    bd = _bd(rp)
     result: dict = {"build": "skip", "wiring": []}
 
     # Build check
@@ -288,7 +344,7 @@ def cmd_smoke_test(args: argparse.Namespace) -> None:
     if args.beads:
         bead_ids = [b.strip() for b in args.beads.split(",")]
         for bid in bead_ids:
-            r = _run(f"bd show {bid} --json")
+            r = _run(f"{bd} show {bid} --json")
             if r.returncode != 0:
                 result["wiring"].append({"bead": bid, "error": "cannot read bead"})
                 continue
@@ -379,7 +435,8 @@ def cmd_routing(args: argparse.Namespace) -> None:
 
 def cmd_status(args: argparse.Namespace) -> None:
     """One-line status overview for orchestrator."""
-    reg, _ = _load_registry()
+    reg, rp = _load_registry()
+    bd = _bd(rp)
     workers = reg.get("workers", {})
 
     counts = {"active": 0, "idle": 0, "retired": 0, "failed": 0}
@@ -391,7 +448,7 @@ def cmd_status(args: argparse.Namespace) -> None:
             pending += 1
 
     # Get bead counts
-    r = _run("bd list --json 2>/dev/null")
+    r = _run(f"{bd} list --json 2>/dev/null")
     open_beads = blocked = closed = 0
     try:
         beads = json.loads(r.stdout)
