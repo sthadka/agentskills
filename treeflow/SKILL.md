@@ -42,9 +42,11 @@ Your context window is the most precious resource. Minimize what stays in contex
 
 Run `ToolSearch: "SendMessage"`.
 
-**If SendMessage is NOT found:** warn the user immediately:
-> SendMessage is not available. Worker reuse and follow-ups are disabled for this session. All workers will be single-use.
-> To enable worker reuse, restart Claude Code with `--agent-teams` flag: `claude --agent-teams`
+**If SendMessage is found:** worker reuse and follow-ups are available. Proceed normally.
+
+**If SendMessage is NOT found:** warn the user:
+> SendMessage is not available in this session. Worker reuse and follow-ups are disabled — all workers will be single-use.
+> SendMessage requires the agent-teams feature (env var `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=true`). This feature may not be available on all Claude Code builds.
 
 Note `sendmessage: false` in `worker-context.md` under Known Gotchas. Skip the reuse decision tree (section 3) for the entire session — always spawn fresh workers.
 
