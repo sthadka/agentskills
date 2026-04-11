@@ -564,6 +564,57 @@ def cmd_routing(args: argparse.Namespace) -> None:
         _out(reg.get("routing", {}))
 
 
+def cmd_sync(args: argparse.Namespace) -> None:
+    """Pre-dispatch sync: retire stale workers, return reusable idle workers by skill.
+
+    Call this BEFORE every dispatch decision. It handles all housekeeping:
+    1. Auto-retire workers at >=90% context (can't reuse meaningfully)
+    2. Auto-retire workers at <40% context (not worth the reuse overhead)
+    3. Return available workers grouped by skill domain for reuse matching
+    """
+    reg, rp = _load_registry()
+    now = _now()
+    retired = []
+    available = {}  # skill -> [{name, ctx, bead}]
+    total_spawned = 0
+    total_active = 0
+
+    for wname, w in reg["workers"].items():
+        total_spawned += 1
+        s = w.get("status", "")
+
+        if s == "active":
+            total_active += 1
+            continue
+
+        if s != "idle":
+            continue
+
+        ctx = w.get("context_pct", 0)
+
+        # Auto-retire: too high or too low context
+        if ctx >= 90 or ctx < 40:
+            w["status"] = "retired"
+            w["retired_at"] = now
+            retired.append({"worker": wname, "ctx": ctx, "reason": "high_ctx" if ctx >= 90 else "low_ctx"})
+            continue
+
+        # Available for reuse
+        skill = w.get("skill", "unknown")
+        if skill not in available:
+            available[skill] = []
+        available[skill].append({"name": wname, "ctx": ctx, "bead": w.get("bead", "")})
+
+    if retired:
+        _save_registry(reg, rp)
+
+    _out({
+        "available": available,
+        "retired_now": retired,
+        "counts": {"total": total_spawned, "active": total_active, "idle": len([v for s in available.values() for v in s]), "retired": len(retired)},
+    })
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     """Status overview for orchestrator — designed as recovery surface after context compression."""
     reg, rp = _load_registry()
@@ -691,6 +742,9 @@ def main() -> None:
     s = sub.add_parser("routing")
     s.add_argument("--add", default="")
 
+    # sync
+    sub.add_parser("sync")
+
     # status
     sub.add_parser("status")
 
@@ -713,6 +767,7 @@ def main() -> None:
         "registry": cmd_registry,
         "retire": cmd_retire,
         "routing": cmd_routing,
+        "sync": cmd_sync,
         "status": cmd_status,
     }
     cmds[args.cmd](args)

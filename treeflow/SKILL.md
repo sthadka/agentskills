@@ -121,6 +121,7 @@ python3 .beads/tf.py dispatch {worker} {bead} --skill {domain}  # Record dispatc
 python3 .beads/tf.py notify {worker} {bead} --context-pct N --summary "..."  # Record completion
 python3 .beads/tf.py phase-gate {epic-id}                # Check phase complete
 python3 .beads/tf.py smoke-test --build-cmd "cmd" --beads a,b  # Build + wiring check
+python3 .beads/tf.py sync                                      # Pre-dispatch: retire stale, return reusable workers by skill
 python3 .beads/tf.py registry [--status idle] [--skill domain]  # Query workers
 python3 .beads/tf.py registry --worker-model              # Print configured worker model
 python3 .beads/tf.py retire {worker}                     # Mark worker retired
@@ -205,23 +206,25 @@ Group ready tasks by file-conflict safety:
 
 ### 3. Select or Reuse Workers
 
-**If SendMessage is unavailable** (detected in Entry Protocol), skip to "spawn fresh" below.
-
-**This step is MANDATORY before every spawn.** Do NOT proceed to step 5 (Dispatch) without running the idle check first. Skipping this is the #1 cause of worker bloat.
+**This step is MANDATORY before every spawn.** Do NOT proceed to step 5 (Dispatch) without running sync first. Skipping this is the #1 cause of worker bloat.
 
 ```bash
-python3 .beads/tf.py registry --status idle
+python3 .beads/tf.py sync
 ```
 
-**Decision rule** (in order):
-1. Idle worker ≥50% context + same skill domain → **always reuse** via SendMessage
-2. Idle worker 40-50% context + same domain → reuse if task is simple/small
-3. Idle worker <40% context → `python3 .beads/tf.py retire {worker}`, spawn fresh
-4. No idle workers → spawn fresh
+This single command handles all housekeeping:
+- Auto-retires workers at ≥90% context (can't reuse meaningfully)
+- Auto-retires workers at <40% context (not worth reuse overhead)
+- Returns `available` workers grouped by skill domain, ready for reuse
+
+**Decision rule** based on sync output:
+1. `available` has a worker in the same skill domain as the ready task → **reuse** via SendMessage
+2. `available` is empty or no domain match → spawn fresh
+3. **If SendMessage is unavailable** (detected in Entry Protocol) → always spawn fresh
 
 **How reuse works:** `SendMessage` to a stopped agent auto-resumes it with full conversation context. No orientation overhead.
 
-**When to batch instead of reuse:** If multiple tasks for the same domain are known upfront, batch them in one worker prompt at dispatch time — this is better than spawning one, then reusing via SendMessage for the next. SendMessage reuse is most valuable for follow-up tasks discovered *after* a worker finishes.
+**When to batch instead of reuse:** If multiple tasks for the same domain are known upfront, batch them in one worker prompt at dispatch time — this avoids the SendMessage round-trip. Reuse is most valuable for follow-up tasks discovered *after* a worker finishes.
 
 **Target: ≤1 worker per task.** If your worker count exceeds task count, you're over-spawning. V2 achieved 0.8× (15 workers for 19 tasks) with good batching.
 
@@ -402,8 +405,8 @@ This rebuilds your picture of active workers, their current beads, pending notif
 - Spawning workers without `name` parameter (can't reuse unnamed workers)
 - Spawning more workers than independent ready tasks
 - Killing workers — let them complete or self-report
-- **Spawning fresh workers when idle workers with ≥50% context exist in the same skill domain** — query `tf.py registry --status idle` first
-- Reusing workers when remaining context is too small (retire instead)
+- **Spawning fresh workers without running `tf.py sync` first** — sync auto-retires stale workers and shows available reuse candidates
+- Reusing workers when remaining context is too small (sync handles this automatically)
 - Spawning N workers for N near-identical small tasks (batch into one worker)
 
 **Planning:**
