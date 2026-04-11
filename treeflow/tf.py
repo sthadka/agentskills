@@ -121,7 +121,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         _out({"ok": True, "msg": "already exists", "path": str(ctx)})
         return
 
-    bd_path = _resolve_bd()
+    bd_path = getattr(args, "bd_path", "") or _resolve_bd()
     worker_model = getattr(args, "worker_model", "") or ""
     data = {
         "plan_name": args.plan_name,
@@ -598,6 +598,7 @@ def main() -> None:
     # init
     s = sub.add_parser("init")
     s.add_argument("plan_name")
+    s.add_argument("--bd-path", default="", dest="bd_path")
     s.add_argument("--worker-model", default="", dest="worker_model")
 
     # dispatch

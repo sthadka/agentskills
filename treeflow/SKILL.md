@@ -82,9 +82,9 @@ Determine `{plan-name}` for context directory naming:
 
 Initialize context and state management:
 ```bash
-python3 ~/.claude/skills/treeflow/tf.py init {plan-name}
+BD_PATH=$(which bd) && python3 ~/.claude/skills/treeflow/tf.py init {plan-name} --bd-path "$BD_PATH"
 ```
-This creates `.beads/context-{plan-name}/` with `registry.json`, copies `tf.py` to `.beads/tf.py` for workers, and ensures `.beads/` is in `.gitignore` (prevents `git stash -u` from stashing context files).
+This creates `.beads/context-{plan-name}/` with `registry.json`, copies `tf.py` to `.beads/tf.py` for workers, stores the absolute `bd` path so workers can find it without the orchestrator's shell PATH, and ensures `.beads/` is in `.gitignore` (prevents `git stash -u` from stashing context files).
 
 ## Command Reference
 
@@ -104,7 +104,7 @@ State management commands — all output compact JSON:
 
 ```bash
 # Orchestrator commands
-python3 .beads/tf.py init {plan-name} [--worker-model MODEL]  # Create context dir + registry + gitignore
+python3 .beads/tf.py init {plan-name} --bd-path $(which bd) [--worker-model MODEL]  # Create context dir + registry + gitignore
 python3 .beads/tf.py dispatch {worker} {bead} --skill {domain}  # Record dispatch
 python3 .beads/tf.py notify {worker} {bead} --context-pct N --summary "..."  # Record completion
 python3 .beads/tf.py phase-gate {epic-id}                # Check phase complete
@@ -152,7 +152,11 @@ Follow beadflow's planning process: analyze goal, write plan file, `bd create -f
 After planning:
 
 1. Ask the user what model workers should use. Valid values are aliases only: `sonnet`, `opus`, `haiku` — full model IDs like `claude-sonnet-4-6` are rejected by the Agent tool. **Best practice: omit model entirely** (workers inherit the orchestrator's exact model). Only set `--worker-model` when the user wants a *different* model tier.
-2. Initialize state: `python3 ~/.claude/skills/treeflow/tf.py init {plan-name} [--worker-model MODEL]`
+2. Resolve `bd` absolute path and initialize state:
+   ```bash
+   BD_PATH=$(which bd) && python3 ~/.claude/skills/treeflow/tf.py init {plan-name} --bd-path "$BD_PATH" [--worker-model MODEL]
+   ```
+   The `--bd-path` flag stores the absolute path in `registry.json` so workers can find `bd` without needing the orchestrator's shell PATH.
 3. Write `worker-context.md` from [WORKER-CONTEXT-TEMPLATE.md](WORKER-CONTEXT-TEMPLATE.md) — fill in all sections, skip anything in CLAUDE.md
 4. Add skill routing: `python3 .beads/tf.py routing --add "pattern:domain:prefix"` for each file-domain mapping
 
