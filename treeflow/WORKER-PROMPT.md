@@ -89,6 +89,10 @@ For batch tasks: call `python3 .beads/tf.py claim <next_bead_id>` before startin
 When the orchestrator resumes an idle worker via `SendMessage`, the worker auto-resumes with its full conversation context intact. Use this shorter format since the worker already has project/epic context from its previous task:
 
 ```
+## Prior Task — COMPLETE AND CLOSED
+Bead {prev_bead_id} is ALREADY CLOSED. Do NOT re-close it, retry worker-close on it, or reference it.
+Your new task begins below.
+
 ## New Task
 **{bead_title}** (Bead ID: {bead_id})
 
@@ -100,7 +104,9 @@ When the orchestrator resumes an idle worker via `SendMessage`, the worker auto-
 ## Updated Context
 {any new completions, decisions, or context changes since worker's last task}
 
-Same execution rules apply. Claim, execute, commit, then run:
+Same execution rules apply. Claim the NEW bead first, execute, commit, then run:
+python3 .beads/tf.py claim {bead_id}
+... do the work ...
 python3 .beads/tf.py worker-close {bead_id} --context-pct <N> --files <file1>,<file2> --summary "<what you did>"
 Fix any errors it reports. Done when it returns ok:true.
 ```

@@ -36,13 +36,19 @@ def _resolve_bd() -> str:
 
 
 def _bd(registry_path: Path | None = None) -> str:
-    """Get bd binary path from registry, falling back to _resolve_bd()."""
+    """Get bd binary path from registry, falling back to _resolve_bd().
+
+    IMPORTANT: Do NOT validate bd_path with Path.exists() or shutil.which().
+    The orchestrator's sandbox PATH differs from the worker's. macOS sandbox
+    blocks stat() on paths like ~/.local/bin/ even though execve works fine.
+    Trust the stored path — the worker will fail fast on first invocation if wrong.
+    """
     if registry_path:
         try:
             with open(registry_path) as f:
                 reg = json.load(f)
             bd_path = reg.get("bd_path", "")
-            if bd_path and (Path(bd_path).exists() or shutil.which(bd_path)):
+            if bd_path:
                 return bd_path
         except (json.JSONDecodeError, OSError):
             pass
@@ -67,13 +73,21 @@ def _beads_dir() -> Path:
 
 def _registry_path() -> Path:
     bd = _beads_dir()
-    # Find the context dir that contains registry.json
+    # Find all context dirs with registry.json, pick most recently modified
+    candidates = []
     for child in bd.iterdir():
         if child.is_dir() and child.name.startswith("context-"):
             rp = child / REGISTRY_FILE
             if rp.exists():
-                return rp
-    # Fallback: return first context dir
+                candidates.append(rp)
+    if candidates:
+        if len(candidates) > 1:
+            # Sort by modification time, newest first
+            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            import sys as _sys
+            print(json.dumps({"warning": f"{len(candidates)} context dirs found, using newest: {candidates[0].parent.name}"}), file=_sys.stderr)
+        return candidates[0]
+    # Fallback: return first context dir (no registry.json yet)
     for child in bd.iterdir():
         if child.is_dir() and child.name.startswith("context-"):
             return child / REGISTRY_FILE
@@ -215,8 +229,10 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
         return
 
     try:
-        bead = json.loads(r.stdout)
-    except json.JSONDecodeError:
+        data = json.loads(r.stdout)
+        # bd show may return array or dict — normalize
+        bead = data[0] if isinstance(data, list) else data
+    except (json.JSONDecodeError, IndexError):
         _out({"ok": False, "errors": ["bd show returned invalid JSON"]})
         return
 
@@ -242,8 +258,9 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
     # 6. Verify close
     r = _run(f"{bd} show {args.bead_id} --json")
     try:
-        bead = json.loads(r.stdout)
-    except json.JSONDecodeError:
+        data = json.loads(r.stdout)
+        bead = data[0] if isinstance(data, list) else data
+    except (json.JSONDecodeError, IndexError):
         bead = {}
 
     if bead.get("status") != "closed":
@@ -251,8 +268,9 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
         _run(f'{bd} close {args.bead_id} --reason "{reason}" --json')
         r = _run(f"{bd} show {args.bead_id} --json")
         try:
-            bead = json.loads(r.stdout)
-        except json.JSONDecodeError:
+            data = json.loads(r.stdout)
+            bead = data[0] if isinstance(data, list) else data
+        except (json.JSONDecodeError, IndexError):
             bead = {}
         if bead.get("status") != "closed":
             _out({"ok": False, "errors": ["bead still not closed after retry"]})
@@ -361,16 +379,24 @@ def cmd_notify(args: argparse.Namespace) -> None:
 
     late = worker.get("notification") == "received"
 
-    worker["status"] = "idle"
+    # Auto-retire workers at 90%+ context — they can never be meaningfully reused
+    auto_retired = args.context_pct >= 90
+    worker["status"] = "retired" if auto_retired else "idle"
     worker["context_pct"] = args.context_pct
     worker["notification"] = "reconciled" if late else "received"
-    worker["idle_since"] = now
+    if auto_retired:
+        worker["retired_at"] = now
+    else:
+        worker["idle_since"] = now
     worker["bead"] = args.bead_id
     if args.summary:
         worker["summary"] = args.summary[:200]
 
     _save_registry(reg, rp)
-    _out({"ok": True, "late": late, "worker": args.worker, "ctx": args.context_pct})
+    result = {"ok": True, "late": late, "worker": args.worker, "ctx": args.context_pct}
+    if auto_retired:
+        result["auto_retired"] = True
+    _out(result)
 
 
 def cmd_phase_gate(args: argparse.Namespace) -> None:
@@ -545,13 +571,13 @@ def cmd_status(args: argparse.Namespace) -> None:
     workers = reg.get("workers", {})
 
     counts = {"active": 0, "idle": 0, "retired": 0, "failed": 0}
-    pending = 0
+    pending_from = []
     active_workers = []
     for wname, w in workers.items():
         s = w.get("status", "")
         counts[s] = counts.get(s, 0) + 1
         if w.get("notification") == "pending":
-            pending += 1
+            pending_from.append({"worker": wname, "bead": w.get("bead", "?")})
         if s == "active":
             active_workers.append({
                 "name": wname,
@@ -580,11 +606,12 @@ def cmd_status(args: argparse.Namespace) -> None:
 
     result: dict = {
         "w": counts,
-        "pending_notif": pending,
         "beads": {"open": open_beads, "blocked": blocked, "closed": closed},
     }
     if active_workers:
         result["active"] = active_workers
+    if pending_from:
+        result["pending_notif"] = pending_from
     _out(result)
 
 

@@ -80,11 +80,23 @@ Determine `{plan-name}` for context directory naming:
 - User-provided name
 - Fallback: date-based (e.g., `2026-04-05`)
 
+Check for stale context directories from prior sessions:
+```bash
+ls .beads/context-*/registry.json 2>/dev/null | wc -l | tr -d ' '
+```
+If > 1, verify which to use. `tf.py` picks the most recently modified, but stale dirs with wrong `bd_path` can cause issues. Remove or rename old context dirs if not needed.
+
 Initialize context and state management:
 ```bash
 BD_PATH=$(which bd) && python3 ~/.claude/skills/treeflow/tf.py init {plan-name} --bd-path "$BD_PATH"
 ```
-This creates `.beads/context-{plan-name}/` with `registry.json`, copies `tf.py` to `.beads/tf.py` for workers, stores the absolute `bd` path so workers can find it without the orchestrator's shell PATH, and ensures `.beads/` is in `.gitignore` (prevents `git stash -u` from stashing context files).
+This creates `.beads/context-{plan-name}/` with `registry.json`, copies `tf.py` to `.beads/tf.py` for workers, stores the absolute `bd` path so workers can find it without the orchestrator's shell PATH, and ensures `.beads/` is in `.gitignore`.
+
+**Pre-dispatch smoke test** — run before dispatching any workers:
+```bash
+python3 .beads/tf.py bd-path
+```
+If this fails or returns a wrong path, fix `registry.json` before workers hit it.
 
 ## Command Reference
 
@@ -402,6 +414,8 @@ This rebuilds your picture of active workers, their current beads, pending notif
 - Using `bd dep add A B` for blocking deps (reversed argument order)
 - Making separate Bash calls for related operations (chain with `&&`)
 - Dispatching integration before `tf.py phase-gate` returns `pass: true`
+- Validating `bd_path` with `Path.exists()` or `shutil.which()` — macOS sandbox blocks `stat()` on agent subprocess paths even when `execve` works. Trust the stored path.
+- Skipping the pre-dispatch smoke test (`tf.py bd-path`) — catch infrastructure bugs before workers hit them
 
 ---
 
