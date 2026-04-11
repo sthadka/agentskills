@@ -45,8 +45,15 @@ Run `ToolSearch: "SendMessage"`.
 **If SendMessage is found:** worker reuse and follow-ups are available. Proceed normally.
 
 **If SendMessage is NOT found:** warn the user:
-> SendMessage is not available in this session. Worker reuse and follow-ups are disabled — all workers will be single-use.
-> SendMessage requires the agent-teams feature (env var `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=true`). This feature may not be available on all Claude Code builds.
+> SendMessage is not available. Worker reuse and follow-ups are disabled — all workers will be single-use.
+>
+> To enable worker reuse, add this to your Claude Code settings.json (user or project level):
+> ```json
+> { "env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" } }
+> ```
+> Or set the environment variable before launching: `export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`
+>
+> Then restart Claude Code. See https://code.claude.com/docs/en/agent-teams.md for details.
 
 Note `sendmessage: false` in `worker-context.md` under Known Gotchas. Skip the reuse decision tree (section 3) for the entire session — always spawn fresh workers.
 
