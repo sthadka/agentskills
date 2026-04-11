@@ -6,6 +6,7 @@ All output is compact single-line JSON for token efficiency.
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -121,9 +122,11 @@ def cmd_init(args: argparse.Namespace) -> None:
         return
 
     bd_path = _resolve_bd()
+    worker_model = getattr(args, "worker_model", "") or ""
     data = {
         "plan_name": args.plan_name,
         "bd_path": bd_path,
+        "worker_model": worker_model,
         "workers": {},
         "routing": {},
         "phases": {},
@@ -136,7 +139,19 @@ def cmd_init(args: argparse.Namespace) -> None:
     if src != dst:
         shutil.copy2(src, dst)
 
-    _out({"ok": True, "path": str(ctx), "bd_path": bd_path})
+    # Ensure .beads/ is gitignored to prevent git stash -u from stashing context
+    repo_root = bd.parent
+    gitignore = repo_root / ".gitignore"
+    marker = ".beads/"
+    if gitignore.exists():
+        content = gitignore.read_text()
+        if marker not in content.splitlines():
+            with open(gitignore, "a") as f:
+                f.write(f"\n# TreeFlow context (auto-added)\n{marker}\n")
+    else:
+        gitignore.write_text(f"# TreeFlow context (auto-added)\n{marker}\n")
+
+    _out({"ok": True, "path": str(ctx), "bd_path": bd_path, "worker_model": worker_model})
 
 
 def cmd_dispatch(args: argparse.Namespace) -> None:
@@ -186,7 +201,14 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
         _out({"ok": False, "errors": errors, "hint": "commit your changes first"})
         return
 
-    # 2. Check bead is in_progress
+    # 2. Check last commit message for task/bead number anti-pattern
+    r = _run("git log -1 --pretty=%s")
+    msg = r.stdout.strip()
+    if msg and re.search(r'\bTask\s+\d+', msg, re.IGNORECASE):
+        _out({"ok": False, "errors": [f"commit message contains task number: '{msg}'. Amend to remove 'Task N:' prefix"], "hint": "git commit --amend -m 'feat: <description without task number>'"})
+        return
+
+    # 3. Check bead is in_progress (was step 2)
     r = _run(f"{bd} show {args.bead_id} --json")
     if r.returncode != 0:
         _out({"ok": False, "errors": [f"bd show failed: {r.stderr.strip()[:100]}"]})
@@ -206,18 +228,18 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
         _out({"ok": False, "errors": [f"bead status is '{status}', expected 'in_progress'"]})
         return
 
-    # 3. Build close reason
+    # 4. Build close reason
     summary = args.summary or "completed"
     files_str = args.files or ""
     reason = f"SUMMARY: {summary}. FILES: {files_str}. CONTEXT: {args.context_pct}%"
 
-    # 4. Close bead
+    # 5. Close bead
     r = _run(f'{bd} close {args.bead_id} --reason "{reason}" --json')
     if r.returncode != 0:
         _out({"ok": False, "errors": [f"bd close failed: {r.stderr.strip()[:100]}"]})
         return
 
-    # 5. Verify close
+    # 6. Verify close
     r = _run(f"{bd} show {args.bead_id} --json")
     try:
         bead = json.loads(r.stdout)
@@ -237,6 +259,72 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
             return
 
     _out({"ok": True, "status": "closed", "context_pct": args.context_pct})
+
+
+def cmd_claim(args: argparse.Namespace) -> None:
+    """Worker claims a bead — wraps bd update --status in_progress."""
+    rp = _registry_path()
+    bd = _bd(rp)
+    r = _run(f"{bd} update {args.bead_id} --status in_progress --json")
+    if r.returncode != 0:
+        _out({"ok": False, "error": f"bd update failed: {r.stderr.strip()[:100]}"})
+        return
+    try:
+        result = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        result = {}
+    _out({"ok": True, "bead": args.bead_id, "status": "in_progress"})
+
+
+def cmd_block(args: argparse.Namespace) -> None:
+    """Worker marks bead blocked and creates a question task."""
+    rp = _registry_path()
+    bd = _bd(rp)
+
+    # Mark bead blocked
+    r = _run(f"{bd} update {args.bead_id} --status blocked --json")
+    if r.returncode != 0:
+        _out({"ok": False, "error": f"bd update failed: {r.stderr.strip()[:100]}"})
+        return
+
+    # Create question task
+    question = args.question.replace('"', '\\"')
+    context = args.context.replace('"', '\\"') if args.context else question
+    r = _run(f'{bd} create "Question: {question}" -t task -p 1 --deps "{args.bead_id}" -d "{context}" --json')
+    if r.returncode != 0:
+        _out({"ok": False, "error": f"bd create failed: {r.stderr.strip()[:100]}", "bead_blocked": True})
+        return
+
+    try:
+        created = json.loads(r.stdout)
+        q_id = created.get("id", "?")
+    except json.JSONDecodeError:
+        q_id = "?"
+    _out({"ok": True, "bead": args.bead_id, "status": "blocked", "question_bead": q_id})
+
+
+def cmd_discover(args: argparse.Namespace) -> None:
+    """Worker creates a discovered-work bead."""
+    rp = _registry_path()
+    bd = _bd(rp)
+    title = args.title.replace('"', '\\"')
+    desc = args.description.replace('"', '\\"') if args.description else title
+    r = _run(f'{bd} create "Found: {title}" -t task -p 2 --deps "discovered-from:{args.bead_id}" -d "{desc}" --json')
+    if r.returncode != 0:
+        _out({"ok": False, "error": f"bd create failed: {r.stderr.strip()[:100]}"})
+        return
+    try:
+        created = json.loads(r.stdout)
+        new_id = created.get("id", "?")
+    except json.JSONDecodeError:
+        new_id = "?"
+    _out({"ok": True, "bead": new_id, "source": args.bead_id})
+
+
+def cmd_bd_path(args: argparse.Namespace) -> None:
+    """Print resolved bd binary path for diagnostics."""
+    rp = _registry_path()
+    print(_bd(rp))
 
 
 def cmd_notify(args: argparse.Namespace) -> None:
@@ -380,6 +468,12 @@ def cmd_smoke_test(args: argparse.Namespace) -> None:
 def cmd_registry(args: argparse.Namespace) -> None:
     """Query worker registry. Compact output."""
     reg, _ = _load_registry()
+
+    # If --worker-model flag, just print the configured model
+    if getattr(args, "worker_model", False):
+        print(reg.get("worker_model", ""))
+        return
+
     workers = reg.get("workers", {})
 
     if args.status:
@@ -482,6 +576,7 @@ def main() -> None:
     # init
     s = sub.add_parser("init")
     s.add_argument("plan_name")
+    s.add_argument("--worker-model", default="", dest="worker_model")
 
     # dispatch
     s = sub.add_parser("dispatch")
@@ -495,6 +590,25 @@ def main() -> None:
     s.add_argument("--context-pct", type=int, default=0, dest="context_pct")
     s.add_argument("--files", default="")
     s.add_argument("--summary", default="")
+
+    # claim
+    s = sub.add_parser("claim")
+    s.add_argument("bead_id")
+
+    # block
+    s = sub.add_parser("block")
+    s.add_argument("bead_id")
+    s.add_argument("--question", required=True)
+    s.add_argument("--context", default="")
+
+    # discover
+    s = sub.add_parser("discover")
+    s.add_argument("bead_id")
+    s.add_argument("--title", required=True)
+    s.add_argument("--description", default="")
+
+    # bd-path
+    sub.add_parser("bd-path")
 
     # notify
     s = sub.add_parser("notify")
@@ -517,6 +631,7 @@ def main() -> None:
     s = sub.add_parser("registry")
     s.add_argument("--status", default="")
     s.add_argument("--skill", default="")
+    s.add_argument("--worker-model", action="store_true", dest="worker_model")
 
     # retire
     s = sub.add_parser("retire")
@@ -538,6 +653,10 @@ def main() -> None:
         "init": cmd_init,
         "dispatch": cmd_dispatch,
         "worker-close": cmd_worker_close,
+        "claim": cmd_claim,
+        "block": cmd_block,
+        "discover": cmd_discover,
+        "bd-path": cmd_bd_path,
         "notify": cmd_notify,
         "phase-gate": cmd_phase_gate,
         "smoke-test": cmd_smoke_test,

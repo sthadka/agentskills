@@ -38,6 +38,18 @@ Your context window is the most precious resource. Minimize what stays in contex
 
 ## Entry Protocol
 
+### Check Worker Reuse Support
+
+Run `ToolSearch: "SendMessage"`.
+
+**If SendMessage is NOT found:** warn the user immediately:
+> SendMessage is not available. Worker reuse and follow-ups are disabled for this session. All workers will be single-use.
+> To enable worker reuse, restart Claude Code with `--agent-teams` flag: `claude --agent-teams`
+
+Note `sendmessage: false` in `worker-context.md` under Known Gotchas. Skip the reuse decision tree (section 3) for the entire session — always spawn fresh workers.
+
+### Find Work
+
 ```bash
 bd ready --json | jq -c
 ```
@@ -63,7 +75,7 @@ Initialize context and state management:
 ```bash
 python3 ~/.claude/skills/treeflow/tf.py init {plan-name}
 ```
-This creates `.beads/context-{plan-name}/` with `registry.json` and copies `tf.py` to `.beads/tf.py` for workers.
+This creates `.beads/context-{plan-name}/` with `registry.json`, copies `tf.py` to `.beads/tf.py` for workers, and ensures `.beads/` is in `.gitignore` (prevents `git stash -u` from stashing context files).
 
 ## Command Reference
 
@@ -82,15 +94,24 @@ bd close <id> --reason "Done" --suggest-next --json | jq -c '.[0]'
 State management commands — all output compact JSON:
 
 ```bash
-python3 .beads/tf.py init {plan-name}                    # Create context dir + registry
+# Orchestrator commands
+python3 .beads/tf.py init {plan-name} [--worker-model MODEL]  # Create context dir + registry + gitignore
 python3 .beads/tf.py dispatch {worker} {bead} --skill {domain}  # Record dispatch
 python3 .beads/tf.py notify {worker} {bead} --context-pct N --summary "..."  # Record completion
 python3 .beads/tf.py phase-gate {epic-id}                # Check phase complete
 python3 .beads/tf.py smoke-test --build-cmd "cmd" --beads a,b  # Build + wiring check
 python3 .beads/tf.py registry [--status idle] [--skill domain]  # Query workers
+python3 .beads/tf.py registry --worker-model              # Print configured worker model
 python3 .beads/tf.py retire {worker}                     # Mark worker retired
 python3 .beads/tf.py routing --add "pattern:domain:prefix"  # Add routing entry
 python3 .beads/tf.py status                              # One-line overview
+python3 .beads/tf.py bd-path                             # Print resolved bd binary path
+
+# Worker commands (workers call these — no direct bd usage)
+python3 .beads/tf.py claim {bead_id}                     # Claim task (bd update --status in_progress)
+python3 .beads/tf.py block {bead_id} --question "..." [--context "..."]  # Mark blocked + create question
+python3 .beads/tf.py discover {bead_id} --title "..." [--description "..."]  # Create discovered work
+python3 .beads/tf.py worker-close {bead_id} --context-pct N --files f1,f2 --summary "..."  # Validate + close
 ```
 
 ## Markdown File Format
@@ -121,9 +142,10 @@ Follow beadflow's planning process: analyze goal, write plan file, `bd create -f
 
 After planning:
 
-1. Initialize state: `python3 ~/.claude/skills/treeflow/tf.py init {plan-name}`
-2. Write `worker-context.md` from [WORKER-CONTEXT-TEMPLATE.md](WORKER-CONTEXT-TEMPLATE.md) — fill in all sections, skip anything in CLAUDE.md
-3. Add skill routing: `python3 .beads/tf.py routing --add "pattern:domain:prefix"` for each file-domain mapping
+1. Ask the user what model workers should use (e.g., `sonnet`, `haiku`, or inherit orchestrator model). If unspecified, workers inherit the orchestrator's model.
+2. Initialize state: `python3 ~/.claude/skills/treeflow/tf.py init {plan-name} [--worker-model MODEL]`
+3. Write `worker-context.md` from [WORKER-CONTEXT-TEMPLATE.md](WORKER-CONTEXT-TEMPLATE.md) — fill in all sections, skip anything in CLAUDE.md
+4. Add skill routing: `python3 .beads/tf.py routing --add "pattern:domain:prefix"` for each file-domain mapping
 
 ## Orchestration Loop
 
@@ -156,6 +178,8 @@ Group ready tasks by file-conflict safety:
 
 ### 3. Select or Reuse Workers
 
+**If SendMessage is unavailable** (detected in Entry Protocol), skip this section — always spawn fresh workers.
+
 **Worker reuse is the default.** Before spawning any new worker, query idle workers:
 
 ```bash
@@ -187,15 +211,19 @@ Populate with:
 ### 5. Dispatch Workers
 
 **New worker:**
+
+First, check configured worker model: `python3 .beads/tf.py registry --worker-model`
+- If it returns a model name (e.g., `sonnet`), include `model: "{worker_model}"` in the Agent tool call
+- If empty, omit `model:` — workers inherit the orchestrator's model
+
 ```
 Agent tool:
   name: "{worker-name}"
   description: "{worker-name}: {bead-title}"
   prompt: <populated full worker prompt>
   run_in_background: true
-  model: "sonnet"
+  model: "{worker_model}"    ← include only if configured, omit if empty
 ```
-Always pass `model: "sonnet"` to pin workers regardless of orchestrator model.
 
 **Reused worker:**
 ```
@@ -248,10 +276,23 @@ When a `<task-notification>` arrives:
 
 ### 7. Follow Up on Slow Workers
 
-If a worker has been active with no completion for an extended period:
+**Requires SendMessage.** If unavailable (detected in Entry Protocol), skip this section.
 
-- Send follow-up via `SendMessage({to: "worker-name"})` asking for status
-- Worker responds with progress → continue waiting
+Poll workers proactively based on their downstream impact:
+
+- **Workers with 3+ downstream dependents:** poll after ~10 minutes
+- **Workers with 1-2 downstream dependents:** poll after ~15 minutes
+- **Leaf tasks (no dependents):** poll after ~20 minutes
+- Higher priority beads → poll sooner within each tier
+
+How to poll:
+```
+SendMessage:
+  to: "{worker-name}"
+  message: "Status check — what's your progress and estimated completion?"
+```
+
+- Worker responds with progress → continue waiting, reset timer
 - Worker reports stuck → mark bead blocked, create unblocking task
 - **Do NOT kill workers** — let them complete or self-report
 
@@ -308,6 +349,7 @@ Also ensure all context files are saved. (`bd sync` is deprecated — do not use
 **Orchestrator behavior:**
 - Reading/writing project source code (delegate to workers always)
 - Running `git add`/`git commit` on source files (only `.beads/` files)
+- Running `git stash -u` or `git stash --include-untracked` — stashes `.beads/context-*/` files, breaking all state tracking
 - Accumulating full `<task-notification>` results in context (extract summary, discard rest)
 - Editing `registry.json` manually (always use `tf.py`)
 - Spawning workers for trivial tasks (batch them)

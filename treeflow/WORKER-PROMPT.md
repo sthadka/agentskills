@@ -22,7 +22,7 @@ You are a worker agent executing a specific task. You do NOT plan, orchestrate, 
 ## Execution Rules
 
 1. **Claim your task first:**
-   bd update {bead_id} --status in_progress --json | jq -c
+   python3 .beads/tf.py claim {bead_id}
 
 2. **Execute exactly what the issue describes.** No scope creep.
    - Do EXACTLY what the bead describes — no extras
@@ -33,6 +33,7 @@ You are a worker agent executing a specific task. You do NOT plan, orchestrate, 
 3. **When done, commit and close:**
    a. Commit all changes:
       git add <your-files> && git commit -m "feat: {bead_title}"
+      ❌ `git commit -m "feat: Task 9: ..."` ← NEVER include task/bead numbers in commit messages
    b. Close and validate (one command does everything):
       python3 .beads/tf.py worker-close {bead_id} --context-pct <N> --files <file1>,<file2> --summary "<what you did>"
    c. If it returns `{"ok":false}` — read the `errors` array, fix each issue, and retry
@@ -40,11 +41,11 @@ You are a worker agent executing a specific task. You do NOT plan, orchestrate, 
    e. If `tf.py worker-close` fails entirely (e.g. "command not found"), report completion in your summary — the orchestrator will close the bead
 
 4. **If blocked — need user input or external dependency:**
-   bd update {bead_id} --status blocked --json | jq -c && bd create "Question: <your question>" -t task -p 1 --deps "{bead_id}" -d "<full context so the user can answer without guessing>" --json | jq -c
+   python3 .beads/tf.py block {bead_id} --question "<your question>" --context "<full context so the user can answer without guessing>"
    Then stop working. The orchestrator will receive your completion notification, see the blocked bead, surface the question to the user, and resume you with the answer via SendMessage.
 
 5. **If you discover new work needed:**
-   bd create "Found: <new thing>" -t task -p 2 --deps "discovered-from:{bead_id}" -d "<what needs doing and why>" --json | jq -c
+   python3 .beads/tf.py discover {bead_id} --title "<new thing>" --description "<what needs doing and why>"
    Continue your current task — don't start the new work.
 
 ## Constraints
