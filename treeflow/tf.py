@@ -262,17 +262,28 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
 
 
 def cmd_claim(args: argparse.Namespace) -> None:
-    """Worker claims a bead — wraps bd update --status in_progress."""
+    """Worker claims a bead — wraps bd update --status in_progress.
+    Also updates the registry bead reference so the orchestrator sees the current active bead
+    (important for batch workers handling multiple sequential tasks).
+    """
     rp = _registry_path()
     bd = _bd(rp)
     r = _run(f"{bd} update {args.bead_id} --status in_progress --json")
     if r.returncode != 0:
         _out({"ok": False, "error": f"bd update failed: {r.stderr.strip()[:100]}"})
         return
+
+    # Update registry bead reference for this worker (if worker is registered)
     try:
-        result = json.loads(r.stdout)
-    except json.JSONDecodeError:
-        result = {}
+        reg, reg_path = _load_registry(rp)
+        # Find this worker by matching active workers — use the worker name from env if available
+        worker_name = os.environ.get("CLAUDE_AGENT_NAME", "")
+        if worker_name and worker_name in reg.get("workers", {}):
+            reg["workers"][worker_name]["bead"] = args.bead_id
+            _save_registry(reg, reg_path)
+    except (SystemExit, Exception):
+        pass  # Registry update is best-effort — claim still succeeded
+
     _out({"ok": True, "bead": args.bead_id, "status": "in_progress"})
 
 
@@ -528,18 +539,26 @@ def cmd_routing(args: argparse.Namespace) -> None:
 
 
 def cmd_status(args: argparse.Namespace) -> None:
-    """One-line status overview for orchestrator."""
+    """Status overview for orchestrator — designed as recovery surface after context compression."""
     reg, rp = _load_registry()
     bd = _bd(rp)
     workers = reg.get("workers", {})
 
     counts = {"active": 0, "idle": 0, "retired": 0, "failed": 0}
     pending = 0
-    for w in workers.values():
+    active_workers = []
+    for wname, w in workers.items():
         s = w.get("status", "")
         counts[s] = counts.get(s, 0) + 1
         if w.get("notification") == "pending":
             pending += 1
+        if s == "active":
+            active_workers.append({
+                "name": wname,
+                "bead": w.get("bead", "?"),
+                "skill": w.get("skill", "?"),
+                "ctx": w.get("context_pct", 0),
+            })
 
     # Get bead counts
     r = _run(f"{bd} list --json 2>/dev/null")
@@ -559,11 +578,14 @@ def cmd_status(args: argparse.Namespace) -> None:
     except (json.JSONDecodeError, TypeError):
         pass
 
-    _out({
+    result: dict = {
         "w": counts,
         "pending_notif": pending,
         "beads": {"open": open_beads, "blocked": blocked, "closed": closed},
-    })
+    }
+    if active_workers:
+        result["active"] = active_workers
+    _out(result)
 
 
 # ── CLI ──────────────────────────────────────────────────────

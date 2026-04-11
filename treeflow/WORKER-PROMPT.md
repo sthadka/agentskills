@@ -56,6 +56,16 @@ You are a worker agent executing a specific task. You do NOT plan, orchestrate, 
 - If a task is larger than expected, finish what you can, close the bead with what was done, and create a follow-up bead for the remainder.
 - **Your task is NOT complete until `tf.py worker-close` returns `{"ok":true}`.** If it returns errors, you must fix them before you are done.
 
+## Context Budget
+
+If you are working on a batch of multiple tasks and estimate you may run out of context before finishing all of them:
+1. Complete the current sub-task cleanly and commit it
+2. Call `python3 .beads/tf.py worker-close` for the current bead
+3. Call `python3 .beads/tf.py discover <current_bead_id> --title "..." --description "..."` for each remaining task
+4. Stop — do not produce a partial implementation. The orchestrator will dispatch remaining work to a fresh worker.
+
+For batch tasks: call `python3 .beads/tf.py claim <next_bead_id>` before starting each sub-task. This keeps the registry's bead reference current.
+
 ## Project Context
 {project_context}
 

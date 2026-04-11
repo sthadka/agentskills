@@ -151,7 +151,7 @@ Follow beadflow's planning process: analyze goal, write plan file, `bd create -f
 
 After planning:
 
-1. Ask the user what model workers should use (e.g., `sonnet`, `haiku`, or inherit orchestrator model). If unspecified, workers inherit the orchestrator's model.
+1. Ask the user what model workers should use. Valid values are aliases only: `sonnet`, `opus`, `haiku` — full model IDs like `claude-sonnet-4-6` are rejected by the Agent tool. **Best practice: omit model entirely** (workers inherit the orchestrator's exact model). Only set `--worker-model` when the user wants a *different* model tier.
 2. Initialize state: `python3 ~/.claude/skills/treeflow/tf.py init {plan-name} [--worker-model MODEL]`
 3. Write `worker-context.md` from [WORKER-CONTEXT-TEMPLATE.md](WORKER-CONTEXT-TEMPLATE.md) — fill in all sections, skip anything in CLAUDE.md
 4. Add skill routing: `python3 .beads/tf.py routing --add "pattern:domain:prefix"` for each file-domain mapping
@@ -166,10 +166,12 @@ Run continuously until all beads are closed or user input is needed.
 bd ready --json | jq -c
 ```
 
-- No ready issues → assess: `bd blocked --json | jq -c && bd list --status=open --json | jq -c`
+Filter out epics and orchestration beads — only dispatch task-type beads to workers. Epics appear in `bd ready` but are never dispatched.
+
+- No ready tasks → assess: `bd blocked --json | jq -c && bd list --status=open --json | jq -c`
   - Blocked issues → analyze and attempt to resolve
   - No open issues → work complete, report to user
-- Ready issues → proceed to step 2
+- Ready tasks → proceed to step 2
 
 ### 2. Assess Parallelism
 
@@ -203,6 +205,8 @@ Match idle workers to ready tasks by skill domain. Decision rule:
 
 **How reuse works:** `SendMessage` to a stopped agent auto-resumes it with full conversation context. No orientation overhead.
 
+**When NOT to reuse:** Reuse is most valuable for follow-up tasks discovered *after* a worker finishes. If tasks are known upfront, batch them in the initial worker prompt instead — this avoids the SendMessage round-trip and gives the worker better upfront context.
+
 ### 4. Construct Worker Prompt
 
 Read [WORKER-PROMPT.md](WORKER-PROMPT.md) for the template.
@@ -222,8 +226,9 @@ Populate with:
 **New worker:**
 
 First, check configured worker model: `python3 .beads/tf.py registry --worker-model`
-- If it returns a model name (e.g., `sonnet`), include `model: "{worker_model}"` in the Agent tool call
+- If it returns a model name, include `model: "{worker_model}"` in the Agent tool call
 - If empty, omit `model:` — workers inherit the orchestrator's model
+- **Only aliases work:** `"sonnet"`, `"opus"`, `"haiku"`. Full model IDs (e.g., `"claude-sonnet-4-6"`) are rejected by the Agent tool.
 
 ```
 Agent tool:
@@ -337,6 +342,16 @@ git remote -v | grep -q push && git push || echo "No remote configured, skipping
 
 Also ensure all context files are saved. (`bd sync` is deprecated — do not use.)
 
+## Context Compression Recovery
+
+After the system compresses your context, your in-memory state is lost. **Immediately run:**
+
+```bash
+python3 .beads/tf.py status && python3 .beads/tf.py registry
+```
+
+This rebuilds your picture of active workers, their current beads, pending notifications, and overall progress. The registry is file-based and survives compression — trust it over any summary the system provides.
+
 ## Error Handling
 
 **`bd` command fails with "not found":** Run `bd doctor`, inform user.
@@ -344,6 +359,8 @@ Also ensure all context files are saved. (`bd sync` is deprecated — do not use
 **"no repository found":** Run `bd init` if user wants to start tracking.
 
 **Worker spawn fails:** Retry once. If still fails, notify user.
+
+**Duplicate dispatch (same worker name used twice):** The second spawn creates a new agent — the first is orphaned. Always check `tf.py registry` before dispatching to avoid name collisions.
 
 **SendMessage to dead worker:** If the agent no longer exists, spawn fresh.
 
