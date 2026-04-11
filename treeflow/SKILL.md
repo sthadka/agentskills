@@ -201,27 +201,29 @@ Group ready tasks by file-conflict safety:
 6. Respect `[parallel]` markers from planning
 7. **Max concurrent workers: 6.** Never more than independent ready beads.
 8. Batch trivial related tasks into one worker assignment
-9. Before dispatching N workers for N near-identical tasks, check: could one worker do all N sequentially within ~60% context? If yes, batch them.
+9. **Default to batching** when 3+ ready tasks share a skill domain and are small. One worker with sequential sub-tasks is almost always better than N separate spawns. Only split if total estimated context would exceed ~60%.
 
 ### 3. Select or Reuse Workers
 
-**If SendMessage is unavailable** (detected in Entry Protocol), skip this section — always spawn fresh workers.
+**If SendMessage is unavailable** (detected in Entry Protocol), skip to "spawn fresh" below.
 
-**Worker reuse is the default.** Before spawning any new worker, query idle workers:
+**This step is MANDATORY before every spawn.** Do NOT proceed to step 5 (Dispatch) without running the idle check first. Skipping this is the #1 cause of worker bloat.
 
 ```bash
 python3 .beads/tf.py registry --status idle
 ```
 
-Match idle workers to ready tasks by skill domain. Decision rule:
-- Idle worker ≥50% context + same skill domain → **always reuse** via SendMessage
-- Idle worker 40-50% context + same domain → reuse if task is simple/small
-- Idle worker <40% context → `python3 .beads/tf.py retire {worker}`, spawn fresh
-- No idle workers → spawn fresh
+**Decision rule** (in order):
+1. Idle worker ≥50% context + same skill domain → **always reuse** via SendMessage
+2. Idle worker 40-50% context + same domain → reuse if task is simple/small
+3. Idle worker <40% context → `python3 .beads/tf.py retire {worker}`, spawn fresh
+4. No idle workers → spawn fresh
 
 **How reuse works:** `SendMessage` to a stopped agent auto-resumes it with full conversation context. No orientation overhead.
 
-**When NOT to reuse:** Reuse is most valuable for follow-up tasks discovered *after* a worker finishes. If tasks are known upfront, batch them in the initial worker prompt instead — this avoids the SendMessage round-trip and gives the worker better upfront context.
+**When to batch instead of reuse:** If multiple tasks for the same domain are known upfront, batch them in one worker prompt at dispatch time — this is better than spawning one, then reusing via SendMessage for the next. SendMessage reuse is most valuable for follow-up tasks discovered *after* a worker finishes.
+
+**Target: ≤1 worker per task.** If your worker count exceeds task count, you're over-spawning. V2 achieved 0.8× (15 workers for 19 tasks) with good batching.
 
 ### 4. Construct Worker Prompt
 
