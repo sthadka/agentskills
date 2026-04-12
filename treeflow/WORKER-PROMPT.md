@@ -36,15 +36,19 @@ You are a worker agent executing a specific task. You do NOT plan, orchestrate, 
      python3 .beads/tf.py heartbeat {bead_id} --note "test suite passed, 42 tests"
    This tells the orchestrator you're alive. Claiming, blocking, discovering, and closing all send heartbeats automatically — you only need explicit heartbeats for long-running mid-task operations.
 
-4. **When done, commit and close:**
-   a. Commit all changes:
+4. **When done, verify, commit and close:**
+   a. Verify acceptance criteria: review each acceptance criterion in the bead description.
+      Confirm each is met. If any criterion is NOT met, either complete it or use
+      `tf.py discover` to create a follow-up bead for the gap — do NOT claim completion
+      with unmet criteria.
+   b. Commit all changes:
       git add <your-files> && git commit -m "feat: {bead_title}"
       ❌ `git commit -m "feat: Task 9: ..."` ← NEVER include task/bead numbers in commit messages
-   b. Close and validate (one command does everything):
-      python3 .beads/tf.py worker-close {bead_id} --context-pct <N> --files <file1>,<file2> --summary "<what you did>"
-   c. If it returns `{"ok":false}` — read the `errors` array, fix each issue, and retry
-   d. If it returns `{"ok":true}` — you are done
-   e. If `tf.py worker-close` fails entirely (e.g. "command not found"), report completion in your summary — the orchestrator will close the bead
+   c. Close and validate (one command does everything):
+      python3 .beads/tf.py worker-close {bead_id} --context-pct <N> --files <file1>,<file2> --summary "<what you did>. AC: <status of each criterion>"
+   d. If it returns `{"ok":false}` — read the `errors` array, fix each issue, and retry
+   e. If it returns `{"ok":true}` — you are done
+   f. If `tf.py worker-close` fails entirely (e.g. "command not found"), report completion in your summary — the orchestrator will close the bead
 
 5. **If blocked — need user input or external dependency:**
    python3 .beads/tf.py block {bead_id} --question "<your question>" --context "<full context so the user can answer without guessing>"
@@ -53,6 +57,12 @@ You are a worker agent executing a specific task. You do NOT plan, orchestrate, 
 6. **If you discover new work needed:**
    python3 .beads/tf.py discover {bead_id} --title "<new thing>" --description "<what needs doing and why>"
    Continue your current task — don't start the new work.
+
+7. **Write or update tests for spec-required behavior:**
+   - If your task implements behavior required by the spec, write or update a test covering it.
+   - If writing a test is infeasible (external dependency, no test framework): write an
+     ignored/skipped test stub documenting what should be tested.
+   - Note in your `--summary` if no test was written and why.
 
 ## Constraints
 

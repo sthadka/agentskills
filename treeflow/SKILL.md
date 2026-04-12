@@ -162,6 +162,10 @@ Follow beadflow's planning process: analyze goal, write plan file, `bd create -f
 6. **Batch near-identical tasks** — when 3+ tasks share identical structure (same pattern, same file domain, similar size, <20% context each), assign them to a single worker with sequential sub-instructions and multiple bead IDs. This avoids wasting ~80% context per single-task worker spawn.
 7. **Reference identifiers, not line numbers** — use function/struct/class names in task descriptions (e.g., "update `update_session()` in `src/store.rs`"). Line numbers drift as parallel workers modify files.
 8. **Limit batch diversity** — 4+ domain-diverse tasks in one worker risks context exhaustion. Prefer 2-3 tasks per batch, all in the same domain. File-adjacent but conceptually distinct tasks can go to separate workers even if serialized.
+9. **Acceptance criteria** — every task must include acceptance criteria stating observable, testable behavior from the spec's perspective. "Function exists" is not acceptance; "function is called in the pipeline and produces observable result" is.
+10. **Cross-command features** — if a spec requirement spans multiple commands or modules, create one task per command/module with its own acceptance criteria. Never combine — cross-command tasks reliably produce one implementation and one omission.
+11. **Pre-surface technical obstacles** — when planning identifies technical friction (API shape mismatch, library constraints, ordering dependencies), write the obstacle and its resolution into the task description. Workers discovering obstacles mid-implementation defer; workers given the solution upfront implement it.
+12. **Spec-section references** — each task should cite the spec section it implements (e.g., `Spec: spec.md §3 — VAD preprocessing`). After all tasks are created, verify coverage: every spec section should map to at least one task.
 
 **Good treeflow task description:**
 > "Create `internal/workflow/oom_report.go`: OOMReportWorkflow(ctx) error — runs weekly. Files: `internal/workflow/oom_report.go`, `internal/workflow/oom_report_test.go`. [Go implementation]"
@@ -176,6 +180,7 @@ After planning:
    The `--bd-path` flag stores the absolute path in `registry.json` so workers can find `bd` without needing the orchestrator's shell PATH.
 3. Write `worker-context.md` from [WORKER-CONTEXT-TEMPLATE.md](WORKER-CONTEXT-TEMPLATE.md) — fill in all sections, skip anything in CLAUDE.md
 4. Add skill routing: `python3 .beads/tf.py routing --add "pattern:domain:prefix"` for each file-domain mapping
+5. Copy `## Cross-worker Invariants` from `plan.md` into `worker-context.md` and `CLAUDE.md`. If the plan has no invariants section, prompt the user: "Are there cross-cutting contracts that every worker must know? (e.g., 'all DB writes must update the FTS index', 'all file writes must be atomic')"
 
 ## Orchestration Loop
 
@@ -233,6 +238,8 @@ This single command handles all housekeeping:
 **When to batch instead of reuse:** If multiple tasks for the same domain are known upfront, batch them in one worker prompt at dispatch time — this avoids the SendMessage round-trip. Reuse is most valuable for follow-up tasks discovered *after* a worker finishes.
 
 **Target: ≤1 worker per task.** If your worker count exceeds task count, you're over-spawning. V2 achieved 0.8× (15 workers for 19 tasks) with good batching.
+
+**Worker reuse enforcement:** after `tf.py sync`, if idle workers exceed `ready_tasks × 0.5`, force reuse over fresh spawns. Only spawn fresh if no idle worker has a matching skill domain.
 
 ### 4. Construct Worker Prompt
 
@@ -306,13 +313,14 @@ When a `<task-notification>` arrives:
    Only proceed if `pass: true`. If `pass: false`, wait for blocking items to resolve.
 
    On gate pass:
-   a. Write `phase-{N}.md` — summarize what was built, files, interfaces, gotchas
-   b. Run smoke test:
+   a. **Spec-trace verification** — run targeted grep checks against spec requirements for the completed phase. Verify that key identifiers exist at integration points (function calls in the pipeline, persistence calls, features present in all required commands). If missing or only present as dead code, create a fix task before proceeding.
+   b. Write `phase-{N}.md` — summarize what was built, files, interfaces, gotchas
+   c. Run smoke test:
       ```bash
       python3 .beads/tf.py smoke-test --build-cmd "{build}" --beads {bead1},{bead2}
       ```
-   c. If `build: fail` or any `exists: false` in wiring → dispatch integration worker to fix
-   d. If clean → proceed to next phase
+   d. If `build: fail` or any `exists: false` in wiring → dispatch integration worker to fix
+   e. If clean → proceed to next phase
 9. Loop back to step 2
 
 ### 7. Detect and Handle Stalled Workers

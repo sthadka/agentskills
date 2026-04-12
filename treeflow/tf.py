@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -258,6 +259,7 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
     rp = _registry_path()
     bd = _bd(rp)
     errors = []
+    warnings = []
 
     # 1. Check uncommitted changes in target files
     if args.files:
@@ -282,6 +284,15 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
     if errors:
         _out({"ok": False, "errors": errors, "hint": "commit your changes first"})
         return
+
+    # Scan for dead-code markers (warnings only — does not block close)
+    if args.files:
+        pattern = r"#\[allow\(dead_code\)\]|# noqa: F841|// @ts-ignore|\bTODO\b|\bFIXME\b|\bHACK\b"
+        file_args = " ".join(shlex.quote(f) for f in files)
+        r = _run(f"grep -nE '{pattern}' {file_args}")
+        if r.stdout.strip():
+            for line in r.stdout.strip().split("\n")[:10]:
+                warnings.append(f"dead-code marker: {line.strip()}")
 
     # 2. Check last commit message for task/bead number anti-pattern
     r = _run("git log -1 --pretty=%s")
@@ -350,7 +361,10 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
     except Exception:
         pass
 
-    _out({"ok": True, "status": "closed", "context_pct": args.context_pct})
+    result: dict = {"ok": True, "status": "closed", "context_pct": args.context_pct}
+    if warnings:
+        result["warnings"] = warnings
+    _out(result)
 
 
 def cmd_claim(args: argparse.Namespace) -> None:

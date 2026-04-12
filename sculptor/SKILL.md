@@ -159,6 +159,8 @@ If not, create the plan internally in a tree format. Create sub tasks where it m
 
 See [PLAN-TEMPLATE.md](PLAN-TEMPLATE.md) for the full template and quality rules.
 
+When creating the plan, ensure every task has acceptance criteria, cross-command features are exploded into separate tasks, and a `## Cross-worker Invariants` section captures contracts that span multiple workers. See [PLAN-TEMPLATE.md](PLAN-TEMPLATE.md) Quality Rules for the full checklist.
+
 ## Phase 6: FINALIZE
 
 When the user approves the document:

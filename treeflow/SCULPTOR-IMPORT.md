@@ -59,6 +59,8 @@ The sculptor plan often has terse task names. Enrich them using the spec:
 - If `appendix-*.md` has sample payloads relevant to a task → reference the appendix file path
 - If `idea.md` explains the reasoning behind an approach → add a one-line "Context:" note
 
+- **Acceptance criteria are required.** If the plan has `- Acceptance:` lines, map them to `### Acceptance Criteria` in the bead. If none exist, derive criteria from `spec.md` before creating the bead. A bead without acceptance criteria should not be created.
+
 Keep descriptions self-contained enough that an agent can execute without re-reading all sculptor artifacts.
 
 ## Conversion Steps
@@ -106,3 +108,11 @@ bd ready --json
 ```
 
 Setup task should be the first (or only) ready issue.
+
+### 5. Populate cross-worker invariants
+
+If `plan.md` contains a `## Cross-worker Invariants` section:
+1. Append to `worker-context.md` under `## Cross-worker Invariants`
+2. Append to `CLAUDE.md` under `## Invariants` (create heading if absent)
+
+If the plan has no invariants section, prompt the user: "Are there cross-cutting contracts that every worker must know? (e.g., 'all DB writes must update the FTS index', 'all file writes must be atomic')"
