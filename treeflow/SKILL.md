@@ -117,11 +117,12 @@ State management commands — all output compact JSON:
 ```bash
 # Orchestrator commands
 python3 .beads/tf.py init {plan-name} --bd-path $(which bd) [--worker-model MODEL]  # Create context dir + registry + gitignore
-python3 .beads/tf.py dispatch {worker} {bead} --skill {domain}  # Record dispatch
+python3 .beads/tf.py dispatch {worker} {bead} --skill {domain} [--output-file path]  # Record dispatch
 python3 .beads/tf.py notify {worker} {bead} --context-pct N --summary "..."  # Record completion
 python3 .beads/tf.py phase-gate {epic-id}                # Check phase complete
 python3 .beads/tf.py smoke-test --build-cmd "cmd" --beads a,b  # Build + wiring check
-python3 .beads/tf.py sync                                      # Pre-dispatch: retire stale, return reusable workers by skill
+python3 .beads/tf.py sync                                      # Pre-dispatch: retire stale, flag stalled, return reusable workers
+python3 .beads/tf.py stalled [--threshold-mins N]              # List stalled active workers (default 20 min)
 python3 .beads/tf.py registry [--status idle] [--skill domain]  # Query workers
 python3 .beads/tf.py registry --worker-model              # Print configured worker model
 python3 .beads/tf.py retire {worker}                     # Mark worker retired
@@ -130,9 +131,10 @@ python3 .beads/tf.py status                              # One-line overview
 python3 .beads/tf.py bd-path                             # Print resolved bd binary path
 
 # Worker commands (workers call these — no direct bd usage)
-python3 .beads/tf.py claim {bead_id}                     # Claim task (bd update --status in_progress)
+python3 .beads/tf.py claim {bead_id} [--expected-mins N] # Claim task (with optional time estimate for stall detection)
 python3 .beads/tf.py block {bead_id} --question "..." [--context "..."]  # Mark blocked + create question
 python3 .beads/tf.py discover {bead_id} --title "..." [--description "..."]  # Create discovered work
+python3 .beads/tf.py heartbeat {bead_id} [--note "..."]  # Explicit heartbeat for long-running ops
 python3 .beads/tf.py worker-close {bead_id} --context-pct N --files f1,f2 --summary "..."  # Validate + close
 ```
 
@@ -158,6 +160,8 @@ Follow beadflow's planning process: analyze goal, write plan file, `bd create -f
 4. **Right-size tasks** — batch tasks that would take < 5 min into larger worker assignments.
 5. **Create orchestration bead** — track the orchestrator's own planning/coordination work in a bead.
 6. **Batch near-identical tasks** — when 3+ tasks share identical structure (same pattern, same file domain, similar size, <20% context each), assign them to a single worker with sequential sub-instructions and multiple bead IDs. This avoids wasting ~80% context per single-task worker spawn.
+7. **Reference identifiers, not line numbers** — use function/struct/class names in task descriptions (e.g., "update `update_session()` in `src/store.rs`"). Line numbers drift as parallel workers modify files.
+8. **Limit batch diversity** — 4+ domain-diverse tasks in one worker risks context exhaustion. Prefer 2-3 tasks per batch, all in the same domain. File-adjacent but conceptually distinct tasks can go to separate workers even if serialized.
 
 **Good treeflow task description:**
 > "Create `internal/workflow/oom_report.go`: OOMReportWorkflow(ctx) error — runs weekly. Files: `internal/workflow/oom_report.go`, `internal/workflow/oom_report_test.go`. [Go implementation]"
@@ -215,6 +219,8 @@ python3 .beads/tf.py sync
 This single command handles all housekeeping:
 - Auto-retires workers at ≥90% context (can't reuse meaningfully)
 - Auto-retires workers at <40% context (not worth reuse overhead)
+- Flags active workers as `stalled` if no heartbeat for >20 min
+- Flags idle workers as `stale` if idle >30 min (likely from a prior session or laptop sleep)
 - Returns `available` workers grouped by skill domain, ready for reuse
 
 **Decision rule** based on sync output:
@@ -271,7 +277,7 @@ Dispatch multiple independent workers in a **single message** for parallelism.
 
 **After each dispatch**, record in registry:
 ```bash
-python3 .beads/tf.py dispatch {worker-name} {bead-id} --skill {domain}
+python3 .beads/tf.py dispatch {worker-name} {bead-id} --skill {domain} [--output-file {path}]
 ```
 
 ### 6. Process Completions
@@ -309,27 +315,33 @@ When a `<task-notification>` arrives:
    d. If clean → proceed to next phase
 9. Loop back to step 2
 
-### 7. Follow Up on Slow Workers
+### 7. Detect and Handle Stalled Workers
 
-**Requires SendMessage.** If unavailable (detected in Entry Protocol), skip this section.
+Workers send heartbeats automatically when they call `tf.py` commands (claim, block, discover, worker-close). For long operations, workers call `tf.py heartbeat` explicitly. A worker with no heartbeat for >20 minutes is flagged as stalled.
 
-Poll workers proactively based on their downstream impact:
-
-- **Workers with 3+ downstream dependents:** poll after ~10 minutes
-- **Workers with 1-2 downstream dependents:** poll after ~15 minutes
-- **Leaf tasks (no dependents):** poll after ~20 minutes
-- Higher priority beads → poll sooner within each tier
-
-How to poll:
-```
-SendMessage:
-  to: "{worker-name}"
-  message: "Status check — what's your progress and estimated completion?"
+**Check for stalls periodically during the loop:**
+```bash
+python3 .beads/tf.py stalled
 ```
 
-- Worker responds with progress → continue waiting, reset timer
-- Worker reports stuck → mark bead blocked, create unblocking task
-- **Do NOT kill workers** — let them complete or self-report
+Or use `tf.py sync` / `tf.py status` — both include stalled workers in their output.
+
+**When stalled workers are reported:**
+1. If SendMessage is available, send a status check first
+2. If no response after ~5 min, or SendMessage is unavailable: retire the worker, reopen the bead, spawn fresh
+3. If the task has stalled twice, surface to user — do NOT auto-retry indefinitely
+
+**Cross-session idle workers:** `tf.py sync` flags idle workers with `"stale": true` if idle >30 min (e.g., from a prior session or laptop sleep). **Do NOT reuse stale workers** via SendMessage — retire and spawn fresh. Same-session idle workers (idle <30 min) are safe to reuse.
+
+**Post-SendMessage claim check (mandatory for all reuse dispatches):**
+After any SendMessage reuse, verify the bead transitions from `open` to `in_progress` within ~5 min:
+```bash
+bd show <bead_id> --json | jq -c '.[0].status'
+# "open"        → worker stalled — retire + spawn fresh
+# "in_progress" → worker is healthy, continue waiting
+```
+
+**Do NOT kill workers** — let them complete or self-report. The stall detection is advisory; the orchestrator decides whether to wait longer or retire.
 
 ## Worker-to-User Communication
 

@@ -10,7 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REGISTRY_FILE = "registry.json"
@@ -113,12 +113,75 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _parse_ts(s: str) -> datetime:
+    """Parse an ISO timestamp string (as produced by _now()) into a tz-aware datetime."""
+    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
 def _run(cmd: str, check: bool = False) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, shell=True, capture_output=True, text=True, check=check)
 
 
 def _out(obj: dict) -> None:
     print(json.dumps(obj, separators=(",", ":")))
+
+
+def _update_heartbeat(reg: dict, rp: Path, note: str, worker_name: str | None = None) -> None:
+    """Update heartbeat for a worker. Called implicitly by worker commands."""
+    if not worker_name:
+        worker_name = os.environ.get("CLAUDE_AGENT_NAME", "")
+    if not worker_name or worker_name not in reg.get("workers", {}):
+        return
+    w = reg["workers"][worker_name]
+    now = _now()
+    w["last_heartbeat"] = now
+    w["last_heartbeat_note"] = note
+    if "heartbeat_history" not in w:
+        w["heartbeat_history"] = []
+    w["heartbeat_history"].append({"ts": now, "note": note})
+    if len(w["heartbeat_history"]) > 20:
+        w["heartbeat_history"] = w["heartbeat_history"][-20:]
+    _save_registry(reg, rp)
+
+
+def _is_stalled(worker: dict, threshold_mins: int = 20) -> bool:
+    """Check if an active worker has gone silent beyond the threshold."""
+    if worker.get("status") != "active":
+        return False
+    last_hb = worker.get("last_heartbeat") or worker.get("dispatched_at")
+    if not last_hb:
+        return False
+    now = datetime.now(timezone.utc)
+    # If worker has a deadline, check both deadline AND silence — a worker past deadline
+    # but still heartbeating is slow, not stalled.
+    expected = worker.get("expected_completion_at")
+    if expected and now > _parse_ts(expected):
+        last_dt = _parse_ts(last_hb)
+        elapsed = (now - last_dt).total_seconds() / 60
+        return elapsed > threshold_mins
+    elif expected:
+        return False
+    last_dt = _parse_ts(last_hb)
+    elapsed = (now - last_dt).total_seconds() / 60
+    return elapsed > threshold_mins
+
+
+def _idle_minutes(worker: dict) -> float | None:
+    """Minutes since a worker became idle. None if not idle."""
+    idle_since = worker.get("idle_since")
+    if not idle_since or worker.get("status") != "idle":
+        return None
+    return (datetime.now(timezone.utc) - _parse_ts(idle_since)).total_seconds() / 60
+
+
+def _stalled_info(wname: str, w: dict) -> dict:
+    """Build a compact stalled-worker dict for output."""
+    return {
+        "worker": wname,
+        "bead": w.get("bead", "?"),
+        "last_hb": w.get("last_heartbeat", w.get("dispatched_at", "?")),
+        "note": w.get("last_heartbeat_note", ""),
+    }
 
 
 # ── Subcommands ──────────────────────────────────────────────
@@ -141,6 +204,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         "plan_name": args.plan_name,
         "bd_path": bd_path,
         "worker_model": worker_model,
+        "settings": {"stall_threshold_mins": 20},
         "workers": {},
         "routing": {},
         "phases": {},
@@ -180,6 +244,10 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
         "bead": args.bead_id,
         "notification": "pending",
         "dispatched_at": now,
+        "last_heartbeat": now,
+        "last_heartbeat_note": None,
+        "heartbeat_history": [],
+        "output_file": getattr(args, "output_file", "") or "",
     }
     _save_registry(reg, rp)
     _out({"ok": True, "worker": args.worker, "bead": args.bead_id})
@@ -222,7 +290,7 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
         _out({"ok": False, "errors": [f"commit message contains task number: '{msg}'. Amend to remove 'Task N:' prefix"], "hint": "git commit --amend -m 'feat: <description without task number>'"})
         return
 
-    # 3. Check bead is in_progress (was step 2)
+    # 3. Check bead is in_progress
     r = _run(f"{bd} show {args.bead_id} --json")
     if r.returncode != 0:
         _out({"ok": False, "errors": [f"bd show failed: {r.stderr.strip()[:100]}"]})
@@ -276,6 +344,12 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
             _out({"ok": False, "errors": ["bead still not closed after retry"]})
             return
 
+    try:
+        reg, reg_path = _load_registry(rp)
+        _update_heartbeat(reg, reg_path, f"closed {args.bead_id}")
+    except Exception:
+        pass
+
     _out({"ok": True, "status": "closed", "context_pct": args.context_pct})
 
 
@@ -291,16 +365,19 @@ def cmd_claim(args: argparse.Namespace) -> None:
         _out({"ok": False, "error": f"bd update failed: {r.stderr.strip()[:100]}"})
         return
 
-    # Update registry bead reference for this worker (if worker is registered)
+    # Update registry: bead reference + heartbeat
     try:
         reg, reg_path = _load_registry(rp)
-        # Find this worker by matching active workers — use the worker name from env if available
         worker_name = os.environ.get("CLAUDE_AGENT_NAME", "")
         if worker_name and worker_name in reg.get("workers", {}):
             reg["workers"][worker_name]["bead"] = args.bead_id
-            _save_registry(reg, reg_path)
-    except (SystemExit, Exception):
-        pass  # Registry update is best-effort — claim still succeeded
+            expected_mins = getattr(args, "expected_mins", 0)
+            if expected_mins:
+                deadline = datetime.now(timezone.utc) + timedelta(minutes=expected_mins)
+                reg["workers"][worker_name]["expected_completion_at"] = deadline.strftime("%Y-%m-%dT%H:%M:%SZ")
+            _update_heartbeat(reg, reg_path, f"claimed {args.bead_id}", worker_name)
+    except Exception:
+        pass  # Best-effort — claim still succeeded
 
     _out({"ok": True, "bead": args.bead_id, "status": "in_progress"})
 
@@ -329,6 +406,13 @@ def cmd_block(args: argparse.Namespace) -> None:
         q_id = created.get("id", "?")
     except json.JSONDecodeError:
         q_id = "?"
+
+    try:
+        reg, reg_path = _load_registry(rp)
+        _update_heartbeat(reg, reg_path, f"blocked — {args.question[:50]}")
+    except Exception:
+        pass
+
     _out({"ok": True, "bead": args.bead_id, "status": "blocked", "question_bead": q_id})
 
 
@@ -347,7 +431,44 @@ def cmd_discover(args: argparse.Namespace) -> None:
         new_id = created.get("id", "?")
     except json.JSONDecodeError:
         new_id = "?"
+
+    try:
+        reg, reg_path = _load_registry(rp)
+        _update_heartbeat(reg, reg_path, "discovered follow-up")
+    except Exception:
+        pass
+
     _out({"ok": True, "bead": new_id, "source": args.bead_id})
+
+
+def cmd_heartbeat(args: argparse.Namespace) -> None:
+    """Explicit heartbeat for long-running operations."""
+    reg, rp = _load_registry()
+    worker_name = os.environ.get("CLAUDE_AGENT_NAME", "")
+    if not worker_name:
+        _out({"ok": False, "error": "CLAUDE_AGENT_NAME not set"})
+        return
+    if worker_name not in reg.get("workers", {}):
+        _out({"ok": False, "error": f"worker '{worker_name}' not in registry"})
+        return
+    note = args.note or f"heartbeat on {args.bead_id}"
+    _update_heartbeat(reg, rp, note, worker_name)
+    _out({"ok": True, "worker": worker_name, "note": note})
+
+
+def cmd_stalled(args: argparse.Namespace) -> None:
+    """Return list of stalled active workers."""
+    reg, _ = _load_registry()
+    threshold = args.threshold_mins
+    if not threshold:
+        threshold = reg.get("settings", {}).get("stall_threshold_mins", 20)
+    stalled = []
+    for wname, w in reg.get("workers", {}).items():
+        if _is_stalled(w, threshold):
+            info = _stalled_info(wname, w)
+            info["skill"] = w.get("skill", "?")
+            stalled.append(info)
+    _out({"stalled": stalled, "threshold_mins": threshold})
 
 
 def cmd_bd_path(args: argparse.Namespace) -> None:
@@ -529,6 +650,12 @@ def cmd_registry(args: argparse.Namespace) -> None:
         }
         if v.get("notification") == "pending":
             out[k]["notif"] = "pending"
+        if v.get("last_heartbeat"):
+            out[k]["hb"] = v["last_heartbeat"]
+        if v.get("last_heartbeat_note"):
+            out[k]["hb_note"] = v["last_heartbeat_note"]
+        if v.get("output_file"):
+            out[k]["out"] = v["output_file"]
 
     _out(out)
 
@@ -575,9 +702,11 @@ def cmd_sync(args: argparse.Namespace) -> None:
     reg, rp = _load_registry()
     now = _now()
     retired = []
+    stalled = []
     available = {}  # skill -> [{name, ctx, bead}]
     total_spawned = 0
     total_active = 0
+    threshold = reg.get("settings", {}).get("stall_threshold_mins", 20)
 
     for wname, w in reg["workers"].items():
         total_spawned += 1
@@ -585,6 +714,8 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
         if s == "active":
             total_active += 1
+            if _is_stalled(w, threshold):
+                stalled.append(_stalled_info(wname, w))
             continue
 
         if s != "idle":
@@ -599,20 +730,28 @@ def cmd_sync(args: argparse.Namespace) -> None:
             retired.append({"worker": wname, "ctx": ctx, "reason": "high_ctx" if ctx >= 90 else "low_ctx"})
             continue
 
-        # Available for reuse
+        # Available for reuse — flag stale idle workers
         skill = w.get("skill", "unknown")
         if skill not in available:
             available[skill] = []
-        available[skill].append({"name": wname, "ctx": ctx, "bead": w.get("bead", "")})
+        entry: dict = {"name": wname, "ctx": ctx, "bead": w.get("bead", "")}
+        idle_min = _idle_minutes(w)
+        if idle_min is not None and idle_min > 30:
+            entry["stale"] = True
+            entry["idle_min"] = round(idle_min)
+        available[skill].append(entry)
 
     if retired:
         _save_registry(reg, rp)
 
-    _out({
+    result: dict = {
         "available": available,
         "retired_now": retired,
         "counts": {"total": total_spawned, "active": total_active, "idle": len([v for s in available.values() for v in s]), "retired": len(retired)},
-    })
+    }
+    if stalled:
+        result["stalled"] = stalled
+    _out(result)
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -621,9 +760,11 @@ def cmd_status(args: argparse.Namespace) -> None:
     bd = _bd(rp)
     workers = reg.get("workers", {})
 
+    threshold = reg.get("settings", {}).get("stall_threshold_mins", 20)
     counts = {"active": 0, "idle": 0, "retired": 0, "failed": 0}
     pending_from = []
     active_workers = []
+    stalled_workers = []
     for wname, w in workers.items():
         s = w.get("status", "")
         counts[s] = counts.get(s, 0) + 1
@@ -636,6 +777,8 @@ def cmd_status(args: argparse.Namespace) -> None:
                 "skill": w.get("skill", "?"),
                 "ctx": w.get("context_pct", 0),
             })
+            if _is_stalled(w, threshold):
+                stalled_workers.append(_stalled_info(wname, w))
 
     # Get bead counts
     r = _run(f"{bd} list --json 2>/dev/null")
@@ -661,6 +804,8 @@ def cmd_status(args: argparse.Namespace) -> None:
     }
     if active_workers:
         result["active"] = active_workers
+    if stalled_workers:
+        result["stalled"] = stalled_workers
     if pending_from:
         result["pending_notif"] = pending_from
     _out(result)
@@ -684,6 +829,7 @@ def main() -> None:
     s.add_argument("worker")
     s.add_argument("bead_id")
     s.add_argument("--skill", required=True)
+    s.add_argument("--output-file", default="", dest="output_file")
 
     # worker-close
     s = sub.add_parser("worker-close")
@@ -695,6 +841,7 @@ def main() -> None:
     # claim
     s = sub.add_parser("claim")
     s.add_argument("bead_id")
+    s.add_argument("--expected-mins", type=int, default=0, dest="expected_mins")
 
     # block
     s = sub.add_parser("block")
@@ -707,6 +854,15 @@ def main() -> None:
     s.add_argument("bead_id")
     s.add_argument("--title", required=True)
     s.add_argument("--description", default="")
+
+    # heartbeat
+    s = sub.add_parser("heartbeat")
+    s.add_argument("bead_id")
+    s.add_argument("--note", default="")
+
+    # stalled
+    s = sub.add_parser("stalled")
+    s.add_argument("--threshold-mins", type=int, default=0, dest="threshold_mins")
 
     # bd-path
     sub.add_parser("bd-path")
@@ -760,6 +916,8 @@ def main() -> None:
         "claim": cmd_claim,
         "block": cmd_block,
         "discover": cmd_discover,
+        "heartbeat": cmd_heartbeat,
+        "stalled": cmd_stalled,
         "bd-path": cmd_bd_path,
         "notify": cmd_notify,
         "phase-gate": cmd_phase_gate,
