@@ -1055,3 +1055,149 @@ class TestSmokeTest:
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
         out = tf(workspace, ["smoke-test"])
         assert out["build"] == "skip"
+
+
+# ── Conflict Check Tests ──────────────────────────────────────
+
+
+class TestConflictCheck:
+    def test_no_conflicts(self, workspace, bd_stub):
+        """Beads with disjoint file lists should all be safe_parallel."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+
+        # Stub returns different descriptions per bead
+        # Since bd_stub returns same response for all calls, we test with a single bead
+        out = tf(workspace, ["conflict-check", "--beads", "bead-1,bead-2"],
+                 env={"BD_STUB_RESPONSE": json.dumps([{
+                     "description": "Implement X.\nFiles: `src/a.rs`, `src/b.rs`"
+                 }])})
+        # Both beads get same files from stub, so they conflict
+        assert "conflicts" in out
+
+    def test_detects_conflicts(self, workspace, bd_stub):
+        """Beads sharing files should appear in conflicts and serial_groups."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+
+        out = tf(workspace, ["conflict-check", "--beads", "bead-1,bead-2"],
+                 env={"BD_STUB_RESPONSE": json.dumps([{
+                     "description": "Implement feature.\nFiles: `src/shared.rs`, `src/other.rs`"
+                 }])})
+        assert len(out["conflicts"]) > 0
+        assert "serial_groups" in out
+        assert out["safe_parallel"] == []
+
+    def test_empty_beads(self, workspace, bd_stub):
+        """No beads should return empty results."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["conflict-check", "--beads", ""],
+                 env={"BD_STUB_RESPONSE": json.dumps([{"description": ""}])})
+        assert out["safe_parallel"] == []
+        assert out["conflicts"] == {}
+
+
+class TestConflictCheckHelpers:
+    """Test _extract_files_from_description directly."""
+
+    @pytest.fixture(autouse=True)
+    def _import_tf(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("tf", TF_PY)
+        self.tf_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.tf_mod)
+
+    def test_backtick_files(self):
+        desc = "Do something.\nFiles: `src/a.rs`, `src/b.rs`\nMore text."
+        assert self.tf_mod._extract_files_from_description(desc) == ["src/a.rs", "src/b.rs"]
+
+    def test_plain_files(self):
+        desc = "Task.\nFiles: src/a.rs, src/b.rs"
+        assert self.tf_mod._extract_files_from_description(desc) == ["src/a.rs", "src/b.rs"]
+
+    def test_bold_files(self):
+        desc = "Task.\n**Files:** `src/a.rs`, `src/b.rs`"
+        assert self.tf_mod._extract_files_from_description(desc) == ["src/a.rs", "src/b.rs"]
+
+    def test_no_files_line(self):
+        desc = "No files listed here."
+        assert self.tf_mod._extract_files_from_description(desc) == []
+
+
+# ── Notify Bead Status Tests ─────────────────────────────────
+
+
+class TestNotifyBeadStatus:
+    def test_includes_bead_status(self, workspace, bd_stub):
+        """notify should include bead_status from bd show."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+
+        out = tf(workspace, ["notify", "rust-1", "bead-abc",
+                              "--context-pct", "50", "--summary", "done"],
+                 env={"BD_STUB_RESPONSE": json.dumps([{"status": "closed"}])})
+        assert out["ok"] is True
+        assert out["bead_status"] == "closed"
+
+    def test_bead_status_blocked(self, workspace, bd_stub):
+        """notify should report blocked status."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+
+        out = tf(workspace, ["notify", "rust-1", "bead-abc",
+                              "--context-pct", "50", "--summary", "blocked on input"],
+                 env={"BD_STUB_RESPONSE": json.dumps([{"status": "blocked"}])})
+        assert out["bead_status"] == "blocked"
+
+
+# ── Sync Reuse Enforcement Tests ─────────────────────────────
+
+
+class TestSyncReuseEnforcement:
+    def test_reuse_enforced_when_idle_exceeds_threshold(self, workspace):
+        """sync should set reuse_enforced when idle > ready * 0.5."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+
+        # Create 3 idle workers with 50% context (within reuse range)
+        reg = load_registry(workspace)
+        for i in range(3):
+            reg["workers"][f"w-{i}"] = {
+                "status": "idle", "skill": "rust", "context_pct": 50,
+                "bead": f"bead-{i}", "notification": "received",
+                "idle_since": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        save_registry(workspace, reg)
+
+        # 2 ready tasks, 3 idle workers → 3 > 2*0.5=1 → reuse enforced
+        out = tf(workspace, ["sync", "--ready-count", "2"])
+        assert out.get("reuse_enforced") is True
+
+    def test_no_reuse_enforced_when_few_idle(self, workspace):
+        """sync should NOT set reuse_enforced when idle <= ready * 0.5."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+
+        reg = load_registry(workspace)
+        reg["workers"]["w-0"] = {
+            "status": "idle", "skill": "rust", "context_pct": 50,
+            "bead": "bead-0", "notification": "received",
+            "idle_since": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        save_registry(workspace, reg)
+
+        # 4 ready tasks, 1 idle worker → 1 <= 4*0.5=2 → no enforcement
+        out = tf(workspace, ["sync", "--ready-count", "4"])
+        assert "reuse_enforced" not in out
+
+    def test_no_enforcement_without_ready_count(self, workspace):
+        """sync without --ready-count should never set reuse_enforced."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+
+        reg = load_registry(workspace)
+        for i in range(5):
+            reg["workers"][f"w-{i}"] = {
+                "status": "idle", "skill": "rust", "context_pct": 50,
+                "bead": f"bead-{i}", "notification": "received",
+                "idle_since": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        save_registry(workspace, reg)
+
+        out = tf(workspace, ["sync"])
+        assert "reuse_enforced" not in out

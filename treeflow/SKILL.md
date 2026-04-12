@@ -121,7 +121,8 @@ python3 .beads/tf.py dispatch {worker} {bead} --skill {domain} [--output-file pa
 python3 .beads/tf.py notify {worker} {bead} --context-pct N --summary "..."  # Record completion
 python3 .beads/tf.py phase-gate {epic-id}                # Check phase complete
 python3 .beads/tf.py smoke-test --build-cmd "cmd" --beads a,b  # Build + wiring check
-python3 .beads/tf.py sync                                      # Pre-dispatch: retire stale, flag stalled, return reusable workers
+python3 .beads/tf.py conflict-check --beads a,b,c                     # File-conflict analysis for parallelism safety
+python3 .beads/tf.py sync [--ready-count N]                           # Pre-dispatch: retire stale, flag stalled, return reusable workers
 python3 .beads/tf.py stalled [--threshold-mins N]              # List stalled active workers (default 20 min)
 python3 .beads/tf.py registry [--status idle] [--skill domain]  # Query workers
 python3 .beads/tf.py registry --worker-model              # Print configured worker model
@@ -201,45 +202,50 @@ Filter out epics and orchestration beads — only dispatch task-type beads to wo
 
 ### 2. Assess Parallelism
 
-Group ready tasks by file-conflict safety:
+Run file-conflict analysis on ready beads:
+```bash
+python3 .beads/tf.py conflict-check --beads bead1,bead2,bead3
+```
 
-1. Extract the `Files:` list from each ready task's bead description
-2. Build a map: `file → [task_ids]`
-3. Any file in ≥2 tasks → those tasks **must be serialized**
-4. Tasks with fully disjoint file sets → safe to parallelize
-5. **Same directory, different files** → safe with caution
-6. Respect `[parallel]` markers from planning
-7. **Max concurrent workers: 6.** Never more than independent ready beads.
-8. Batch trivial related tasks into one worker assignment
-9. **Default to batching** when 3+ ready tasks share a skill domain and are small. One worker with sequential sub-tasks is almost always better than N separate spawns. Only split if total estimated context would exceed ~60%.
+This extracts `Files:` lists from bead descriptions and returns:
+- `safe_parallel` — beads with no file overlap, safe to dispatch concurrently
+- `conflicts` — files touched by multiple beads
+- `serial_groups` — sets of beads that must be serialized due to shared files
+
+Additional rules:
+1. **Same directory, different files** → safe with caution
+2. Respect `[parallel]` markers from planning
+3. **Max concurrent workers: 6.** Never more than independent ready beads.
+4. Batch trivial related tasks into one worker assignment
+5. **Default to batching** when 3+ ready tasks share a skill domain and are small. One worker with sequential sub-tasks is almost always better than N separate spawns. Only split if total estimated context would exceed ~60%.
 
 ### 3. Select or Reuse Workers
 
 **This step is MANDATORY before every spawn.** Do NOT proceed to step 5 (Dispatch) without running sync first. Skipping this is the #1 cause of worker bloat.
 
 ```bash
-python3 .beads/tf.py sync
+python3 .beads/tf.py sync --ready-count {N}
 ```
 
-This single command handles all housekeeping:
+Pass `--ready-count` with the number of ready tasks from step 1. This single command handles all housekeeping:
 - Auto-retires workers at ≥90% context (can't reuse meaningfully)
 - Auto-retires workers at <40% context (not worth reuse overhead)
 - Flags active workers as `stalled` if no heartbeat for >20 min
 - Flags idle workers as `stale` if idle >30 min (likely from a prior session or laptop sleep)
 - Returns `available` workers grouped by skill domain, ready for reuse
+- Sets `reuse_enforced: true` when idle workers exceed `ready_tasks × 0.5` — force reuse over fresh spawns
 
 **Decision rule** based on sync output:
-1. `available` has a worker in the same skill domain as the ready task → **reuse** via SendMessage
-2. `available` is empty or no domain match → spawn fresh
-3. **If SendMessage is unavailable** (detected in Entry Protocol) → always spawn fresh
+1. If `reuse_enforced: true` → **must reuse** an idle worker. Only spawn fresh if no idle worker has a matching skill domain.
+2. `available` has a worker in the same skill domain as the ready task → **reuse** via SendMessage
+3. `available` is empty or no domain match → spawn fresh
+4. **If SendMessage is unavailable** (detected in Entry Protocol) → always spawn fresh
 
 **How reuse works:** `SendMessage` to a stopped agent auto-resumes it with full conversation context. No orientation overhead.
 
 **When to batch instead of reuse:** If multiple tasks for the same domain are known upfront, batch them in one worker prompt at dispatch time — this avoids the SendMessage round-trip. Reuse is most valuable for follow-up tasks discovered *after* a worker finishes.
 
 **Target: ≤1 worker per task.** If your worker count exceeds task count, you're over-spawning. V2 achieved 0.8× (15 workers for 19 tasks) with good batching.
-
-**Worker reuse enforcement:** after `tf.py sync`, if idle workers exceed `ready_tasks × 0.5`, force reuse over fresh spawns. Only spawn fresh if no idle worker has a matching skill domain.
 
 ### 4. Construct Worker Prompt
 
@@ -296,11 +302,12 @@ When a `<task-notification>` arrives:
    ```bash
    python3 .beads/tf.py notify {worker-name} {bead-id} --context-pct {N} --summary "{1-line}"
    ```
-3. **Check response**: if `late: true`, this was a late notification for an already-processed bead — no further action needed
-4. **Check bead status**: `bd show <bead-id> --json | jq -c '.status'`
-   - `closed` → normal flow
-   - `blocked` → worker hit a question: surface to user, wait, SendMessage to resume
-   - `in_progress` → abnormal: worker finished without closing. SendMessage to worker to retry close
+3. **Check response fields**:
+   - `late: true` → late notification for an already-processed bead — no further action needed
+   - `bead_status` → included automatically, no separate `bd show` needed:
+     - `closed` → normal flow
+     - `blocked` → worker hit a question: surface to user, wait, SendMessage to resume
+     - `in_progress` → abnormal: worker finished without closing. SendMessage to worker to retry close
 5. **Update context files** (only on normal flow):
    - Append task summary to `epic-{slug}.md` under `## Completed Tasks`
    - If worker reported a recurring issue → add to `worker-context.md` `## Known Gotchas`

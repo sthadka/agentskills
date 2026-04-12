@@ -531,6 +531,17 @@ def cmd_notify(args: argparse.Namespace) -> None:
     result = {"ok": True, "late": late, "worker": args.worker, "ctx": args.context_pct}
     if auto_retired:
         result["auto_retired"] = True
+
+    # Include bead status so orchestrator doesn't need a separate bd show call
+    bd = _bd(rp)
+    r = _run(f"{bd} show {args.bead_id} --json")
+    try:
+        data = json.loads(r.stdout)
+        bead = data[0] if isinstance(data, list) else data
+        result["bead_status"] = bead.get("status", "unknown")
+    except (json.JSONDecodeError, IndexError):
+        pass
+
     _out(result)
 
 
@@ -634,6 +645,74 @@ def cmd_smoke_test(args: argparse.Namespace) -> None:
                     exists = Path(fp).exists()
                     result["wiring"].append({"bead": bid, "file": fp, "exists": exists})
 
+    _out(result)
+
+
+def _extract_files_from_description(desc: str) -> list[str]:
+    """Extract file paths from a bead description's Files: line."""
+    for line in desc.split("\n"):
+        stripped = line.strip()
+        # Match "Files:" at line start (with optional markdown bold/backticks)
+        if re.match(r"^(?:\*\*)?Files:?\*?\*?\s*", stripped, re.IGNORECASE):
+            # Everything after "Files:" on that line
+            after = re.sub(r"^(?:\*\*)?Files:?\*?\*?\s*", "", stripped, flags=re.IGNORECASE)
+            # Strip backticks and split on commas
+            return [f.strip().strip("`") for f in after.split(",") if f.strip().strip("`")]
+    return []
+
+
+def cmd_conflict_check(args: argparse.Namespace) -> None:
+    """Check file conflicts between ready beads for parallelism safety."""
+    rp = _registry_path()
+    bd = _bd(rp)
+    bead_ids = [b.strip() for b in args.beads.split(",") if b.strip()]
+
+    # Fetch descriptions and extract file lists
+    bead_files: dict[str, list[str]] = {}
+    for bid in bead_ids:
+        r = _run(f"{bd} show {bid} --json")
+        if r.returncode != 0:
+            continue
+        try:
+            data = json.loads(r.stdout)
+            bead = data[0] if isinstance(data, list) else data
+        except (json.JSONDecodeError, IndexError):
+            continue
+        desc = bead.get("description", "")
+        files = _extract_files_from_description(desc)
+        if files:
+            bead_files[bid] = files
+
+    # Build file → [bead_ids] map
+    file_map: dict[str, list[str]] = {}
+    for bid, files in bead_files.items():
+        for f in files:
+            file_map.setdefault(f, []).append(bid)
+
+    # Identify conflicts (file touched by 2+ beads)
+    conflicts = {f: bids for f, bids in file_map.items() if len(bids) > 1}
+
+    # Compute parallel groups: beads with no file overlap can run together
+    conflicting_beads = set()
+    for bids in conflicts.values():
+        conflicting_beads.update(bids)
+    safe = [bid for bid in bead_ids if bid not in conflicting_beads and bid in bead_files]
+
+    result: dict = {
+        "bead_files": bead_files,
+        "conflicts": conflicts,
+        "safe_parallel": safe,
+    }
+    if conflicts:
+        # Build serial groups: sets of beads that share files
+        serial: list[list[str]] = []
+        seen: set[str] = set()
+        for bids in conflicts.values():
+            group = sorted(set(bids) - seen)
+            if group:
+                serial.append(sorted(set(bids)))
+                seen.update(bids)
+        result["serial_groups"] = serial
     _out(result)
 
 
@@ -758,13 +837,17 @@ def cmd_sync(args: argparse.Namespace) -> None:
     if retired:
         _save_registry(reg, rp)
 
+    idle_count = sum(len(v) for v in available.values())
     result: dict = {
         "available": available,
         "retired_now": retired,
-        "counts": {"total": total_spawned, "active": total_active, "idle": len([v for s in available.values() for v in s]), "retired": len(retired)},
+        "counts": {"total": total_spawned, "active": total_active, "idle": idle_count, "retired": len(retired)},
     }
     if stalled:
         result["stalled"] = stalled
+    ready_count = getattr(args, "ready_count", 0)
+    if ready_count and idle_count > ready_count * 0.5:
+        result["reuse_enforced"] = True
     _out(result)
 
 
@@ -912,8 +995,13 @@ def main() -> None:
     s = sub.add_parser("routing")
     s.add_argument("--add", default="")
 
+    # conflict-check
+    s = sub.add_parser("conflict-check")
+    s.add_argument("--beads", required=True)
+
     # sync
-    sub.add_parser("sync")
+    s = sub.add_parser("sync")
+    s.add_argument("--ready-count", type=int, default=0, dest="ready_count")
 
     # status
     sub.add_parser("status")
@@ -936,6 +1024,7 @@ def main() -> None:
         "notify": cmd_notify,
         "phase-gate": cmd_phase_gate,
         "smoke-test": cmd_smoke_test,
+        "conflict-check": cmd_conflict_check,
         "registry": cmd_registry,
         "retire": cmd_retire,
         "routing": cmd_routing,
