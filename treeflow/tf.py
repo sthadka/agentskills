@@ -25,7 +25,7 @@ _BD_SEARCH_PATHS = [
 
 
 def _resolve_bd() -> str:
-    """Resolve bd binary path. Tries shutil.which, then common locations, then bare 'bd'."""
+    """Resolve bd binary path. Tries shutil.which, then common install locations."""
     found = shutil.which("bd")
     if found:
         return found
