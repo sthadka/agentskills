@@ -110,10 +110,8 @@ Bare `>> free text` is always fine — intent can be inferred from context.
 
 2. **Wait** for the user to signal they've annotated the file.
 
-3. **Read the file** and identify all annotations — look for:
-   - Lines starting with `>>` (primary annotation format)
-   - Fallback: any other inserted text that doesn't match the document's voice (`//`, `NOTE:`, `TODO:`, `<!-- -->`, etc.)
-   - Deletions or strikethroughs
+3. **Run `sculptor.py annotations <file>`** to get the full structured list of annotations with line numbers and parsed prefixes. Do not grep manually.
+   - Also look for fallback annotations: inserted text that doesn't match the document's voice (`//`, `NOTE:`, `TODO:`, `<!-- -->`, etc.)
 
 4. **Address every annotation**:
    - Respond to questions (`>> ?`)
@@ -124,7 +122,9 @@ Bare `>> free text` is always fine — intent can be inferred from context.
 
 5. **Update the document** — Remove all `>>` annotation lines and integrate the changes into the document.
 
-6. **Summarize changes** — Tell the user what you changed and why, so they can decide whether another round is needed.
+6. **Run `sculptor.py verify-clean <file>`** to confirm all annotations were removed. Fix any remaining ones before proceeding.
+
+7. **Summarize changes** — Tell the user what you changed and why, so they can decide whether another round is needed.
 
 ### Guard
 
@@ -170,8 +170,9 @@ When the user approves the document:
    - Idea
    - Technical spec
    - Implementation plan
+3. **Export beads plan** — Run `sculptor.py export-beads {idea-name}/` to generate `.beads/plan.md`, `deps.txt`, and `invariants.md`. These files are the handoff artifact for implementation — they travel with the idea directory when copied to a new project.
 
-Proceed to Phase 7  once user approves.
+Proceed to Phase 7 once user approves.
 
 ## Phase 7: FEEDBACK
 
@@ -187,17 +188,38 @@ Share feedback after the previous phase is finalized:
 
 **The skill is complete. The polished documents are the deliverables. We'll not write any code from here onwards.**
 
+## Validation Tool
+
+`sculptor.py` provides deterministic validation. Use it at the specified points — don't rely on manual grep or visual inspection for these checks.
+
+```
+python3 ~/.claude/skills/sculptor/sculptor.py <command> [args]
+```
+
+| Command | When to use | What it checks |
+|---|---|---|
+| `phase <dir>` | Session resumption | Which files exist, which phase we're in, pending annotations |
+| `annotations <file>` | Before addressing annotations | Extracts all `>>` lines with line numbers and parsed prefixes |
+| `verify-clean <file>` | After addressing annotations | Confirms all `>>` lines were removed (returns PASS/FAIL) |
+| `lint-spec <spec.md>` | Before asking user to annotate spec | Dead types, path consistency, TODOs, untagged code blocks |
+| `lint-plan <plan.md> --spec <spec.md>` | Before asking user to annotate plan | Missing AC lines, missing sections, spec coverage |
+| `export-beads <dir>` | Phase 6 (finalize) | Generates `.beads/plan.md`, `deps.txt`, `invariants.md`. Add `--run` to also execute `bd create -f` + wire deps |
+
+### Required integration points
+
+1. **Session resumption**: Run `phase <dir>` instead of manually checking files.
+2. **Before addressing annotations**: Run `annotations <file>` to get the full list — don't grep manually.
+3. **After addressing annotations**: Run `verify-clean <file>` before telling the user changes are done.
+4. **After writing spec.md**: Run `lint-spec <spec.md>` and fix any issues before presenting to user.
+5. **After writing plan.md**: Run `lint-plan <plan.md> --spec <spec.md>` and fix any issues before presenting to user.
+6. **Phase 6 (finalize)**: If the user wants beads integration, run `export-beads <dir> --run` to create issues and wire dependencies in one step.
+
 ## Session Continuity
 
 All state lives in the `{idea-name}/` directory. If a session ends and resumes later:
 
-1. Read all files in the directory
-2. Detect the current phase based on which files exist.
-   - Only directory exists → Phase 1 (INTAKE)
-   - `research.md` exists → Phase 2 complete, check if `idea.md` exists
-   - `idea.md` exists → Check for unaddressed annotations (Phase 4) or if it's finalized (Phase 5)
-   - `prd.md`, `spec.md`, or `plan.md` exist → Phase 6 in progress
-   - `feedback.md` exist → Phase 7 in progress
+1. Run `sculptor.py phase {idea-name}/` to detect current state
+2. Read files identified as present
 3. Tell the user where you're picking up and confirm before continuing
 
 ## Learnings & Improvements
