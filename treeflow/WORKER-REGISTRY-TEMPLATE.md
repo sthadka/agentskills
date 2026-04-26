@@ -9,6 +9,9 @@ The worker registry is a JSON file at `.beads/context-{plan-name}/registry.json`
 ```json
 {
   "plan_name": "browser-filesystem",
+  "bd_path": "/Users/user/.local/bin/bd",
+  "worker_model": "sonnet",
+  "settings": {"stall_threshold_mins": 20},
   "workers": {
     "chrome-api-1": {
       "status": "active|idle|retired|failed",
@@ -17,7 +20,14 @@ The worker registry is a JSON file at `.beads/context-{plan-name}/registry.json`
       "bead": "tabtty-6dx",
       "notification": "pending|received|reconciled",
       "dispatched_at": "2026-04-06T14:32:00Z",
+      "dispatch_sha": "a1b2c3d4e5f6...",
+      "dispatch_untracked": ["notes.txt"],
       "idle_since": "2026-04-06T14:45:00Z",
+      "last_heartbeat": "2026-04-06T14:42:00Z",
+      "last_heartbeat_note": "running tests",
+      "heartbeat_history": [{"ts": "2026-04-06T14:42:00Z", "note": "running tests"}],
+      "expected_completion_at": "2026-04-06T15:00:00Z",
+      "output_file": "",
       "summary": "Created namespace fetcher..."
     }
   },
@@ -40,7 +50,7 @@ The worker registry is a JSON file at `.beads/context-{plan-name}/registry.json`
 |--------|---------|-----------|
 | `active` | Currently working on a bead | Set by `tf.py dispatch` |
 | `idle` | Stopped, resumable via SendMessage | Set by `tf.py notify` |
-| `retired` | Context too full (<40% remaining) | Set by `tf.py retire` |
+| `retired` | Context ≥90% or <40% (auto-retired by sync/notify) | Set by `tf.py retire` or auto |
 | `failed` | Errored, needs investigation | Set manually |
 
 ## Notification Values

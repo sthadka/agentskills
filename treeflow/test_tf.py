@@ -1495,3 +1495,252 @@ class TestValidatePlan:
         out = tf(workspace, ["validate-plan", str(plan)])
         assert out["ok"] is False
         assert len(out["errors"]) == 3
+
+
+# ── Update-Context Tests ─────────────────────────────────────
+
+
+class TestUpdateContext:
+    def test_creates_epic_context_file(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        ctx = workspace / ".beads" / "context-test"
+        bead_resp = json.dumps({"id": "42", "title": "Add login", "parent": "10"})
+        parent_resp = json.dumps({"id": "10", "title": "Auth Epic"})
+        # Stub returns same for both calls; use parent-like response
+        out = tf(workspace, [
+            "update-context",
+            "--bead", "42", "--worker", "w1",
+            "--summary", "Added login endpoint",
+            "--files", "auth.py,routes.py",
+        ], env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
+        # Epic slug comes from parent; stub returns same both times so slug is "add-login"
+        epic_files = list(ctx.glob("epic-*.md"))
+        assert len(epic_files) == 1
+        content = epic_files[0].read_text()
+        assert "BD-42" in content
+        assert "w1" in content
+        assert "Added login endpoint" in content
+
+    def test_appends_gotcha(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        ctx = workspace / ".beads" / "context-test"
+        out = tf(workspace, [
+            "update-context",
+            "--bead", "1", "--worker", "w1",
+            "--summary", "done", "--gotcha", "LSP lies about imports",
+        ], env={"BD_STUB_RESPONSE": json.dumps({"id": "1", "title": "T1"})})
+        assert out["gotcha_added"] is True
+        wc = ctx / "worker-context.md"
+        assert wc.exists()
+        assert "LSP lies about imports" in wc.read_text()
+
+    def test_no_gotcha_no_file(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        ctx = workspace / ".beads" / "context-test"
+        out = tf(workspace, [
+            "update-context",
+            "--bead", "1", "--worker", "w1",
+            "--summary", "done",
+        ], env={"BD_STUB_RESPONSE": json.dumps({"id": "1", "title": "T1"})})
+        assert out["gotcha_added"] is False
+        wc = ctx / "worker-context.md"
+        assert not wc.exists()
+
+    def test_appends_to_existing_epic_file(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        ctx = workspace / ".beads" / "context-test"
+        resp = json.dumps({"id": "1", "title": "Task A", "parent": "10"})
+        # Pre-create epic file
+        epic_file = ctx / "epic-task-a.md"
+        epic_file.write_text("# Epic\n\n## Completed Tasks\n\n### BD-0: Setup\nDone.\n")
+        tf(workspace, [
+            "update-context",
+            "--bead", "1", "--worker", "w2",
+            "--summary", "Second task",
+        ], env={"BD_STUB_RESPONSE": resp})
+        content = epic_file.read_text()
+        assert "BD-0: Setup" in content
+        assert "BD-1: Task A" in content
+
+    def test_handles_bd_failure_gracefully(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, [
+            "update-context",
+            "--bead", "99", "--worker", "w1",
+            "--summary", "done",
+        ], env={"BD_STUB_RESPONSE": "not json", "BD_STUB_EXIT": "1"})
+        assert out["ok"] is True
+        assert out["updated"] == []
+
+
+# ── Phase-Complete Tests ──────────────────────────────────────
+
+
+class TestPhaseComplete:
+    def test_blocks_on_open_beads(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = [{"id": "1", "status": "closed"}, {"id": "2", "status": "open"}]
+        out = tf(workspace, [
+            "phase-complete", "--epic", "10",
+        ], env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["pass"] is False
+        assert any(b["bead"] == "2" for b in out["blocking"])
+
+    def test_blocks_on_pending_notifications(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        # All beads closed but a worker has pending notification
+        beads = [{"id": "1", "status": "closed"}]
+        tf(workspace, ["dispatch", "w1", "1", "--skill", "code"],
+           env={"BD_STUB_RESPONSE": "{}"})
+        reg = load_registry(workspace)
+        reg["workers"]["w1"]["notification"] = "pending"
+        save_registry(workspace, reg)
+        out = tf(workspace, [
+            "phase-complete", "--epic", "10",
+        ], env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["pass"] is False
+        assert any("notification" in str(b.get("reason", "")) for b in out["blocking"])
+
+    def test_passes_and_writes_phase_file(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        ctx = workspace / ".beads" / "context-test"
+        beads = [
+            {"id": "1", "status": "closed", "close_reason": "done. FILES: auth.py, db.py."},
+            {"id": "2", "status": "closed", "close_reason": "done. FILES: routes.py."},
+        ]
+        out = tf(workspace, [
+            "phase-complete", "--epic", "10",
+        ], env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["pass"] is True
+        assert out["beads_closed"] == 2
+        assert "auth.py" in out["files"]
+        phase_file = ctx / "phase-1.md"
+        assert phase_file.exists()
+        content = phase_file.read_text()
+        assert "Phase 1" in content
+        assert "auth.py" in content
+
+    def test_custom_phase_number(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        ctx = workspace / ".beads" / "context-test"
+        beads = [{"id": "1", "status": "closed"}]
+        out = tf(workspace, [
+            "phase-complete", "--epic", "10", "--phase-num", "3",
+        ], env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["pass"] is True
+        assert out["phase_file"] == "phase-3.md"
+        assert (ctx / "phase-3.md").exists()
+
+    def test_smoke_test_failure(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = [{"id": "1", "status": "closed"}]
+        out = tf(workspace, [
+            "phase-complete", "--epic", "10",
+            "--build-cmd", "false",
+        ], env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["pass"] is True
+        assert out["build"] == "fail"
+
+    def test_smoke_test_pass(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = [{"id": "1", "status": "closed"}]
+        out = tf(workspace, [
+            "phase-complete", "--epic", "10",
+            "--build-cmd", "true",
+        ], env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["pass"] is True
+        assert out["build"] == "pass"
+
+
+# ── Worker-Prompt Tests ───────────────────────────────────────
+
+
+class TestWorkerPrompt:
+    def test_single_bead_prompt(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        resp = json.dumps({"id": "5", "title": "Build parser", "description": "Parse the input.\nFiles: parser.py"})
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "5",
+        ], env={"BD_STUB_RESPONSE": resp})
+        assert out["ok"] is True
+        assert "Build parser" in out["prompt"]
+        assert out["beads"] == ["5"]
+        assert "`parser.py`" in out["prompt"]
+
+    def test_multi_bead_serial_prompt(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        # Stub returns same response for all bd show calls
+        resp = json.dumps({"id": "1", "title": "Task One", "description": "Do first thing"})
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "1,2,3",
+        ], env={"BD_STUB_RESPONSE": resp})
+        assert out["ok"] is True
+        assert out["beads"] == ["1", "2", "3"]
+        # Should have sub-task structure
+        assert "Sub-Task 1" in out["prompt"]
+        assert "Sub-Task 2" in out["prompt"]
+        assert "Sub-Task 3" in out["prompt"]
+        assert "Batch" in out["prompt"] or "sequential" in out["prompt"].lower()
+
+    def test_reuse_prompt(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        resp = json.dumps({"id": "6", "title": "Next task", "description": "Do next thing"})
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "6",
+            "--reuse", "--prior-bead", "5",
+        ], env={"BD_STUB_RESPONSE": resp})
+        assert out["ok"] is True
+        assert "Prior Task" in out["prompt"]
+        assert "ALREADY CLOSED" in out["prompt"]
+        assert "5" in out["prompt"]  # prior bead referenced
+        assert "Next task" in out["prompt"]
+
+    def test_includes_project_context(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        ctx = workspace / ".beads" / "context-test"
+        (ctx / "worker-context.md").write_text("# Project\nUse TypeScript everywhere.")
+        resp = json.dumps({"id": "1", "title": "T1", "description": "desc"})
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "1",
+        ], env={"BD_STUB_RESPONSE": resp})
+        assert "TypeScript everywhere" in out["prompt"]
+
+    def test_includes_phase_context(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        ctx = workspace / ".beads" / "context-test"
+        (ctx / "phase-1.md").write_text("# Phase 1\nParser built.")
+        resp = json.dumps({"id": "1", "title": "T1", "description": "desc"})
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "1",
+        ], env={"BD_STUB_RESPONSE": resp})
+        assert "Parser built" in out["prompt"]
+
+    def test_includes_epic_context(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        ctx = workspace / ".beads" / "context-test"
+        resp = json.dumps({"id": "1", "title": "Task", "description": "desc", "parent": "10"})
+        # Parent response will also be the same stub response, so slug = "task"
+        (ctx / "epic-task.md").write_text("# Auth Epic\nOAuth chosen.")
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "1",
+        ], env={"BD_STUB_RESPONSE": resp})
+        assert "OAuth chosen" in out["prompt"]
+
+    def test_returns_model_from_registry(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub, "--worker-model", "sonnet"])
+        resp = json.dumps({"id": "1", "title": "T1", "description": "desc"})
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "1",
+        ], env={"BD_STUB_RESPONSE": resp})
+        assert out["model"] == "sonnet"
+
+    def test_handles_bd_failure(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "99",
+        ], env={"BD_STUB_RESPONSE": "bad json", "BD_STUB_EXIT": "1"})
+        assert out["ok"] is True
+        assert out["beads"] == ["99"]
+        # Falls back to using bead ID as title
+        assert "99" in out["prompt"]

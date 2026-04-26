@@ -38,6 +38,8 @@ bd close <id> --reason "Done" --suggest-next --json   # Close and get next ready
 bd close <id1> <id2> <id3> --reason "Batch done" --json
 ```
 
+> **Prefer `tf.py close`** when you need reliable JSON output — `bd close --json | jq` can fail due to inconsistent output format. `tf.py close <id> --reason "..."` normalizes the result to `{"ok":true,"id":"...","status":"closed"}`.
+
 ## Dependencies
 
 > **CRITICAL: argument order for `bd dep add` is `<blocked-id> <blocker-id>` (blocked first, blocker second).**
@@ -53,6 +55,9 @@ bd dep add <child-id> <parent-id> -t parent-child --json       # child belongs t
 
 # Chain multiple with --blocks:
 bd dep <id1> --blocks <id2> && bd dep <id3> --blocks <id4>     # chain multiple blockers
+
+# Preferred: idempotent tf.py wrapper (handles UNIQUE constraint errors gracefully)
+python3 .beads/tf.py dep <blocker-id> <blocked-id>             # blocker blocks blocked
 ```
 
 **Argument order reference:**

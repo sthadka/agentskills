@@ -60,7 +60,6 @@
 -->
 
 - Workers never call `bd` directly — all bead operations go through `tf.py` subcommands (`claim`, `block`, `discover`, `worker-close`)
-- `bd close` returns a JSON array: use `jq -c '.[0].status'` not `jq -c '.status'`
 - **Never run `git stash -u` or `git stash --include-untracked`** — this stashes `.beads/context-*/` files and breaks orchestration state. Use `git stash` (tracked files only) or `git stash push <specific-files>` instead.
 
 {Add project-specific gotchas here. Orchestrator appends more as workers discover recurring issues.}

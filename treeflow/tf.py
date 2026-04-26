@@ -823,6 +823,339 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
     _out(result)
 
 
+def _slugify(text: str) -> str:
+    """Convert text to a slug for filenames."""
+    return re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')[:50]
+
+
+def _context_dir() -> Path:
+    """Return the active context directory."""
+    bd = _beads_dir()
+    active_plan_file = bd / "active-plan"
+    if active_plan_file.exists():
+        plan_name = active_plan_file.read_text().strip()
+        if plan_name:
+            return bd / f"context-{plan_name}"
+    return bd
+
+
+def _append_to_section(filepath: Path, section_heading: str, content: str) -> None:
+    """Append content under a markdown section heading, creating it if absent."""
+    if filepath.exists():
+        text = filepath.read_text()
+    else:
+        text = ""
+    if section_heading in text:
+        idx = text.index(section_heading) + len(section_heading)
+        end_of_line = text.find("\n", idx)
+        if end_of_line == -1:
+            end_of_line = len(text)
+        text = text[:end_of_line] + "\n\n" + content + text[end_of_line:]
+    else:
+        text = text.rstrip() + f"\n\n{section_heading}\n\n{content}\n"
+    filepath.write_text(text)
+
+
+def cmd_update_context(args: argparse.Namespace) -> None:
+    """Append completion summary to epic context files and optional gotcha to worker-context."""
+    rp = _registry_path()
+    bd_bin = _bd(rp)
+    ctx = _context_dir()
+    updated = []
+
+    # Get bead info for title and parent
+    title = args.bead_id
+    epic_slug = ""
+    r = _run(f"{bd_bin} show {args.bead_id} --json")
+    try:
+        data = json.loads(r.stdout)
+        bead = data[0] if isinstance(data, list) else data
+        title = bead.get("title", bead.get("name", args.bead_id))
+        parent_id = bead.get("parent", "")
+        if parent_id:
+            r2 = _run(f"{bd_bin} show {parent_id} --json")
+            try:
+                pdata = json.loads(r2.stdout)
+                parent = pdata[0] if isinstance(pdata, list) else pdata
+                epic_slug = _slugify(parent.get("title", parent.get("name", parent_id)))
+            except (json.JSONDecodeError, IndexError):
+                epic_slug = _slugify(parent_id)
+    except (json.JSONDecodeError, IndexError):
+        pass
+
+    # Format summary block
+    files_str = args.files or ""
+    summary_block = f"### BD-{args.bead_id}: {title}\n**Worker**: {args.worker} | **Files**: {files_str}\n{args.summary}"
+
+    # Append to epic context file
+    if epic_slug:
+        epic_file = ctx / f"epic-{epic_slug}.md"
+        _append_to_section(epic_file, "## Completed Tasks", summary_block)
+        updated.append(f"epic-{epic_slug}.md")
+
+    # Append gotcha if provided
+    gotcha_added = False
+    if args.gotcha:
+        wc = ctx / "worker-context.md"
+        _append_to_section(wc, "## Known Gotchas", f"- {args.gotcha}")
+        gotcha_added = True
+        updated.append("worker-context.md")
+
+    _out({"ok": True, "updated": updated, "gotcha_added": gotcha_added})
+
+
+def cmd_phase_complete(args: argparse.Namespace) -> None:
+    """Combined phase gate + smoke test + phase summary writer."""
+    rp = _registry_path()
+    bd_bin = _bd(rp)
+    reg, _ = _load_registry(rp)
+    ctx = _context_dir()
+
+    # 1. Phase gate check
+    blocking = []
+    r = _run(f"{bd_bin} list --parent {args.epic_id} --json")
+    if r.returncode != 0:
+        r = _run(f"{bd_bin} list --json")
+    stdout = r.stdout.strip()
+    json_start = next((i for i, ch in enumerate(stdout) if ch in ("[", "{")), -1)
+    beads = []
+    if json_start >= 0:
+        try:
+            beads = json.loads(stdout[json_start:])
+        except json.JSONDecodeError:
+            pass
+    if isinstance(beads, dict):
+        beads = beads.get("issues", [])
+
+    all_files = []
+    for b in beads:
+        bid = b.get("id", "")
+        st = b.get("status", "")
+        if st != "closed":
+            blocking.append({"bead": bid, "reason": f"status={st}"})
+        else:
+            reason = b.get("close_reason", b.get("reason", ""))
+            if "FILES:" in reason:
+                start = reason.index("FILES:") + 6
+                rest = reason[start:]
+                m = re.search(r'\.\s*$|\.\s', rest)
+                end = start + m.start() if m else len(reason)
+                files = [f.strip() for f in reason[start:end].split(",") if f.strip()]
+                all_files.extend(files)
+
+    for wname, w in reg.get("workers", {}).items():
+        if w.get("notification") == "pending":
+            blocking.append({"worker": wname, "bead": w.get("bead", "?"), "reason": "notification pending"})
+
+    if blocking:
+        _out({"pass": False, "blocking": blocking})
+        return
+
+    # 2. Smoke test (if build cmd provided)
+    build_status = "skip"
+    build_output = ""
+    if args.build_cmd:
+        r = _run(args.build_cmd)
+        build_status = "pass" if r.returncode == 0 else "fail"
+        if r.returncode != 0:
+            lines = r.stdout.strip().split("\n")
+            build_output = "\n".join(lines[-20:])
+
+    # 3. Write phase summary
+    phase_num = args.phase_num or "1"
+    phase_file = f"phase-{phase_num}.md"
+    files_list = "\n".join(f"- `{f}`" for f in sorted(set(all_files))) if all_files else "- (none extracted)"
+    phase_content = f"""# Phase {phase_num} Summary
+
+**Status:** Complete | **Build:** {build_status.title()}
+
+## Files Created/Modified
+{files_list}
+
+## Beads Closed
+{len([b for b in beads if b.get('status') == 'closed'])} beads
+"""
+    if build_output:
+        phase_content += f"\n## Build Output\n```\n{build_output}\n```\n"
+
+    (ctx / phase_file).write_text(phase_content)
+
+    _out({
+        "pass": True,
+        "build": build_status,
+        "phase_file": phase_file,
+        "beads_closed": len([b for b in beads if b.get("status") == "closed"]),
+        "files": sorted(set(all_files)),
+    })
+
+
+def cmd_worker_prompt(args: argparse.Namespace) -> None:
+    """Assemble a complete worker prompt from template + context files + bead data."""
+    rp = _registry_path()
+    bd_bin = _bd(rp)
+    reg, _ = _load_registry(rp)
+    ctx = _context_dir()
+    bead_ids = [b.strip() for b in args.beads.split(",") if b.strip()]
+
+    # Read context layers
+    project_context = ""
+    wc_path = ctx / "worker-context.md"
+    if wc_path.exists():
+        project_context = wc_path.read_text()
+
+    # Find latest phase file
+    phase_files = sorted(ctx.glob("phase-*.md"))
+    if phase_files:
+        project_context += "\n\n" + phase_files[-1].read_text()
+
+    # Fetch bead data
+    bead_data = []
+    for bid in bead_ids:
+        r = _run(f"{bd_bin} show {bid} --json")
+        try:
+            data = json.loads(r.stdout)
+            bead = data[0] if isinstance(data, list) else data
+        except (json.JSONDecodeError, IndexError):
+            bead = {"id": bid, "title": bid, "description": ""}
+        bead.setdefault("id", bid)
+        bead.setdefault("title", bead.get("name", bid))
+        bead.setdefault("description", "")
+        bead["target_files"] = _extract_files_from_description(bead["description"])
+        bead_data.append(bead)
+
+    # Determine epic context
+    epic_context = "N/A"
+    feature_context = "N/A"
+    if bead_data:
+        parent_id = bead_data[0].get("parent", "")
+        if parent_id:
+            r = _run(f"{bd_bin} show {parent_id} --json")
+            try:
+                pdata = json.loads(r.stdout)
+                parent = pdata[0] if isinstance(pdata, list) else pdata
+                slug = _slugify(parent.get("title", parent.get("name", parent_id)))
+            except (json.JSONDecodeError, IndexError):
+                slug = _slugify(parent_id)
+            epic_file = ctx / f"epic-{slug}.md"
+            if epic_file.exists():
+                epic_context = epic_file.read_text()
+            feat_file = ctx / f"feature-{slug}.md"
+            if feat_file.exists():
+                feature_context = feat_file.read_text()
+
+    # Build prompt
+    if args.reuse and args.prior_bead:
+        # Reuse prompt (shorter)
+        bd0 = bead_data[0]
+        files_str = ", ".join(f"`{f}`" for f in bd0["target_files"]) or "See description"
+        prompt = f"""## Prior Task — COMPLETE AND CLOSED
+Bead {args.prior_bead} is ALREADY CLOSED. Do NOT re-close it, retry worker-close on it, or reference it.
+Your new task begins below.
+
+## New Task
+**{bd0['title']}** (Bead ID: {bd0['id']})
+
+{bd0['description']}
+
+## Target Files
+{files_str}
+
+## Updated Context
+{epic_context if epic_context != 'N/A' else '(no updates)'}
+
+Same execution rules apply. Claim the NEW bead first, execute, commit, then run:
+python3 .beads/tf.py claim {bd0['id']}
+... do the work ...
+python3 .beads/tf.py worker-close {bd0['id']} --context-pct <N> --files <file1>,<file2> --summary "<what you did>"
+Fix any errors it reports. Done when it returns ok:true."""
+    else:
+        # Full prompt — read template
+        template_path = Path(__file__).parent / "WORKER-PROMPT.md"
+        template = ""
+        if template_path.exists():
+            content = template_path.read_text()
+            # Extract the template section between first ``` and second ```
+            blocks = content.split("```")
+            if len(blocks) >= 3:
+                template = blocks[1].strip()
+
+        if len(bead_data) == 1:
+            bd0 = bead_data[0]
+            files_str = ", ".join(f"`{f}`" for f in bd0["target_files"]) or "See description"
+            if template:
+                prompt = template.replace("{bead_id}", bd0["id"])
+                prompt = prompt.replace("{bead_title}", bd0["title"])
+                prompt = prompt.replace("{bead_description}", bd0["description"])
+                prompt = prompt.replace("{target_files}", files_str)
+                prompt = prompt.replace("{project_context}", project_context)
+                prompt = prompt.replace("{epic_context}", epic_context)
+                prompt = prompt.replace("{feature_context}", feature_context)
+            else:
+                prompt = f"""You are a worker agent executing a specific task.
+
+## Project Context
+{project_context}
+
+## Epic Context
+{epic_context}
+
+## Task
+**{bd0['title']}** (Bead ID: {bd0['id']})
+
+{bd0['description']}
+
+## Target Files
+{files_str}"""
+        else:
+            # Multi-bead: sequential sub-tasks
+            sub_tasks = []
+            for i, bd_item in enumerate(bead_data, 1):
+                files_str = ", ".join(f"`{f}`" for f in bd_item["target_files"]) or "See description"
+                sub_tasks.append(f"""## Sub-Task {i}
+**{bd_item['title']}** (Bead ID: {bd_item['id']})
+
+{bd_item['description']}
+
+**Target Files**: {files_str}
+
+Claim before starting: `python3 .beads/tf.py claim {bd_item['id']}`
+Close when done: `python3 .beads/tf.py worker-close {bd_item['id']} --context-pct <N> --files <files> --summary "..."`""")
+
+            all_ids = ", ".join(bd["id"] for bd in bead_data)
+            if template:
+                # Use template but replace Task section with sub-tasks
+                task_section_marker = "## Task"
+                if task_section_marker in template:
+                    pre_task = template[:template.index(task_section_marker)]
+                else:
+                    pre_task = template
+                pre_task = pre_task.replace("{bead_id}", bead_data[0]["id"])
+                pre_task = pre_task.replace("{bead_title}", f"Batch: {len(bead_data)} tasks")
+                pre_task = pre_task.replace("{bead_description}", f"Sequential batch of {len(bead_data)} tasks. Claim and close each one individually.")
+                pre_task = pre_task.replace("{target_files}", all_ids)
+                pre_task = pre_task.replace("{project_context}", project_context)
+                pre_task = pre_task.replace("{epic_context}", epic_context)
+                pre_task = pre_task.replace("{feature_context}", feature_context)
+                prompt = pre_task + "\n\n## Batch Tasks\n\nYou have {n} sequential sub-tasks. Complete each in order — claim, implement, commit, close — before starting the next.\n\n".format(n=len(bead_data)) + "\n\n".join(sub_tasks)
+            else:
+                prompt = f"""You are a worker agent executing {len(bead_data)} sequential tasks.
+
+## Project Context
+{project_context}
+
+## Epic Context
+{epic_context}
+
+## Batch Tasks
+
+Complete each in order — claim, implement, commit, close — before starting the next.
+
+""" + "\n\n".join(sub_tasks)
+
+    model = reg.get("worker_model", "")
+    _out({"ok": True, "prompt": prompt, "model": model, "beads": bead_ids})
+
+
 def cmd_registry(args: argparse.Namespace) -> None:
     """Query worker registry. Compact output."""
     reg, _ = _load_registry()
@@ -1127,6 +1460,26 @@ def main() -> None:
     s = sub.add_parser("validate-plan")
     s.add_argument("file")
 
+    # update-context
+    s = sub.add_parser("update-context")
+    s.add_argument("--bead", required=True, dest="bead_id")
+    s.add_argument("--worker", required=True)
+    s.add_argument("--summary", required=True)
+    s.add_argument("--files", default="")
+    s.add_argument("--gotcha", default="")
+
+    # phase-complete
+    s = sub.add_parser("phase-complete")
+    s.add_argument("--epic", required=True, dest="epic_id")
+    s.add_argument("--build-cmd", default="", dest="build_cmd")
+    s.add_argument("--phase-num", default="", dest="phase_num")
+
+    # worker-prompt
+    s = sub.add_parser("worker-prompt")
+    s.add_argument("--beads", required=True)
+    s.add_argument("--reuse", action="store_true")
+    s.add_argument("--prior-bead", default="", dest="prior_bead")
+
     args = p.parse_args()
     if not args.cmd:
         p.print_help()
@@ -1154,6 +1507,9 @@ def main() -> None:
         "dep": cmd_dep,
         "close": cmd_close,
         "validate-plan": cmd_validate_plan,
+        "update-context": cmd_update_context,
+        "phase-complete": cmd_phase_complete,
+        "worker-prompt": cmd_worker_prompt,
     }
     cmds[args.cmd](args)
 

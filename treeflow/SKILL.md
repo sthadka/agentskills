@@ -112,7 +112,7 @@ State management commands — all output compact JSON:
 # Orchestrator commands
 python3 .beads/tf.py init {plan-name} --bd-path "$(which bd 2>/dev/null || echo bd)" [--worker-model MODEL]  # Create context dir + registry + gitignore
 python3 .beads/tf.py dispatch {worker} {bead} --skill {domain} [--output-file path]  # Record dispatch
-python3 .beads/tf.py notify {worker} {bead} --context-pct N --summary "..."  # Record completion
+python3 .beads/tf.py notify {worker} {bead} --context-pct N --summary "..." [--skill domain]  # Record completion
 python3 .beads/tf.py phase-gate {epic-id}                # Check phase complete
 python3 .beads/tf.py smoke-test --build-cmd "cmd" --beads a,b  # Build + wiring check
 python3 .beads/tf.py conflict-check --beads a,b,c                     # File-conflict analysis for parallelism safety
@@ -126,6 +126,9 @@ python3 .beads/tf.py status                              # One-line overview
 python3 .beads/tf.py close {bead_id} --reason "..."                    # Close bead with normalized JSON output
 python3 .beads/tf.py dep {blocker} {blocked}                           # Add dep idempotently (UNIQUE errors = success)
 python3 .beads/tf.py validate-plan {file}                              # Validate plan md for bd create -f
+python3 .beads/tf.py worker-prompt --beads {id}[,id2,id3] [--reuse --prior-bead {prev}]  # Assemble worker prompt
+python3 .beads/tf.py update-context --bead {id} --worker {name} --summary "..." --files "..." [--gotcha "..."]  # Append to context
+python3 .beads/tf.py phase-complete --epic {id} [--build-cmd "cmd"] [--phase-num N]  # Gate + smoke test + summary
 python3 .beads/tf.py bd-path                                           # Print resolved bd binary path
 
 # Worker commands (workers call these — no direct bd usage)
@@ -250,41 +253,41 @@ Pass `--ready-count` with the number of ready tasks from step 1. This single com
 
 ### 4. Construct Worker Prompt
 
-Read [WORKER-PROMPT.md](WORKER-PROMPT.md) for the template.
+Use `tf.py worker-prompt` to assemble the complete prompt with all context layers:
 
-Populate with:
-- Bead ID, title, full description
-- Target file paths from description
-- **Layered context** from `.beads/context-{plan-name}/`:
-  - `worker-context.md` (always)
-  - `phase-{N}.md` (if available)
-  - `epic-{slug}.md` (if applicable)
-  - `feature-{slug}.md` (if applicable)
-- For **reused workers**: use the shorter reuse prompt
+```bash
+# Single bead
+python3 .beads/tf.py worker-prompt --beads {bead-id}
+
+# Multiple beads (serial batch — one worker, sequential sub-tasks)
+python3 .beads/tf.py worker-prompt --beads {id1},{id2},{id3}
+
+# Reuse (shorter prompt for SendMessage to existing worker)
+python3 .beads/tf.py worker-prompt --beads {bead-id} --reuse --prior-bead {prev-id}
+```
+
+Returns `{"ok": true, "prompt": "...", "model": "sonnet"|"", "beads": ["id1"]}`. Use `prompt` as the worker prompt and `model` (if non-empty) as the Agent tool `model:` parameter.
+
+**Only model aliases work:** `"sonnet"`, `"opus"`, `"haiku"`. Full model IDs (e.g., `"claude-sonnet-4-6"`) are rejected by the Agent tool.
 
 ### 5. Dispatch Workers
 
 **New worker:**
 
-First, check configured worker model: `python3 .beads/tf.py registry --worker-model`
-- If it returns a model name, include `model: "{worker_model}"` in the Agent tool call
-- If empty, omit `model:` — workers inherit the orchestrator's model
-- **Only aliases work:** `"sonnet"`, `"opus"`, `"haiku"`. Full model IDs (e.g., `"claude-sonnet-4-6"`) are rejected by the Agent tool.
-
 ```
 Agent tool:
   name: "{worker-name}"
   description: "{worker-name}: {bead-title}"
-  prompt: <populated full worker prompt>
+  prompt: <prompt from tf.py worker-prompt>
   run_in_background: true
-  model: "{worker_model}"    ← include only if configured, omit if empty
+  model: "{model}"    ← include only if non-empty from worker-prompt output
 ```
 
 **Reused worker:**
 ```
 SendMessage:
   to: "{worker-name}"
-  message: <reuse prompt>
+  message: <reuse prompt from tf.py worker-prompt --reuse>
 ```
 
 Dispatch multiple independent workers in a **single message** for parallelism.
@@ -310,25 +313,22 @@ When a `<task-notification>` arrives:
      - `blocked` → worker hit a question: surface to user, wait, SendMessage to resume
      - `in_progress` → abnormal: worker finished without closing. SendMessage to worker to retry close
 5. **Update context files** (only on normal flow):
-   - Append task summary to `epic-{slug}.md` under `## Completed Tasks`
-   - If worker reported a recurring issue → add to `worker-context.md` `## Known Gotchas`
+   ```bash
+   python3 .beads/tf.py update-context --bead {bead-id} --worker {worker-name} --summary "{1-line}" --files "{file1},{file2}" [--gotcha "{recurring issue}"]
+   ```
+   This appends the task summary to the epic context file and optionally adds a gotcha to `worker-context.md`.
 6. **Discard the full `<result>` content** — it's now captured in registry and context files
 7. Check for newly ready beads: `bd ready --json | jq -c`
-8. **Phase transition** — if all beads for a phase are done, run the gate:
+8. **Phase transition** — if all beads for a phase are done, run the combined gate + smoke test + summary:
    ```bash
-   python3 .beads/tf.py phase-gate {epic-id}
+   python3 .beads/tf.py phase-complete --epic {epic-id} [--build-cmd "{build}"] [--phase-num {N}]
    ```
-   Only proceed if `pass: true`. If `pass: false`, wait for blocking items to resolve.
-
-   On gate pass:
-   a. **Spec-trace verification** — run targeted grep checks against spec requirements for the completed phase. Verify that key identifiers exist at integration points (function calls in the pipeline, persistence calls, features present in all required commands). If missing or only present as dead code, create a fix task before proceeding.
-   b. Write `phase-{N}.md` — summarize what was built, files, interfaces, gotchas
-   c. Run smoke test:
-      ```bash
-      python3 .beads/tf.py smoke-test --build-cmd "{build}" --beads {bead1},{bead2}
-      ```
-   d. If `build: fail` or any `exists: false` in wiring → dispatch integration worker to fix
-   e. If clean → proceed to next phase
+   - If `pass: false` → wait for `blocking` items to resolve
+   - If `pass: true`:
+     a. **Spec-trace verification** — run targeted grep checks against spec requirements for the completed phase. Verify that key identifiers exist at integration points. If missing, create a fix task before proceeding.
+     b. Phase summary is already written to `phase-{N}.md` by the command
+     c. Check `build` field: if `"fail"` → dispatch integration worker to fix
+     d. If clean → proceed to next phase
 9. Loop back to step 2
 
 ### 7. Detect and Handle Stalled Workers
@@ -444,7 +444,7 @@ This rebuilds your picture of active workers, their current beads, pending notif
 
 **Commands:**
 - Using `--json` without `| jq -c` for `bd` commands (wastes tokens)
-- Using `bd dep add A B` for blocking deps (reversed argument order)
+- Using `bd dep add A B` for blocking deps (reversed argument order) — use `tf.py dep A B` instead (idempotent)
 - Making separate Bash calls for related operations (chain with `&&`)
 - Dispatching integration before `tf.py phase-gate` returns `pass: true`
 - Validating `bd_path` with `Path.exists()` or `shutil.which()` — macOS sandbox blocks `stat()` on agent subprocess paths even when `execve` works. Trust the stored path.

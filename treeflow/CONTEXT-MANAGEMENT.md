@@ -143,7 +143,7 @@ When any context file exceeds **500 lines**:
 
 | Include | Exclude |
 |---------|---------|
-| Worker summaries (from `bd close --reason`) | Full source code |
+| Worker summaries (from `tf.py notify`/`tf.py worker-close`) | Full source code |
 | Key implementation decisions with rationale | Complete diffs or patches |
 | File lists (created/modified) | Build output or logs |
 | Architecture choices | Debug traces |

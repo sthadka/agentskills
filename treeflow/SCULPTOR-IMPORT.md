@@ -69,7 +69,11 @@ Keep descriptions self-contained enough that an agent can execute without re-rea
 Read `plan.md`, then `spec.md` and `idea.md` for context.
 
 ### 2. Generate `.beads/plan.md`
-Convert using the mapping above. Write in [bd create -f format](PLAN-FORMAT.md):
+
+Convert using the mapping above. Write in [bd create -f format](PLAN-FORMAT.md). **Validate before creating:**
+```bash
+python3 .beads/tf.py validate-plan .beads/plan.md
+```
 
 ```markdown
 ## Goal: {Plan Title}
@@ -100,7 +104,7 @@ task
 bd create -f .beads/plan.md --json
 ```
 
-Then add dependencies per the rules above. See [COMMANDS.md](COMMANDS.md) for dependency syntax.
+Then add dependencies per the rules above. Use `tf.py dep` for blocking deps (idempotent — handles duplicate deps from parent-child hierarchy). See [COMMANDS.md](COMMANDS.md) for full syntax.
 
 ### 4. Validate
 ```bash
