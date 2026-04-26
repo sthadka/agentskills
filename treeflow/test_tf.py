@@ -50,9 +50,11 @@ def bd_stub(workspace):
     stub.write_text(textwrap.dedent("""\
         #!/bin/bash
         # Stub bd binary for testing.
-        # Reads BD_STUB_RESPONSE env var for stdout, BD_STUB_EXIT for exit code.
+        # Reads BD_STUB_RESPONSE env var for stdout, BD_STUB_EXIT for exit code,
+        # BD_STUB_STDERR for stderr output.
         DEFAULT_RESP='{}'
         echo "${BD_STUB_RESPONSE:-$DEFAULT_RESP}"
+        if [ -n "$BD_STUB_STDERR" ]; then echo "$BD_STUB_STDERR" >&2; fi
         exit "${BD_STUB_EXIT:-0}"
     """))
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
@@ -205,6 +207,24 @@ class TestDispatch:
         reg = load_registry(workspace)
         assert reg["workers"]["rust-1"]["bead"] == "bead-def"
         assert reg["workers"]["rust-1"]["skill"] == "go"
+
+    def test_dispatch_records_git_sha(self, workspace):
+        # Create an initial commit so HEAD exists
+        dummy = workspace / "init.txt"
+        dummy.write_text("init")
+        subprocess.run(["git", "add", "init.txt"], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True)
+
+        r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=workspace,
+                           capture_output=True, text=True, check=True)
+        expected_sha = r.stdout.strip()
+
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+
+        reg = load_registry(workspace)
+        assert reg["workers"]["rust-1"]["dispatch_sha"] == expected_sha
+        assert len(expected_sha) == 40
 
 
 # ── Heartbeat Tests ─────────────────────────────────────────────
@@ -728,30 +748,58 @@ class TestStatus:
 # ── Multi-Context Dir Tests ─────────────────────────────────────
 
 
-class TestMultiContext:
-    def test_picks_newest_context_dir(self, workspace):
-        beads = workspace / ".beads"
+class TestActivePlan:
+    def test_init_creates_active_plan_file(self, workspace):
+        tf(workspace, ["init", "my-plan", "--bd-path", "/usr/bin/bd"])
+        active = workspace / ".beads" / "active-plan"
+        assert active.exists()
+        assert active.read_text().strip() == "my-plan"
 
-        # Create old context dir
+    def test_reinit_updates_active_plan(self, workspace):
+        tf(workspace, ["init", "plan-a", "--bd-path", "/usr/bin/bd"])
+        tf(workspace, ["init", "plan-b", "--bd-path", "/usr/bin/bd"])
+        active = workspace / ".beads" / "active-plan"
+        assert active.read_text().strip() == "plan-b"
+
+    def test_errors_without_active_plan(self, workspace):
+        # No init → no active-plan file → commands should error
+        out = tf(workspace, ["sync"])
+        assert "_returncode" in out
+        assert out["_returncode"] != 0
+        assert "active-plan" in out.get("_stderr", "")
+
+    def test_errors_with_missing_context_dir(self, workspace):
+        # Write active-plan pointing to non-existent context dir
+        (workspace / ".beads" / "active-plan").write_text("nonexistent")
+        out = tf(workspace, ["sync"])
+        assert "_returncode" in out
+        assert out["_returncode"] != 0
+
+    def test_active_plan_resolves_correct_context(self, workspace):
+        # Create two context dirs, active-plan points to "old"
+        beads = workspace / ".beads"
         old = beads / "context-old"
         old.mkdir()
         old_reg = old / "registry.json"
-        old_reg.write_text(json.dumps({"plan_name": "old", "bd_path": "bd", "workers": {}, "routing": {}, "phases": {}}))
+        old_reg.write_text(json.dumps({
+            "plan_name": "old", "bd_path": "bd",
+            "workers": {"w1": {"status": "idle", "skill": "go", "bead": "b1", "context_pct": 50}},
+            "routing": {}, "phases": {}, "settings": {"stall_threshold_mins": 20},
+        }))
 
-        import time
-        time.sleep(0.1)
-
-        # Create new context dir
         new = beads / "context-new"
         new.mkdir()
         new_reg = new / "registry.json"
-        new_reg.write_text(json.dumps({"plan_name": "new", "bd_path": "/usr/bin/bd", "workers": {}, "routing": {}, "phases": {}, "settings": {"stall_threshold_mins": 20}}))
+        new_reg.write_text(json.dumps({
+            "plan_name": "new", "bd_path": "/usr/bin/bd",
+            "workers": {},
+            "routing": {}, "phases": {}, "settings": {"stall_threshold_mins": 20},
+        }))
 
-        # Touch new one to ensure it's newest
-        new_reg.touch()
-
+        # Point to "old" — should use "old" registry (which has 1 worker)
+        (beads / "active-plan").write_text("old")
         out = tf(workspace, ["sync"])
-        assert out["counts"]["total"] == 0  # Uses "new" which has no workers
+        assert out["counts"]["total"] == 1
 
 
 # ── Helper Function Unit Tests ─────────────────────────────────
@@ -1023,6 +1071,89 @@ class TestWorkerClose:
         # Clean file should produce no warnings
         assert "warnings" not in out or len(out.get("warnings", [])) == 0
 
+    def test_rejects_uncommitted_since_dispatch_sha(self, workspace, bd_stub):
+        """With dispatch SHA, worker-close should catch files changed after dispatch."""
+        # Create initial commit
+        (workspace / "init.txt").write_text("init")
+        subprocess.run(["git", "add", "init.txt"], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "init", "-q"], cwd=workspace, check=True)
+
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        subprocess.run(["git", "add", ".gitignore"], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: gitignore", "-q"], cwd=workspace, check=True)
+
+        # Dispatch records current HEAD as dispatch_sha
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+
+        # Worker creates a file but does NOT commit
+        (workspace / "new_file.rs").write_text("fn main() {}")
+
+        out = tf(workspace, ["worker-close", "bead-abc", "--context-pct", "50"],
+                 env={"CLAUDE_AGENT_NAME": "rust-1",
+                      "BD_STUB_RESPONSE": json.dumps([{"status": "in_progress"}])})
+        assert out["ok"] is False
+        assert any("uncommitted" in e for e in out["errors"])
+        assert any("new_file.rs" in e for e in out["errors"])
+
+    def test_accepts_preexisting_uncommitted(self, workspace, bd_stub):
+        """Pre-existing uncommitted files (before dispatch) should NOT block close."""
+        (workspace / "init.txt").write_text("init")
+        subprocess.run(["git", "add", "init.txt"], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "init", "-q"], cwd=workspace, check=True)
+
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        subprocess.run(["git", "add", ".gitignore"], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: gitignore", "-q"], cwd=workspace, check=True)
+
+        # Pre-existing uncommitted file — exists BEFORE dispatch
+        (workspace / "preexisting.txt").write_text("wip")
+
+        # Dispatch — SHA is after gitignore commit; preexisting.txt is already untracked
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+
+        # Worker commits real work (clean working tree for worker's changes)
+        (workspace / "src.rs").write_text("fn main() {}")
+        subprocess.run(["git", "add", "src.rs"], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: add main"], cwd=workspace, check=True)
+
+        out = tf(workspace, ["worker-close", "bead-abc", "--context-pct", "50",
+                              "--files", "src.rs", "--summary", "done"],
+                 env={"CLAUDE_AGENT_NAME": "rust-1",
+                      "BD_STUB_RESPONSE": json.dumps([{"status": "in_progress"}])})
+        # preexisting.txt was untracked before dispatch — should not block
+        # The check may still fail on bd close/verify, but the uncommitted check should pass
+        if not out.get("ok"):
+            for e in out.get("errors", []):
+                assert "preexisting" not in e
+
+    def test_fallback_when_no_dispatch_sha(self, workspace, bd_stub):
+        """Without dispatch_sha, should fall back to git status check."""
+        (workspace / "init.txt").write_text("init")
+        subprocess.run(["git", "add", "init.txt"], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "init", "-q"], cwd=workspace, check=True)
+
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        subprocess.run(["git", "add", ".gitignore"], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: gitignore", "-q"], cwd=workspace, check=True)
+
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+
+        # Remove dispatch_sha from registry
+        reg = load_registry(workspace)
+        del reg["workers"]["rust-1"]["dispatch_sha"]
+        save_registry(workspace, reg)
+
+        # Create uncommitted file
+        (workspace / "oops.rs").write_text("fn oops() {}")
+        subprocess.run(["git", "add", "oops.rs"], cwd=workspace, check=True)
+
+        out = tf(workspace, ["worker-close", "bead-abc", "--context-pct", "50",
+                              "--files", "oops.rs"],
+                 env={"CLAUDE_AGENT_NAME": "rust-1",
+                      "BD_STUB_RESPONSE": json.dumps([{"status": "in_progress"}])})
+        assert out["ok"] is False
+        assert any("uncommitted" in e or "staged" in e for e in out["errors"])
+
 
 # ── Bd Path Tests ──────────────────────────────────────────────
 
@@ -1201,3 +1332,166 @@ class TestSyncReuseEnforcement:
 
         out = tf(workspace, ["sync"])
         assert "reuse_enforced" not in out
+
+
+# ── Dep Tests (Problem 5) ─────────────────────────────────────
+
+
+class TestDep:
+    def test_dep_success(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["dep", "bead-1", "bead-2"])
+        assert out["ok"] is True
+        assert out["blocker"] == "bead-1"
+        assert out["blocked"] == "bead-2"
+        assert out["already_existed"] is False
+
+    def test_dep_unique_constraint_as_success(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["dep", "bead-1", "bead-2"],
+                 env={"BD_STUB_EXIT": "1",
+                      "BD_STUB_STDERR": "UNIQUE constraint failed: deps.blocker_id, deps.blocked_id"})
+        assert out["ok"] is True
+        assert out["already_existed"] is True
+
+    def test_dep_duplicate_as_success(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["dep", "bead-1", "bead-2"],
+                 env={"BD_STUB_EXIT": "1",
+                      "BD_STUB_STDERR": "duplicate dependency"})
+        assert out["ok"] is True
+        assert out["already_existed"] is True
+
+    def test_dep_real_error_propagated(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["dep", "bead-1", "bead-2"],
+                 env={"BD_STUB_EXIT": "1",
+                      "BD_STUB_STDERR": "connection refused"})
+        assert out["ok"] is False
+        assert "connection refused" in out["error"]
+
+
+# ── Close Tests (Problem 4) ───────────────────────────────────
+
+
+class TestTfClose:
+    def test_close_normalizes_array(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["close", "bead-abc"],
+                 env={"BD_STUB_RESPONSE": json.dumps([{"id": "bead-abc", "status": "closed"}])})
+        assert out["ok"] is True
+        assert out["id"] == "bead-abc"
+        assert out["status"] == "closed"
+
+    def test_close_normalizes_object(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["close", "bead-abc"],
+                 env={"BD_STUB_RESPONSE": json.dumps({"id": "bead-abc", "status": "closed"})})
+        assert out["ok"] is True
+        assert out["id"] == "bead-abc"
+        assert out["status"] == "closed"
+
+    def test_close_with_reason(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["close", "bead-abc", "--reason", "phase 1 complete"])
+        assert out["ok"] is True
+
+    def test_close_bd_failure(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["close", "bead-abc"],
+                 env={"BD_STUB_EXIT": "1", "BD_STUB_STDERR": "bead not found"})
+        assert out["ok"] is False
+        assert "bead not found" in out["error"]
+
+    def test_close_default_reason(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["close", "bead-abc"],
+                 env={"BD_STUB_RESPONSE": json.dumps([{"id": "bead-abc", "status": "closed"}])})
+        assert out["ok"] is True
+
+
+# ── Validate Plan Tests (Problem 2) ───────────────────────────
+
+
+class TestValidatePlan:
+    def test_valid_plan_passes(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## Build auth system
+
+            ### Type
+            epic
+
+            ## Create user model
+
+            ### Type
+            task
+
+            ## Add login endpoint
+
+            ### Type
+            task
+        """))
+        out = tf(workspace, ["validate-plan", str(plan)])
+        assert out["ok"] is True
+        assert out["issues"] == 3
+        assert out["epics"] == 1
+        assert out["tasks"] == 2
+
+    def test_detects_hr_separators(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## Epic one
+
+            ---
+
+            ## Task one
+        """))
+        out = tf(workspace, ["validate-plan", str(plan)])
+        assert out["ok"] is False
+        assert any("---" in e for e in out["errors"])
+        assert any("line 3" in e for e in out["errors"])
+
+    def test_counts_epics_and_tasks(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## My Epic
+
+            ### Type
+            epic
+
+            ## Task A
+
+            ## Task B
+
+            ## Task C
+        """))
+        out = tf(workspace, ["validate-plan", str(plan)])
+        assert out["epics"] == 1
+        assert out["tasks"] == 3
+
+    def test_dry_run_titles(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / "plan.md"
+        plan.write_text("## First issue\n\n## Second issue\n")
+        out = tf(workspace, ["validate-plan", str(plan)])
+        titles = [d["title"] for d in out["dry_run"]]
+        assert "First issue" in titles
+        assert "Second issue" in titles
+
+    def test_nonexistent_file(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        out = tf(workspace, ["validate-plan", "/nonexistent/plan.md"])
+        assert out["ok"] is False
+        assert "not found" in out.get("error", "")
+
+    def test_dash_variants(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / "plan.md"
+        plan.write_text("## Issue\n---\n----\n-----\n## Another\n")
+        out = tf(workspace, ["validate-plan", str(plan)])
+        assert out["ok"] is False
+        assert len(out["errors"]) == 3

@@ -74,25 +74,18 @@ def _beads_dir() -> Path:
 
 def _registry_path() -> Path:
     bd = _beads_dir()
-    # Find all context dirs with registry.json, pick most recently modified
-    candidates = []
-    for child in bd.iterdir():
-        if child.is_dir() and child.name.startswith("context-"):
-            rp = child / REGISTRY_FILE
+    active_plan_file = bd / "active-plan"
+    if active_plan_file.exists():
+        plan_name = active_plan_file.read_text().strip()
+        if plan_name:
+            rp = bd / f"context-{plan_name}" / REGISTRY_FILE
             if rp.exists():
-                candidates.append(rp)
-    if candidates:
-        if len(candidates) > 1:
-            # Sort by modification time, newest first
-            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            import sys as _sys
-            print(json.dumps({"warning": f"{len(candidates)} context dirs found, using newest: {candidates[0].parent.name}"}), file=_sys.stderr)
-        return candidates[0]
-    # Fallback: return first context dir (no registry.json yet)
-    for child in bd.iterdir():
-        if child.is_dir() and child.name.startswith("context-"):
-            return child / REGISTRY_FILE
-    sys.exit('{"error":"no context directory found in .beads/"}')
+                return rp
+            ctx = bd / f"context-{plan_name}"
+            if ctx.is_dir():
+                return ctx / REGISTRY_FILE
+            sys.exit(f'{{"error":"active-plan points to \'{plan_name}\' but context-{plan_name}/ does not exist. Run tf.py init {plan_name}."}}')
+    sys.exit('{"error":"no .beads/active-plan found. Run tf.py init <plan-name> first."}')
 
 
 def _load_registry(path: Path | None = None) -> tuple[dict, Path]:
@@ -194,6 +187,9 @@ def cmd_init(args: argparse.Namespace) -> None:
     ctx = bd / f"context-{args.plan_name}"
     ctx.mkdir(parents=True, exist_ok=True)
 
+    # Write active-plan pointer so all subsequent commands resolve deterministically
+    (bd / "active-plan").write_text(args.plan_name)
+
     reg = ctx / REGISTRY_FILE
     if reg.exists():
         _out({"ok": True, "msg": "already exists", "path": str(ctx)})
@@ -238,6 +234,9 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
     reg, rp = _load_registry()
     now = _now()
 
+    r_ut = _run("git ls-files --others --exclude-standard")
+    pre_untracked = [f for f in r_ut.stdout.strip().split("\n") if f]
+
     reg["workers"][args.worker] = {
         "status": "active",
         "skill": args.skill,
@@ -245,6 +244,8 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
         "bead": args.bead_id,
         "notification": "pending",
         "dispatched_at": now,
+        "dispatch_sha": _run("git rev-parse HEAD").stdout.strip(),
+        "dispatch_untracked": pre_untracked,
         "last_heartbeat": now,
         "last_heartbeat_note": None,
         "heartbeat_history": [],
@@ -261,8 +262,33 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
     errors = []
     warnings = []
 
-    # 1. Check uncommitted changes in target files
-    if args.files:
+    # 1. Check uncommitted changes — diff against dispatch SHA if available
+    dispatch_sha = ""
+    pre_untracked: set[str] = set()
+    worker_name = os.environ.get("CLAUDE_AGENT_NAME", "")
+    try:
+        reg, _ = _load_registry(rp)
+        if worker_name and worker_name in reg.get("workers", {}):
+            w_entry = reg["workers"][worker_name]
+            dispatch_sha = w_entry.get("dispatch_sha", "")
+            pre_untracked = set(w_entry.get("dispatch_untracked", []))
+    except Exception:
+        pass
+
+    if dispatch_sha:
+        r_wt = _run(f"git diff {dispatch_sha} --name-only")
+        r_ci = _run(f"git diff {dispatch_sha} HEAD --name-only")
+        r_ut = _run("git ls-files --others --exclude-standard")
+
+        wt_changed = {f for f in r_wt.stdout.strip().split("\n") if f and not f.startswith(".beads/")}
+        committed = {f for f in r_ci.stdout.strip().split("\n") if f}
+        untracked = {f for f in r_ut.stdout.strip().split("\n") if f and not f.startswith(".beads/")}
+        new_untracked = untracked - pre_untracked
+
+        uncommitted = (wt_changed - committed) | new_untracked
+        if uncommitted:
+            errors.append(f"uncommitted: {','.join(sorted(uncommitted)[:5])}")
+    elif args.files:
         files = [f.strip() for f in args.files.split(",")]
         for f in files:
             r = _run(f"git diff --name-only -- {f}")
@@ -272,7 +298,6 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
             if r2.stdout.strip():
                 errors.append(f"staged but uncommitted: {f}")
     else:
-        # Check if there are any uncommitted changes at all
         r = _run("git status --porcelain")
         modified = [
             line[3:] for line in r.stdout.strip().split("\n")
@@ -716,6 +741,88 @@ def cmd_conflict_check(args: argparse.Namespace) -> None:
     _out(result)
 
 
+def cmd_dep(args: argparse.Namespace) -> None:
+    """Add a dependency idempotently — UNIQUE constraint errors are treated as success."""
+    rp = _registry_path()
+    bd = _bd(rp)
+    r = _run(f"{bd} dep {args.blocker} --blocks {args.blocked}")
+    if r.returncode == 0:
+        _out({"ok": True, "blocker": args.blocker, "blocked": args.blocked, "already_existed": False})
+        return
+    combined = (r.stderr + r.stdout).lower()
+    if "unique" in combined or "duplicate" in combined or "already exists" in combined:
+        _out({"ok": True, "blocker": args.blocker, "blocked": args.blocked, "already_existed": True})
+        return
+    _out({"ok": False, "error": f"bd dep failed: {r.stderr.strip()[:200]}"})
+
+
+def cmd_close(args: argparse.Namespace) -> None:
+    """Close a bead via bd close, normalizing output to a simple JSON object."""
+    rp = _registry_path()
+    bd = _bd(rp)
+    reason = args.reason or "completed"
+    reason_escaped = reason.replace('"', '\\"')
+    r = _run(f'{bd} close {args.bead_id} --reason "{reason_escaped}" --json')
+    if r.returncode != 0:
+        _out({"ok": False, "error": f"bd close failed: {r.stderr.strip()[:200]}"})
+        return
+    # Verify via bd show
+    r2 = _run(f"{bd} show {args.bead_id} --json")
+    status = "unknown"
+    try:
+        data = json.loads(r2.stdout)
+        bead = data[0] if isinstance(data, list) else data
+        status = bead.get("status", "unknown") if isinstance(bead, dict) else "unknown"
+    except (json.JSONDecodeError, IndexError):
+        pass
+    _out({"ok": True, "id": args.bead_id, "status": status})
+
+
+def cmd_validate_plan(args: argparse.Namespace) -> None:
+    """Validate a plan markdown file for bd create -f compatibility."""
+    plan_path = Path(args.file)
+    if not plan_path.exists():
+        _out({"ok": False, "error": f"file not found: {args.file}"})
+        return
+
+    content = plan_path.read_text()
+    lines = content.split("\n")
+    errors = []
+    issues = []
+
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if re.match(r'^-{3,}\s*$', stripped):
+            errors.append(f"line {i}: '---' horizontal rule breaks bd parser — remove it")
+        elif stripped.startswith("## "):
+            title = stripped[3:].strip()
+            issues.append({"line": i, "title": title})
+
+    # Determine types by scanning ### Type sections
+    epics = 0
+    for i, line in enumerate(lines):
+        if re.match(r'^###\s+[Tt]ype\s*$', line.strip()):
+            for j in range(i + 1, min(i + 4, len(lines))):
+                type_line = lines[j].strip()
+                if type_line and not type_line.startswith("#"):
+                    if type_line.lower() == "epic":
+                        epics += 1
+                    break
+
+    result: dict = {
+        "ok": len(errors) == 0,
+        "file": args.file,
+        "issues": len(issues),
+        "epics": epics,
+        "tasks": len(issues) - epics,
+    }
+    if errors:
+        result["errors"] = errors
+    if issues:
+        result["dry_run"] = [{"title": iss["title"]} for iss in issues]
+    _out(result)
+
+
 def cmd_registry(args: argparse.Namespace) -> None:
     """Query worker registry. Compact output."""
     reg, _ = _load_registry()
@@ -1006,6 +1113,20 @@ def main() -> None:
     # status
     sub.add_parser("status")
 
+    # dep (idempotent bd dep wrapper)
+    s = sub.add_parser("dep")
+    s.add_argument("blocker")
+    s.add_argument("blocked")
+
+    # close (normalized bd close wrapper)
+    s = sub.add_parser("close")
+    s.add_argument("bead_id")
+    s.add_argument("--reason", default="completed")
+
+    # validate-plan
+    s = sub.add_parser("validate-plan")
+    s.add_argument("file")
+
     args = p.parse_args()
     if not args.cmd:
         p.print_help()
@@ -1030,6 +1151,9 @@ def main() -> None:
         "routing": cmd_routing,
         "sync": cmd_sync,
         "status": cmd_status,
+        "dep": cmd_dep,
+        "close": cmd_close,
+        "validate-plan": cmd_validate_plan,
     }
     cmds[args.cmd](args)
 

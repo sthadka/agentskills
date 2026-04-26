@@ -21,7 +21,7 @@ You are a **pure orchestrator**. You NEVER read or write project source code. Yo
 4. **Accumulate summaries only** — store worker completion summaries from `tf.py notify`, never full notification results, code, or diffs. Discard `<task-notification>` `<result>` content after extracting the summary.
 5. **Layered context** — workers receive structured context layers (project > epic > feature > task), not a monolithic blob. See [CONTEXT-MANAGEMENT.md](CONTEXT-MANAGEMENT.md).
 6. **Respect file boundaries** — never spawn parallel workers that would write to the same files.
-7. **Batch-first, JSON-compact** — always use `--json | jq -c` for `bd` commands. `tf.py` output is already compact.
+7. **Batch-first, JSON-compact** — always use `--json | jq -c` for `bd` commands. `tf.py` output is already compact. **Prefer `tf.py close` and `tf.py dep`** over raw `bd close --json | jq` and `bd dep` — they normalize output and handle edge cases.
 8. **Workers close via `tf.py`** — workers call `python3 .beads/tf.py worker-close` which validates commits, closes the bead, and verifies. They still use `bd update` to claim and `bd create` for discovered work.
 9. **Right-size dispatch** — don't spawn workers for trivial tasks. Batch small related tasks into one worker assignment. Each worker spawn has overhead.
 10. **All state through `tf.py`** — never edit `registry.json` manually. All worker state, notifications, and phase gates go through `tf.py` subcommands.
@@ -80,13 +80,7 @@ Determine `{plan-name}` for context directory naming:
 - User-provided name
 - Fallback: date-based (e.g., `2026-04-05`)
 
-Check for stale context directories from prior sessions:
-```bash
-ls .beads/context-*/registry.json 2>/dev/null | wc -l | tr -d ' '
-```
-If > 1, verify which to use. `tf.py` picks the most recently modified, but stale dirs with wrong `bd_path` can cause issues. Remove or rename old context dirs if not needed.
-
-Initialize context and state management:
+Initialize context and state management (`tf.py init` writes `.beads/active-plan` so all subsequent commands resolve the context dir deterministically — no scanning, no warnings):
 ```bash
 python3 ~/.claude/skills/treeflow/tf.py init {plan-name} --bd-path "$(which bd 2>/dev/null || echo bd)"
 ```
@@ -108,7 +102,7 @@ bd ready --json | jq -c
 bd close <id> --reason "Done" --suggest-next --json | jq -c '.[0]'
 ```
 
-> **CRITICAL: For blocking deps, use `bd dep <blocker> --blocks <blocked>` — NOT `bd dep add A B`**
+> **CRITICAL: For blocking deps, use `tf.py dep <blocker> <blocked>` (idempotent) — NOT `bd dep add A B`**
 
 ## `tf.py` Reference
 
@@ -129,7 +123,10 @@ python3 .beads/tf.py registry --worker-model              # Print configured wor
 python3 .beads/tf.py retire {worker}                     # Mark worker retired
 python3 .beads/tf.py routing --add "pattern:domain:prefix"  # Add routing entry
 python3 .beads/tf.py status                              # One-line overview
-python3 .beads/tf.py bd-path                             # Print resolved bd binary path
+python3 .beads/tf.py close {bead_id} --reason "..."                    # Close bead with normalized JSON output
+python3 .beads/tf.py dep {blocker} {blocked}                           # Add dep idempotently (UNIQUE errors = success)
+python3 .beads/tf.py validate-plan {file}                              # Validate plan md for bd create -f
+python3 .beads/tf.py bd-path                                           # Print resolved bd binary path
 
 # Worker commands (workers call these — no direct bd usage)
 python3 .beads/tf.py claim {bead_id} [--expected-mins N] # Claim task (with optional time estimate for stall detection)
@@ -141,7 +138,11 @@ python3 .beads/tf.py worker-close {bead_id} --context-pct N --files f1,f2 --summ
 
 ## Markdown File Format
 
-For batch issue creation with `bd create -f`, see [PLAN-FORMAT.md](PLAN-FORMAT.md).
+For batch issue creation with `bd create -f`, see [PLAN-FORMAT.md](PLAN-FORMAT.md). **Always validate first:**
+```bash
+python3 .beads/tf.py validate-plan plan.md
+```
+If validation fails (e.g., `---` separators detected), fix the plan file before running `bd create -f`.
 
 ## Planning Mode
 

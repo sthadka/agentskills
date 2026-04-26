@@ -83,14 +83,24 @@ task
 Tests for register, login, logout, and token refresh in tests/test_auth.py.
 ```
 
+## Format Restrictions
+
+**Never use `---` horizontal rules in plan files.** The `---` sequence breaks `bd`'s markdown parser — epics parse but child tasks are silently dropped. Use blank lines or headings to separate sections.
+
+**Validate before creating:**
+```bash
+python3 .beads/tf.py validate-plan plan.md
+```
+This detects `---` separators, counts epics/tasks, and prints a dry-run preview.
+
 ## Post-Creation Dependencies
 
-Issues created in the same file cannot reference each other's IDs (unknown at creation time). Add cross-issue dependencies after creation:
+Issues created in the same file cannot reference each other's IDs (unknown at creation time). Add cross-issue dependencies after creation using `tf.py dep` (idempotent — handles duplicate deps gracefully):
 
 ```bash
 bd create -f plan.md --json
-# Parse returned IDs, then chain dependency additions using --blocks (blocker first, clear direction):
-bd dep <user-model-id> --blocks <login-id> && bd dep <login-id> --blocks <logout-id> && bd dep <logout-id> --blocks <tests-id>
-# Add hierarchy (dep add with parent-child type: child first, parent second):
+# Parse returned IDs, then chain dependency additions:
+python3 .beads/tf.py dep <user-model-id> <login-id> && python3 .beads/tf.py dep <login-id> <logout-id> && python3 .beads/tf.py dep <logout-id> <tests-id>
+# Add hierarchy (parent-child type — use bd dep add directly):
 bd dep add <user-model-id> <epic-id> -t parent-child && bd dep add <login-id> <epic-id> -t parent-child
 ```

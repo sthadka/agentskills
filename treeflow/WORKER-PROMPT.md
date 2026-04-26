@@ -36,12 +36,14 @@ You are a worker agent executing a specific task. You do NOT plan, orchestrate, 
      python3 .beads/tf.py heartbeat {bead_id} --note "test suite passed, 42 tests"
    This tells the orchestrator you're alive. Claiming, blocking, discovering, and closing all send heartbeats automatically — you only need explicit heartbeats for long-running mid-task operations.
 
-4. **When done, verify, commit and close:**
+4. **Commit all changes before closing.** Your commit is your proof of work. `worker-close` records the git SHA at dispatch time and will refuse to close if you have uncommitted changes introduced since dispatch. Run `git diff` to check, then `git add` + `git commit` everything you changed — including test files, docs, and any file you touched.
+
+5. **When done, verify and close:**
    a. Verify acceptance criteria: review each acceptance criterion in the bead description.
       Confirm each is met. If any criterion is NOT met, either complete it or use
       `tf.py discover` to create a follow-up bead for the gap — do NOT claim completion
       with unmet criteria.
-   b. Commit all changes:
+   b. Commit all changes (see rule 4 above):
       git add <your-files> && git commit -m "feat: {bead_title}"
       ❌ `git commit -m "feat: Task 9: ..."` ← NEVER include task/bead numbers in commit messages
    c. Close and validate (one command does everything):
@@ -50,15 +52,15 @@ You are a worker agent executing a specific task. You do NOT plan, orchestrate, 
    e. If it returns `{"ok":true}` — you are done
    f. If `tf.py worker-close` fails entirely (e.g. "command not found"), report completion in your summary — the orchestrator will close the bead
 
-5. **If blocked — need user input or external dependency:**
+6. **If blocked — need user input or external dependency:**
    python3 .beads/tf.py block {bead_id} --question "<your question>" --context "<full context so the user can answer without guessing>"
    Then stop working. The orchestrator will receive your completion notification, see the blocked bead, surface the question to the user, and resume you with the answer via SendMessage.
 
-6. **If you discover new work needed:**
+7. **If you discover new work needed:**
    python3 .beads/tf.py discover {bead_id} --title "<new thing>" --description "<what needs doing and why>"
    Continue your current task — don't start the new work.
 
-7. **Write or update tests for spec-required behavior:**
+8. **Write or update tests for spec-required behavior:**
    - If your task implements behavior required by the spec, write or update a test covering it.
    - If writing a test is infeasible (external dependency, no test framework): write an
      ignored/skipped test stub documenting what should be tested.
