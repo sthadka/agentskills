@@ -185,7 +185,9 @@ def extract_code_blocks(text: str, lang: str | None = None) -> list[str]:
 def extract_type_names(code: str) -> set[str]:
     names = set()
     for match in re.finditer(r'\b(?:interface|type|enum|class)\s+(\w+)', code):
-        names.add(match.group(1))
+        name = match.group(1)
+        if re.match(r'^[A-Z]', name):  # PascalCase only — filters out lowercase noise
+            names.add(name)
     return names
 
 
@@ -406,22 +408,34 @@ def cmd_lint_plan(args: list[str]) -> int:
 
         coverage_table = parse_spec_coverage_table(text)
         if coverage_table:
-            covered_sections = {row['spec_section'] for row in coverage_table}
+            # Substring match: "Architecture" matches "§Architecture — Package Layout"
             for section in spec_sections:
-                if section not in covered_sections:
+                covered = any(section in row['spec_section'] for row in coverage_table)
+                if not covered:
                     issues.append(f'Spec Coverage: section `{section}` not covered in table')
 
             plan_data = parse_plan(text)
-            task_slugs = {
+            # Include both top-level tasks and subtasks for ref matching
+            all_slugs = {
                 make_task_slug(t['description'])
                 for ph in plan_data['phases'] for t in ph['tasks']
+            } | {
+                make_task_slug(st['description'])
+                for ph in plan_data['phases'] for t in ph['tasks']
+                for st in t.get('subtasks', [])
             }
+            _range_re = re.compile(r'[–—]\d')
             for row in coverage_table:
-                ref = row['task_ref']
-                if not any(ref in slug or slug in ref for slug in task_slugs):
-                    issues.append(
-                        f'Spec Coverage: task ref `{ref}` does not match any plan task'
-                    )
+                for part in [p.strip() for p in row['task_ref'].split(',')]:
+                    if _range_re.search(part):  # skip ranges like "2.1–2.12"
+                        continue
+                    if not re.match(r'^[A-Za-z0-9.]+$', part):  # skip phrases
+                        continue
+                    if not any(slug.startswith(f'{part}:') or slug == part
+                               for slug in all_slugs):
+                        issues.append(
+                            f'Spec Coverage: task ref `{part}` does not match any plan task'
+                        )
         else:
             plan_mentions_spec = (
                 'spec.md' in text.lower() or 'Spec:' in text or 'spec §' in text
@@ -482,14 +496,17 @@ def cmd_lint_cross(args: list[str]) -> int:
         spec_text = spec_path.read_text()
         plan_text = plan_path.read_text()
 
-        spec_types = extract_type_names(
-            '\n'.join(extract_code_blocks(spec_text))
-        )
-        for tname in sorted(spec_types):
-            if tname not in plan_text:
-                issues.append(
-                    f'Spec type `{tname}` not referenced in plan.md'
-                )
+        # Skip type coverage when plan has an explicit Spec Coverage table —
+        # section-level coverage already accounts for all types within those sections.
+        if '## Spec Coverage' not in plan_text:
+            spec_types = extract_type_names(
+                '\n'.join(extract_code_blocks(spec_text))
+            )
+            for tname in sorted(spec_types):
+                if tname not in plan_text:
+                    issues.append(
+                        f'Spec type `{tname}` not referenced in plan.md'
+                    )
 
         # 3. Cross-reference consistency — Spec: spec.md §X citations
         spec_sections = [

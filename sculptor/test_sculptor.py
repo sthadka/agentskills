@@ -411,6 +411,8 @@ class TestLintPlan:
         assert "API" in r["stdout"]
 
     def test_spec_coverage_dangling_ref(self, tmp_path):
+        # Task refs are checked as simple IDs (no spaces) split by comma.
+        # "S99" is an ID-style ref that doesn't match any plan task.
         spec = tmp_path / "spec.md"
         spec.write_text("# Spec\n## Architecture\nArch\n")
 
@@ -421,13 +423,13 @@ class TestLintPlan:
 
             | Spec Section | Task |
             |---|---|
-            | Architecture | Nonexistent Task XYZ |
+            | Architecture | S99 |
         """)
         plan.write_text(plan_text)
 
         r = sculptor(["lint-plan", str(plan), "--spec", str(spec)])
         assert r["returncode"] == 1
-        assert "Nonexistent Task XYZ" in r["stdout"]
+        assert "S99" in r["stdout"]
 
     def test_no_spec_reference_warning(self, tmp_path):
         spec = tmp_path / "spec.md"
