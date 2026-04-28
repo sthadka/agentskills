@@ -161,6 +161,8 @@ See [PLAN-TEMPLATE.md](PLAN-TEMPLATE.md) for the full template and quality rules
 
 When creating the plan, ensure every task has acceptance criteria, cross-command features are exploded into separate tasks, and a `## Cross-worker Invariants` section captures contracts that span multiple workers. See [PLAN-TEMPLATE.md](PLAN-TEMPLATE.md) Quality Rules for the full checklist.
 
+After writing the plan, cross-check: count the tasks in the plan and compare against any numeric claims in idea.md (e.g., "64 modules → 64 tasks"). Fix drift before presenting to the user.
+
 ## Phase 6: FINALIZE
 
 When the user approves the document:
@@ -202,8 +204,10 @@ python3 ~/.claude/skills/sculptor/sculptor.py <command> [args]
 | `annotations <file>` | Before addressing annotations | Extracts all `>>` lines with line numbers and parsed prefixes |
 | `verify-clean <file>` | After addressing annotations | Confirms all `>>` lines were removed (returns PASS/FAIL) |
 | `lint-spec <spec.md>` | Before asking user to annotate spec | Dead types, path consistency, TODOs, untagged code blocks |
-| `lint-plan <plan.md> --spec <spec.md>` | Before asking user to annotate plan | Missing AC lines, missing sections, spec coverage |
-| `export-beads <dir>` | Phase 6 (finalize) | Generates `.beads/plan.md`, `deps.txt`, `invariants.md`. Add `--run` to also execute `bd create -f` + wire deps |
+| `lint-plan <plan.md> --spec <spec.md>` | Before asking user to annotate plan | Missing AC lines, missing sections, spec coverage table validation |
+| `lint-cross <dir>` | After writing spec + plan | Appendix link resolution, spec type coverage in plan, cross-reference consistency |
+| `export-beads <dir>` | Phase 6 (finalize) | Generates `.beads/plan.md`, `deps.txt`, `invariants.md`. Add `--run` to also execute `bd create -f` + wire deps + parent-child |
+| `wire-deps <deps.txt> --from-bd` | Standalone dep wiring | Wires deps from deps.txt using `bd list` for ID resolution. Also wires parent-child to epic |
 
 ### Required integration points
 
@@ -212,7 +216,9 @@ python3 ~/.claude/skills/sculptor/sculptor.py <command> [args]
 3. **After addressing annotations**: Run `verify-clean <file>` before telling the user changes are done.
 4. **After writing spec.md**: Run `lint-spec <spec.md>` and fix any issues before presenting to user.
 5. **After writing plan.md**: Run `lint-plan <plan.md> --spec <spec.md>` and fix any issues before presenting to user.
-6. **Phase 6 (finalize)**: If the user wants beads integration, run `export-beads <dir> --run` to create issues and wire dependencies in one step.
+6. **After writing spec + plan**: Run `lint-cross <dir>` to catch cross-document drift (broken appendix links, spec types missing from plan, bad spec section refs).
+7. **Phase 6 (finalize)**: If the user wants beads integration, run `export-beads <dir> --run` to create issues, wire dependencies, and set parent-child relationships in one step.
+8. **External dep wiring**: If another tool (e.g. treeflow) already ran `bd create -f`, use `wire-deps <deps.txt> --from-bd` to wire deps without re-creating issues.
 
 ## Session Continuity
 

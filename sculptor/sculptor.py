@@ -309,6 +309,42 @@ def cmd_lint_spec(args: list[str]) -> int:
     return 1
 
 
+def parse_spec_coverage_table(text: str) -> list[dict]:
+    """Parse ## Spec Coverage markdown table into list of {spec_section, task_ref}."""
+    rows: list[dict] = []
+    in_section = False
+    header_seen = False
+
+    for line in text.splitlines():
+        if line.strip().startswith('## Spec Coverage'):
+            in_section = True
+            header_seen = False
+            continue
+        if in_section and line.startswith('## '):
+            break
+        if not in_section:
+            continue
+
+        stripped = line.strip()
+        if not stripped or not stripped.startswith('|'):
+            if header_seen and not stripped:
+                continue
+            if not stripped.startswith('|'):
+                continue
+        if re.match(r'^\|[\s\-:|]+\|$', stripped):
+            header_seen = True
+            continue
+        if not header_seen and '|' in stripped:
+            header_seen = False
+            continue
+
+        cells = [c.strip() for c in stripped.strip('|').split('|')]
+        if len(cells) >= 2 and cells[0] and cells[1]:
+            rows.append({'spec_section': cells[0], 'task_ref': cells[1]})
+
+    return rows
+
+
 def cmd_lint_plan(args: list[str]) -> int:
     if not args:
         print('Usage: sculptor lint-plan <plan.md> [--spec <spec.md>]')
@@ -363,16 +399,38 @@ def cmd_lint_plan(args: list[str]) -> int:
     if '## Risks' not in text:
         issues.append('Missing `## Risks` section')
 
-    # 6. Spec coverage — check if plan references spec sections
+    # 6. Spec coverage validation
     if spec_path and spec_path.exists():
         spec_text = spec_path.read_text()
-        spec_sections = re.findall(r'^## (.+)$', spec_text, re.MULTILINE)
-        plan_mentions_spec = 'spec.md' in text.lower() or 'Spec:' in text or 'spec §' in text
-        if spec_sections and not plan_mentions_spec:
-            issues.append(
-                'Plan does not reference spec.md — consider adding '
-                '`Spec: spec.md §N` citations to tasks'
+        spec_sections = [s.strip() for s in re.findall(r'^## (.+)$', spec_text, re.MULTILINE)]
+
+        coverage_table = parse_spec_coverage_table(text)
+        if coverage_table:
+            covered_sections = {row['spec_section'] for row in coverage_table}
+            for section in spec_sections:
+                if section not in covered_sections:
+                    issues.append(f'Spec Coverage: section `{section}` not covered in table')
+
+            plan_data = parse_plan(text)
+            task_slugs = {
+                make_task_slug(t['description'])
+                for ph in plan_data['phases'] for t in ph['tasks']
+            }
+            for row in coverage_table:
+                ref = row['task_ref']
+                if not any(ref in slug or slug in ref for slug in task_slugs):
+                    issues.append(
+                        f'Spec Coverage: task ref `{ref}` does not match any plan task'
+                    )
+        else:
+            plan_mentions_spec = (
+                'spec.md' in text.lower() or 'Spec:' in text or 'spec §' in text
             )
+            if spec_sections and not plan_mentions_spec:
+                issues.append(
+                    'Plan does not reference spec.md — consider adding '
+                    'a `## Spec Coverage` table or `Spec: spec.md §N` citations'
+                )
 
     # 7. Remaining annotations
     annotations = parse_annotations(filepath)
@@ -389,13 +447,80 @@ def cmd_lint_plan(args: list[str]) -> int:
     return 1
 
 
+def cmd_lint_cross(args: list[str]) -> int:
+    if not args:
+        print('Usage: sculptor lint-cross <idea-dir>')
+        return 1
+
+    idea_dir = Path(args[0])
+    if not idea_dir.is_dir():
+        print(f'Directory not found: {idea_dir}')
+        return 1
+
+    issues = []
+
+    # Collect all markdown files
+    md_files = list(idea_dir.glob('*.md'))
+
+    # 1. Appendix link resolution
+    appendix_link_re = re.compile(r'\[([^\]]*)\]\((appendix-[^)]+\.md)\)')
+    for md_file in md_files:
+        text = md_file.read_text()
+        for match in appendix_link_re.finditer(text):
+            target = match.group(2)
+            target_path = idea_dir / target
+            if not target_path.exists():
+                issues.append(
+                    f'{md_file.name}: broken appendix link `{target}`'
+                )
+
+    # 2. Spec type coverage in plan
+    spec_path = idea_dir / 'spec.md'
+    plan_path = idea_dir / 'plan.md'
+
+    if spec_path.exists() and plan_path.exists():
+        spec_text = spec_path.read_text()
+        plan_text = plan_path.read_text()
+
+        spec_types = extract_type_names(
+            '\n'.join(extract_code_blocks(spec_text))
+        )
+        for tname in sorted(spec_types):
+            if tname not in plan_text:
+                issues.append(
+                    f'Spec type `{tname}` not referenced in plan.md'
+                )
+
+        # 3. Cross-reference consistency — Spec: spec.md §X citations
+        spec_sections = [
+            s.strip() for s in re.findall(r'^## (.+)$', spec_text, re.MULTILINE)
+        ]
+        spec_refs = re.findall(r'[Ss]pec(?::\s*spec\.md)?\s*§\s*(.+?)(?:\s*[—\-–]|$)', plan_text)
+        for ref in spec_refs:
+            ref_clean = ref.strip()
+            if not any(ref_clean in s or s in ref_clean for s in spec_sections):
+                issues.append(
+                    f'Plan references `Spec §{ref_clean}` but no matching '
+                    f'section in spec.md'
+                )
+
+    if not issues:
+        print(f'PASS — cross-document checks clean in {idea_dir.name}/')
+        return 0
+
+    print(f'{len(issues)} cross-document issue(s) in {idea_dir.name}/:\n')
+    for issue in issues:
+        print(f'  ✗ {issue}')
+    return 1
+
+
 ## ── Plan parser (shared by lint-plan and export-beads) ──────────────────────
 
 
 TASK_RE = re.compile(r'^- \[ \] (.+)')
 SUBTASK_RE = re.compile(r'^  - \[ \] (.+)')
 AC_RE = re.compile(r'^\s+- AC:\s*(.*)')
-PHASE_RE = re.compile(r'^## (Phase \d+:\s*.+|Setup)(\s+\[.*\])?$')
+PHASE_RE = re.compile(r'^## (Phase \d+:\s*.+?|Setup)(\s+\[.*\])?$')
 
 
 def parse_plan(text: str) -> dict:
@@ -705,7 +830,7 @@ def generate_deps(plan: dict) -> str:
             out.append(f'# {phase_label} — cross-phase dependencies')
             first_slugs = (
                 [slug for _, slug in phase_tasks]
-                if plan['phases'][prev_phase_idx]['is_parallel']
+                if phase['is_parallel'] or plan['phases'][prev_phase_idx]['is_parallel']
                 else [phase_tasks[0][1]]
             )
             for ps in prev_phase_last_slugs:
@@ -850,6 +975,122 @@ def run_bd_deps(deps: list[dict], created_issues: list[dict]) -> tuple[int, int]
     return success, fail
 
 
+def find_epic_id(created_issues: list[dict]) -> str | None:
+    """Find the epic issue from the created issues list."""
+    for issue in created_issues:
+        title = issue.get('title', '')
+        if title.startswith('Goal:') or issue.get('type') == 'epic':
+            return issue['id']
+    return created_issues[0]['id'] if created_issues else None
+
+
+def run_bd_parent_child(created_issues: list[dict]) -> tuple[int, int]:
+    """Wire parent-child: all non-epic issues become children of the epic."""
+    epic_id = find_epic_id(created_issues)
+    if not epic_id:
+        return 0, 0
+
+    success = 0
+    fail = 0
+    for issue in created_issues:
+        if issue.get('id') == epic_id:
+            continue
+        result = subprocess.run(
+            ['bd', 'dep', 'add', issue['id'], epic_id,
+             '-t', 'parent-child', '--json'],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            fail += 1
+        else:
+            success += 1
+
+    return success, fail
+
+
+def load_issues_from_bd() -> list[dict] | None:
+    """Load current open issues from bd list --json."""
+    result = subprocess.run(
+        ['bd', 'list', '--json'],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f'  bd list failed: {result.stderr.strip()[:200]}')
+        return None
+
+    try:
+        data = json.loads(result.stdout)
+        if isinstance(data, list):
+            return data
+        return []
+    except json.JSONDecodeError:
+        return None
+
+
+def cmd_wire_deps(args: list[str]) -> int:
+    from_bd = '--from-bd' in args
+    id_map_path = None
+    if '--id-map' in args:
+        idx = args.index('--id-map')
+        if idx + 1 < len(args):
+            id_map_path = Path(args[idx + 1])
+
+    filtered_args = [
+        a for a in args
+        if a not in ('--from-bd',) and a != '--id-map'
+        and not (id_map_path and a == str(id_map_path))
+    ]
+
+    if not filtered_args:
+        print('Usage: sculptor wire-deps <deps.txt> --from-bd')
+        print('       sculptor wire-deps <deps.txt> --id-map <map.json>')
+        return 1
+
+    deps_path = Path(filtered_args[0])
+    if not deps_path.exists():
+        print(f'File not found: {deps_path}')
+        return 1
+
+    if not from_bd and not id_map_path:
+        print('Specify --from-bd or --id-map <map.json>')
+        return 1
+
+    # Load issues
+    if from_bd:
+        print('Loading issues from bd...')
+        issues = load_issues_from_bd()
+        if issues is None:
+            return 1
+        print(f'  Found {len(issues)} issues')
+    else:
+        assert id_map_path is not None
+        if not id_map_path.exists():
+            print(f'File not found: {id_map_path}')
+            return 1
+        mapping = json.loads(id_map_path.read_text())
+        issues = [{'id': v, 'title': k} for k, v in mapping.items()]
+
+    # Parse and wire deps
+    deps_text = deps_path.read_text()
+    parsed_deps = parse_deps_file(deps_text)
+
+    if parsed_deps:
+        print(f'\nWiring {len(parsed_deps)} dependencies...')
+        success, fail = run_bd_deps(parsed_deps, issues)
+        print(f'  Done: {success} wired, {fail} failed/skipped')
+    else:
+        print('No dependencies found in deps.txt')
+        success, fail = 0, 0
+
+    # Wire parent-child
+    print(f'\nWiring parent-child relationships...')
+    pc_success, pc_fail = run_bd_parent_child(issues)
+    print(f'  Done: {pc_success} wired, {pc_fail} failed/skipped')
+
+    total_fail = fail + pc_fail
+    return 1 if total_fail > 0 else 0
+
+
 def cmd_export_beads(args: list[str]) -> int:
     run_mode = '--run' in args
     dry_run = '--dry-run' in args
@@ -943,13 +1184,20 @@ def cmd_export_beads(args: list[str]) -> int:
 
     # Wire dependencies
     parsed_deps = parse_deps_file(deps_text)
-    if not parsed_deps:
+    fail = 0
+    if parsed_deps:
+        print(f'\nWiring {len(parsed_deps)} dependencies...')
+        success, dep_fail = run_bd_deps(parsed_deps, created_issues)
+        print(f'  Done: {success} wired, {dep_fail} failed/skipped')
+        fail += dep_fail
+    else:
         print(f'\nNo dependencies to wire.')
-        return 0
 
-    print(f'\nWiring {len(parsed_deps)} dependencies...')
-    success, fail = run_bd_deps(parsed_deps, created_issues)
-    print(f'  Done: {success} wired, {fail} failed/skipped')
+    # Wire parent-child relationships
+    print(f'\nWiring parent-child relationships...')
+    pc_success, pc_fail = run_bd_parent_child(created_issues)
+    print(f'  Done: {pc_success} wired, {pc_fail} failed/skipped')
+    fail += pc_fail
 
     if fail > 0:
         print(f'\n  Check {mapping_out.relative_to(idea_dir)} for ID mappings '
@@ -965,7 +1213,9 @@ COMMANDS = {
     'phase': cmd_phase,
     'lint-spec': cmd_lint_spec,
     'lint-plan': cmd_lint_plan,
+    'lint-cross': cmd_lint_cross,
     'export-beads': cmd_export_beads,
+    'wire-deps': cmd_wire_deps,
 }
 
 USAGE = """sculptor — validation tool for sculptor sessions
@@ -978,9 +1228,12 @@ Commands:
   phase <idea-dir>                   Detect current session phase
   lint-spec <spec.md>                Lint spec for dead types, path issues, TODOs
   lint-plan <plan.md> [--spec X]     Lint plan for missing AC, sections, spec refs
+  lint-cross <idea-dir>              Cross-document lint (appendix links, types, refs)
   export-beads <idea-dir>            Generate .beads/ files (plan, deps, invariants)
   export-beads <idea-dir> --run      Generate files AND run bd create -f + bd dep
   export-beads <idea-dir> --dry-run  Validate plan format without creating issues
+  wire-deps <deps.txt> --from-bd     Wire deps from deps.txt using bd issue list
+  wire-deps <deps.txt> --id-map X    Wire deps from deps.txt using ID mapping file
 """
 
 

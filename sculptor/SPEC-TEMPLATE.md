@@ -44,6 +44,17 @@ When the spec references external data formats, integrations, or complex inputs,
 - Reference appendices from the Integrations and Data Model sections: e.g., "See [appendix-jira-api.md](appendix-jira-api.md) for full response payloads"
 - If no appendix exists yet but the spec needs sample data, create one during spec writing
 
+## When to Split
+
+If the spec exceeds ~500 lines or includes more than 3 full implementation examples (complete functions, class bodies, field maps), split into two files:
+
+- `spec.md` — architecture, data model, API surface, integrations, security (the "what and why")
+- `spec-examples.md` — reference implementations, code samples, field maps, sample payloads (the "how")
+
+Both files travel together. The spec links to examples: `See [spec-examples.md](spec-examples.md) §Implementation — ACSClient` rather than inlining the full code.
+
+This keeps the spec scannable while preserving implementation-grade detail for workers.
+
 ## Learnings
 
 * **Specs must be implementation-grade, not description-grade.** The difference between "a user table with standard fields" and an exact `CREATE TABLE` statement with column names, types, and constraints is the difference between an implementing agent that guesses and one that executes cleanly.
