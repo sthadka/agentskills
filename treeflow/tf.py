@@ -201,6 +201,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         "plan_name": args.plan_name,
         "bd_path": bd_path,
         "worker_model": worker_model,
+        "session_id": _now(),
         "settings": {"stall_threshold_mins": 20},
         "workers": {},
         "routing": {},
@@ -250,6 +251,7 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
         "last_heartbeat_note": None,
         "heartbeat_history": [],
         "output_file": getattr(args, "output_file", "") or "",
+        "spawned_session": reg.get("session_id", ""),
     }
     _save_registry(reg, rp)
     _out({"ok": True, "worker": args.worker, "bead": args.bead_id})
@@ -570,6 +572,51 @@ def cmd_notify(args: argparse.Namespace) -> None:
     _out(result)
 
 
+def cmd_batch_notify(args: argparse.Namespace) -> None:
+    """Process multiple worker:bead completion notifications in one call."""
+    reg, rp = _load_registry()
+    now = _now()
+    bd_bin = _bd(rp)
+    pairs = [p.strip() for p in args.pairs.split(",") if p.strip()]
+    ctx_pct = args.context_pct
+    results = []
+
+    for pair in pairs:
+        if ":" not in pair:
+            results.append({"pair": pair, "ok": False, "error": "expected worker:bead_id format"})
+            continue
+        worker_name, bead_id = pair.split(":", 1)
+        worker = reg["workers"].get(worker_name)
+        if not worker:
+            reg["workers"][worker_name] = {
+                "status": "idle",
+                "skill": "unknown",
+                "context_pct": ctx_pct,
+                "bead": bead_id,
+                "notification": "received",
+                "idle_since": now,
+            }
+            results.append({"worker": worker_name, "bead": bead_id, "ok": True})
+            continue
+
+        auto_retired = ctx_pct >= 90
+        worker["status"] = "retired" if auto_retired else "idle"
+        worker["context_pct"] = ctx_pct
+        worker["notification"] = "received"
+        if auto_retired:
+            worker["retired_at"] = now
+        else:
+            worker["idle_since"] = now
+        worker["bead"] = bead_id
+        entry: dict = {"worker": worker_name, "bead": bead_id, "ok": True, "ctx": ctx_pct}
+        if auto_retired:
+            entry["auto_retired"] = True
+        results.append(entry)
+
+    _save_registry(reg, rp)
+    _out({"ok": True, "results": results})
+
+
 def cmd_phase_gate(args: argparse.Namespace) -> None:
     """Check if a phase/epic is fully complete: all beads closed + all notifications received."""
     reg, rp = _load_registry()
@@ -809,15 +856,46 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
                         epics += 1
                     break
 
+    # Parallelism analysis: scan ### Dependencies sections
+    warnings = []
+    tasks_count = len(issues) - epics
+    dep_count = 0
+    has_blocks = 0
+    in_deps = False
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r'^###\s+[Dd]ependencies\s*$', stripped):
+            in_deps = True
+            dep_count += 1
+            continue
+        if stripped.startswith("##"):
+            in_deps = False
+            continue
+        if in_deps and stripped:
+            if "blocks:" in stripped.lower():
+                has_blocks += 1
+
+    if tasks_count > 3:
+        if dep_count == 0:
+            warnings.append("No ### Dependencies sections found — remember to add parallel groups after creation")
+        elif has_blocks > 0 and has_blocks >= tasks_count - 1:
+            roots = tasks_count - has_blocks
+            if roots <= 1:
+                warnings.append("Plan is fully sequential — no parallel execution possible. Consider splitting into parallel groups.")
+
+    check_parallelism = getattr(args, "check_parallelism", False)
+
     result: dict = {
-        "ok": len(errors) == 0,
+        "ok": len(errors) == 0 and not (check_parallelism and warnings),
         "file": args.file,
         "issues": len(issues),
         "epics": epics,
-        "tasks": len(issues) - epics,
+        "tasks": tasks_count,
     }
     if errors:
         result["errors"] = errors
+    if warnings:
+        result["warnings"] = warnings
     if issues:
         result["dry_run"] = [{"title": iss["title"]} for iss in issues]
     _out(result)
@@ -978,15 +1056,49 @@ def cmd_phase_complete(args: argparse.Namespace) -> None:
     if build_output:
         phase_content += f"\n## Build Output\n```\n{build_output}\n```\n"
 
+    # 4. Parallelism analysis from worker timestamps
+    closed_bead_ids = {b.get("id", "") for b in beads if b.get("status") == "closed"}
+    intervals = []
+    for wname, w in reg.get("workers", {}).items():
+        dispatched = w.get("dispatched_at", "")
+        idle_since = w.get("idle_since", w.get("retired_at", ""))
+        if dispatched and idle_since:
+            try:
+                t0 = _parse_ts(dispatched)
+                t1 = _parse_ts(idle_since)
+                if t1 > t0:
+                    intervals.append((t0, t1))
+            except (ValueError, TypeError):
+                pass
+
+    parallelism: dict = {"total_beads": len(closed_bead_ids)}
+    if len(intervals) >= 2:
+        intervals.sort()
+        overlap_seconds = 0
+        for i in range(len(intervals)):
+            for j in range(i + 1, len(intervals)):
+                overlap_start = max(intervals[i][0], intervals[j][0])
+                overlap_end = min(intervals[i][1], intervals[j][1])
+                if overlap_end > overlap_start:
+                    overlap_seconds += (overlap_end - overlap_start).total_seconds()
+        total_seconds = sum((t1 - t0).total_seconds() for t0, t1 in intervals)
+        parallelism["sequential_pct"] = round(100 * (1 - overlap_seconds / total_seconds)) if total_seconds > 0 else 100
+    else:
+        parallelism["sequential_pct"] = 100
+
+    phase_content += f"\n## Parallelism\n- **Sequential:** {parallelism['sequential_pct']}%\n- **Beads:** {parallelism['total_beads']}\n"
+
     (ctx / phase_file).write_text(phase_content)
 
-    _out({
+    result: dict = {
         "pass": True,
         "build": build_status,
         "phase_file": phase_file,
         "beads_closed": len([b for b in beads if b.get("status") == "closed"]),
         "files": sorted(set(all_files)),
-    })
+        "parallelism": parallelism,
+    }
+    _out(result)
 
 
 def cmd_worker_prompt(args: argparse.Namespace) -> None:
@@ -1152,6 +1264,10 @@ Complete each in order — claim, implement, commit, close — before starting t
 
 """ + "\n\n".join(sub_tasks)
 
+    if getattr(args, "prompt_only", False):
+        print(prompt)
+        return
+
     model = reg.get("worker_model", "")
     _out({"ok": True, "prompt": prompt, "model": model, "beads": bead_ids})
 
@@ -1261,6 +1377,14 @@ def cmd_sync(args: argparse.Namespace) -> None:
             w["status"] = "retired"
             w["retired_at"] = now
             retired.append({"worker": wname, "ctx": ctx, "reason": "high_ctx" if ctx >= 90 else "low_ctx"})
+            continue
+
+        # Auto-retire cross-session workers — they're not addressable
+        current_session = reg.get("session_id", "")
+        if current_session and w.get("spawned_session") and w["spawned_session"] != current_session:
+            w["status"] = "retired"
+            w["retired_at"] = now
+            retired.append({"worker": wname, "ctx": ctx, "reason": "cross_session"})
             continue
 
         # Available for reuse — flag stale idle workers
@@ -1412,6 +1536,11 @@ def main() -> None:
     s.add_argument("--summary", default="")
     s.add_argument("--skill", default="")
 
+    # batch-notify
+    s = sub.add_parser("batch-notify")
+    s.add_argument("--pairs", required=True)
+    s.add_argument("--context-pct", type=int, default=0, dest="context_pct")
+
     # phase-gate
     s = sub.add_parser("phase-gate")
     s.add_argument("epic_id")
@@ -1459,6 +1588,7 @@ def main() -> None:
     # validate-plan
     s = sub.add_parser("validate-plan")
     s.add_argument("file")
+    s.add_argument("--check-parallelism", action="store_true", dest="check_parallelism")
 
     # update-context
     s = sub.add_parser("update-context")
@@ -1479,6 +1609,7 @@ def main() -> None:
     s.add_argument("--beads", required=True)
     s.add_argument("--reuse", action="store_true")
     s.add_argument("--prior-bead", default="", dest="prior_bead")
+    s.add_argument("--prompt-only", action="store_true", dest="prompt_only")
 
     args = p.parse_args()
     if not args.cmd:
@@ -1496,6 +1627,7 @@ def main() -> None:
         "stalled": cmd_stalled,
         "bd-path": cmd_bd_path,
         "notify": cmd_notify,
+        "batch-notify": cmd_batch_notify,
         "phase-gate": cmd_phase_gate,
         "smoke-test": cmd_smoke_test,
         "conflict-check": cmd_conflict_check,

@@ -1744,3 +1744,345 @@ class TestWorkerPrompt:
         assert out["beads"] == ["99"]
         # Falls back to using bead ID as title
         assert "99" in out["prompt"]
+
+    def test_prompt_only_returns_raw_text(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        resp = json.dumps({"id": "5", "title": "Build parser", "description": "Parse input"})
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "5", "--prompt-only",
+        ], env={"BD_STUB_RESPONSE": resp})
+        # --prompt-only returns raw text, not JSON → tf() wraps it in _raw
+        assert "_raw" in out
+        assert "Build parser" in out["_raw"]
+
+    def test_prompt_only_not_json(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        resp = json.dumps({"id": "7", "title": "Task", "description": "Do it"})
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "7", "--prompt-only",
+        ], env={"BD_STUB_RESPONSE": resp})
+        # Should NOT contain JSON keys like "ok", "model", "beads"
+        raw = out.get("_raw", "")
+        assert "ok" not in raw.split("\n")[0] if raw else True
+        assert '"beads"' not in raw
+
+
+# ── Validate Plan Parallelism Tests ──────────────────────────
+
+
+class TestValidatePlanParallelism:
+    def test_warns_fully_sequential_plan(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## Epic
+
+            ### Type
+            epic
+
+            ## Task A
+
+            ### Dependencies
+            blocks:epic
+
+            ## Task B
+
+            ### Dependencies
+            blocks:task-a
+
+            ## Task C
+
+            ### Dependencies
+            blocks:task-b
+
+            ## Task D
+
+            ### Dependencies
+            blocks:task-c
+        """))
+        out = tf(workspace, ["validate-plan", str(plan)])
+        assert out["ok"] is True
+        assert "warnings" in out
+        assert any("sequential" in w.lower() for w in out["warnings"])
+
+    def test_no_warning_for_parallel_plan(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## Epic
+
+            ### Type
+            epic
+
+            ## Task A
+
+            ## Task B
+
+            ## Task C
+
+            ### Dependencies
+            blocks:task-a
+
+            ## Task D
+
+            ### Dependencies
+            blocks:task-b
+        """))
+        out = tf(workspace, ["validate-plan", str(plan)])
+        assert "warnings" not in out or not any("sequential" in w.lower() for w in out.get("warnings", []))
+
+    def test_warns_no_dependencies(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## Epic
+
+            ### Type
+            epic
+
+            ## Task A
+
+            ## Task B
+
+            ## Task C
+
+            ## Task D
+        """))
+        out = tf(workspace, ["validate-plan", str(plan)])
+        assert "warnings" in out
+        assert any("dependencies" in w.lower() or "parallel" in w.lower() for w in out["warnings"])
+
+    def test_check_parallelism_flag_errors(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## Epic
+
+            ### Type
+            epic
+
+            ## Task A
+
+            ### Dependencies
+            blocks:epic
+
+            ## Task B
+
+            ### Dependencies
+            blocks:task-a
+
+            ## Task C
+
+            ### Dependencies
+            blocks:task-b
+
+            ## Task D
+
+            ### Dependencies
+            blocks:task-c
+        """))
+        out = tf(workspace, ["validate-plan", "--check-parallelism", str(plan)])
+        assert out["ok"] is False
+        assert "warnings" in out
+
+    def test_small_plan_no_warning(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## Epic
+
+            ### Type
+            epic
+
+            ## Task A
+
+            ## Task B
+        """))
+        out = tf(workspace, ["validate-plan", str(plan)])
+        assert "warnings" not in out
+
+
+# ── Session Tracking Tests ───────────────────────────────────
+
+
+class TestSessionTracking:
+    def test_init_sets_session_id(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        reg = load_registry(workspace)
+        assert "session_id" in reg
+        assert reg["session_id"]  # non-empty
+
+    def test_dispatch_copies_session_id(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        reg = load_registry(workspace)
+        session = reg["session_id"]
+        tf(workspace, ["dispatch", "w1", "bead-1", "--skill", "code"])
+        reg = load_registry(workspace)
+        assert reg["workers"]["w1"]["spawned_session"] == session
+
+    def test_sync_retires_cross_session_worker(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        tf(workspace, ["dispatch", "w1", "bead-1", "--skill", "code"])
+        reg = load_registry(workspace)
+        # Simulate worker completed and went idle
+        reg["workers"]["w1"]["status"] = "idle"
+        reg["workers"]["w1"]["context_pct"] = 60
+        reg["workers"]["w1"]["idle_since"] = ts_minutes_ago(5)
+        # Change session_id to simulate a new session
+        reg["workers"]["w1"]["spawned_session"] = "old-session"
+        save_registry(workspace, reg)
+        out = tf(workspace, ["sync"])
+        # Worker should be retired as cross_session
+        assert any(r["reason"] == "cross_session" for r in out["retired_now"])
+        assert out["counts"]["idle"] == 0
+
+    def test_sync_keeps_same_session_worker(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        tf(workspace, ["dispatch", "w1", "bead-1", "--skill", "code"])
+        reg = load_registry(workspace)
+        reg["workers"]["w1"]["status"] = "idle"
+        reg["workers"]["w1"]["context_pct"] = 60
+        reg["workers"]["w1"]["idle_since"] = ts_minutes_ago(5)
+        save_registry(workspace, reg)
+        out = tf(workspace, ["sync"])
+        assert out["counts"]["idle"] == 1
+        assert "code" in out["available"]
+
+    def test_reuse_enforced_only_for_same_session(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        # Create 3 workers from old session
+        reg = load_registry(workspace)
+        for i in range(3):
+            reg["workers"][f"w{i}"] = {
+                "status": "idle", "skill": "code", "context_pct": 60,
+                "idle_since": ts_minutes_ago(5), "spawned_session": "old-session",
+            }
+        save_registry(workspace, reg)
+        out = tf(workspace, ["sync", "--ready-count", "1"])
+        # All workers retired, so reuse_enforced should NOT be set
+        assert "reuse_enforced" not in out
+
+
+# ── Batch Notify Tests ───────────────────────────────────────
+
+
+class TestBatchNotify:
+    def test_basic_batch_notify(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "w1", "bead-1", "--skill", "code"])
+        tf(workspace, ["dispatch", "w2", "bead-2", "--skill", "code"])
+        out = tf(workspace, [
+            "batch-notify", "--pairs", "w1:bead-1,w2:bead-2", "--context-pct", "55",
+        ])
+        assert out["ok"] is True
+        assert len(out["results"]) == 2
+        reg = load_registry(workspace)
+        assert reg["workers"]["w1"]["status"] == "idle"
+        assert reg["workers"]["w2"]["status"] == "idle"
+        assert reg["workers"]["w1"]["context_pct"] == 55
+
+    def test_batch_notify_auto_retire(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "w1", "bead-1", "--skill", "code"])
+        out = tf(workspace, [
+            "batch-notify", "--pairs", "w1:bead-1", "--context-pct", "95",
+        ])
+        assert out["ok"] is True
+        assert out["results"][0].get("auto_retired") is True
+        reg = load_registry(workspace)
+        assert reg["workers"]["w1"]["status"] == "retired"
+
+    def test_batch_notify_unknown_worker(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, [
+            "batch-notify", "--pairs", "new-worker:bead-99", "--context-pct", "50",
+        ])
+        assert out["ok"] is True
+        assert len(out["results"]) == 1
+        reg = load_registry(workspace)
+        assert "new-worker" in reg["workers"]
+
+    def test_batch_notify_invalid_pair_format(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, [
+            "batch-notify", "--pairs", "badformat", "--context-pct", "50",
+        ])
+        assert out["ok"] is True
+        assert out["results"][0]["ok"] is False
+        assert "format" in out["results"][0]["error"]
+
+
+# ── Phase Complete Parallelism Tests ─────────────────────────
+
+
+class TestPhaseCompleteParallelism:
+    def test_sequential_workers_100_pct(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        reg = load_registry(workspace)
+        # Two workers that ran sequentially (no overlap)
+        reg["workers"]["w1"] = {
+            "status": "idle", "skill": "code", "context_pct": 50,
+            "bead": "1", "dispatched_at": "2024-01-01T10:00:00Z",
+            "idle_since": "2024-01-01T10:30:00Z",
+        }
+        reg["workers"]["w2"] = {
+            "status": "idle", "skill": "code", "context_pct": 50,
+            "bead": "2", "dispatched_at": "2024-01-01T10:30:00Z",
+            "idle_since": "2024-01-01T11:00:00Z",
+        }
+        save_registry(workspace, reg)
+        beads = [
+            {"id": "1", "status": "closed"},
+            {"id": "2", "status": "closed"},
+        ]
+        out = tf(workspace, [
+            "phase-complete", "--epic", "10",
+        ], env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["pass"] is True
+        assert "parallelism" in out
+        assert out["parallelism"]["sequential_pct"] == 100
+
+    def test_overlapping_workers_below_100(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        reg = load_registry(workspace)
+        # Two workers with overlapping time windows
+        reg["workers"]["w1"] = {
+            "status": "idle", "skill": "code", "context_pct": 50,
+            "bead": "1", "dispatched_at": "2024-01-01T10:00:00Z",
+            "idle_since": "2024-01-01T10:30:00Z",
+        }
+        reg["workers"]["w2"] = {
+            "status": "idle", "skill": "code", "context_pct": 50,
+            "bead": "2", "dispatched_at": "2024-01-01T10:15:00Z",
+            "idle_since": "2024-01-01T10:45:00Z",
+        }
+        save_registry(workspace, reg)
+        beads = [
+            {"id": "1", "status": "closed"},
+            {"id": "2", "status": "closed"},
+        ]
+        out = tf(workspace, [
+            "phase-complete", "--epic", "10",
+        ], env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["pass"] is True
+        assert out["parallelism"]["sequential_pct"] < 100
+
+    def test_parallelism_in_phase_file(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        ctx = workspace / ".beads" / "context-test"
+        beads = [{"id": "1", "status": "closed"}]
+        out = tf(workspace, [
+            "phase-complete", "--epic", "10",
+        ], env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["pass"] is True
+        content = (ctx / "phase-1.md").read_text()
+        assert "Parallelism" in content
+
+    def test_no_workers_defaults_100_pct(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = [{"id": "1", "status": "closed"}]
+        out = tf(workspace, [
+            "phase-complete", "--epic", "10",
+        ], env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["pass"] is True
+        assert out["parallelism"]["sequential_pct"] == 100
