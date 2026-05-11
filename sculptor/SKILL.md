@@ -16,6 +16,24 @@ You are a collaborative thinking partner. Your job is to help the user sculpt va
 5. **Code is welcome** — Code snippets and pseudo-code in documents are fine when they clarify the idea.
 6. **Every idea gets designed** — No idea is "too simple." The design can be short, but it must exist and be approved.
 
+## Git Tracking
+
+Every sculptor session builds an iteration history through commits. Never squash or amend these commits — the iteration history is the point.
+
+1. **Commit after every AI write.** Whenever the skill creates or updates a document (research.md, idea.md, spec.md, plan.md, appendix files), commit the `{idea-name}/` directory with a message like:
+   - `my-idea: draft — initial idea document`
+   - `my-idea: revision — addressed round 2 annotations`
+   - `my-idea: spec — technical spec first draft`
+2. **Commit after user annotates.** When the user says they're done annotating and before the skill processes annotations, commit with:
+   - `my-idea: annotate — round 2 feedback on idea.md`
+   - This preserves the raw annotations before they get removed.
+3. **Commit message format:**
+   - Prefix: `<idea-name>`
+   - Phase: `research`, `draft`, `annotate`, `revision`, `spec`, `plan`, `finalize`, `feedback`
+   - Description: one short clause, no period
+4. **Never squash or amend these commits.** The iteration history is the point.
+5. **Only commit files inside `{idea-name}/`.** Don't stage anything outside the idea directory.
+
 <HARD-GATE>
 This skill NEVER scaffolds projects, creates source code files, or takes implementation actions.
 Output is exclusively markdown documents. Code snippets within documents are fine when they
@@ -71,6 +89,8 @@ When possible, share early exploration paths which the user can say yes or no to
 
 Write findings to `{idea-name}/research.md`. See [RESEARCH-TEMPLATE.md](RESEARCH-TEMPLATE.md) for the template.
 
+**Commit**: `<idea-name>: research — initial findings` (include any appendix files written during this phase).
+
 **Tell the user**: "Research is in `{idea-name}/research.md` — review it and let me know if anything is missing or wrong before we move on."
 
 **Wait for user approval before proceeding to Phase 3.**
@@ -82,6 +102,8 @@ Structure the idea into a polished document.
 ### Output
 
 Write to `{idea-name}/idea.md`. See [IDEA-TEMPLATE.md](IDEA-TEMPLATE.md) for the template, scaling guidance, and tips on deferred features.
+
+**Commit**: `<idea-name>: draft — initial idea document`
 
 ## Phase 4: ANNOTATE
 
@@ -110,7 +132,7 @@ Bare `>> free text` is always fine — intent can be inferred from context.
 
 2. **Wait** for the user to signal they've annotated the file.
 
-3. **Run `sculptor.py annotations <file>`** to get the full structured list of annotations with line numbers and parsed prefixes. Do not grep manually.
+3. **Before running `sculptor.py annotations`, commit the annotated file** to preserve raw annotations: `<idea-name>: annotate — round N feedback on <file>`. Then **run `sculptor.py annotations <file>`** to get the full structured list of annotations with line numbers and parsed prefixes. Do not grep manually.
    - Also look for fallback annotations: inserted text that doesn't match the document's voice (`//`, `NOTE:`, `TODO:`, `<!-- -->`, etc.)
 
 4. **Address every annotation**:
@@ -120,7 +142,7 @@ Bare `>> free text` is always fine — intent can be inferred from context.
    - Remove flagged sections (`>> -`)
    - Respect strong opinions (`>> *`) — these are non-negotiable constraints
 
-5. **Update the document** — Remove all `>>` annotation lines and integrate the changes into the document.
+5. **Update the document** — Remove all `>>` annotation lines and integrate the changes into the document. **Commit** the cleaned version: `<idea-name>: revision — addressed round N annotations`
 
 6. **Run `sculptor.py verify-clean <file>`** to confirm all annotations were removed. Fix any remaining ones before proceeding.
 
@@ -143,7 +165,8 @@ After the user approves each escalated artifact:
 1. Remove all annotation markers
 2. Polish formatting and consistency
 3. Verify cross-references between artifacts (spec references plan phases, plan references spec schemas)
-4. Confirm with user: "{Artifact} is finalized. Moving to {next artifact}."
+4. **Commit** the finalized artifact: `<idea-name>: spec — finalized after annotation` or `<idea-name>: plan — finalized after annotation`
+5. Confirm with user: "{Artifact} is finalized. Moving to {next artifact}."
 
 ### Technical Spec → `{idea-name}/spec.md`
 
@@ -173,6 +196,7 @@ When the user approves the document:
    - Technical spec
    - Implementation plan
 3. **Export beads plan** — Run `sculptor.py export-beads {idea-name}/` to generate `.beads/plan.md`, `deps.txt`, and `invariants.md`. These files are the handoff artifact for implementation — they travel with the idea directory when copied to a new project.
+4. **Commit**: `<idea-name>: finalize — polished artifacts and beads export`
 
 Proceed to Phase 7 once user approves.
 
@@ -187,6 +211,7 @@ Share feedback after the previous phase is finalized:
    - Suggestions for skill improvement (concrete SKILL.md changes)
    - Any other feedback or ideas that will help the agent and the user to be more effective.
 2. This captures learnings while they're fresh and feeds back into the Learnings section.
+3. **Commit**: `<idea-name>: feedback — session retrospective`
 
 **The skill is complete. The polished documents are the deliverables. We'll not write any code from here onwards.**
 
