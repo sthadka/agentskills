@@ -328,67 +328,90 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
         _out({"ok": False, "errors": [f"commit message contains task number: '{msg}'. Amend to remove 'Task N:' prefix"], "hint": "git commit --amend -m 'feat: <description without task number>'"})
         return
 
-    # 3. Check bead is in_progress
-    r = _run(f"{bd} show {args.bead_id} --json")
-    if r.returncode != 0:
-        _out({"ok": False, "errors": [f"bd show failed: {r.stderr.strip()[:100]}"]})
+    # Support --beads for batch close (multiple bead IDs)
+    extra_beads = getattr(args, "beads", "")
+    if extra_beads:
+        bead_ids = [b.strip() for b in extra_beads.split(",") if b.strip()]
+    else:
+        bead_ids = [args.bead_id] if args.bead_id else []
+
+    if not bead_ids:
+        _out({"ok": False, "errors": ["no bead IDs provided"]})
         return
 
-    try:
-        data = json.loads(r.stdout)
-        # bd show may return array or dict — normalize
-        bead = data[0] if isinstance(data, list) else data
-    except (json.JSONDecodeError, IndexError):
-        _out({"ok": False, "errors": ["bd show returned invalid JSON"]})
-        return
+    # 3–6. Close each bead
+    closed_beads = []
+    close_errors = []
+    for bid in bead_ids:
+        # 3. Check bead is in_progress
+        r = _run(f"{bd} show {bid} --json")
+        if r.returncode != 0:
+            close_errors.append(f"{bid}: bd show failed: {r.stderr.strip()[:100]}")
+            continue
 
-    status = bead.get("status", "")
-    if status == "closed":
-        _out({"ok": True, "status": "closed", "already": True})
-        return
-    if status != "in_progress":
-        _out({"ok": False, "errors": [f"bead status is '{status}', expected 'in_progress'"]})
-        return
+        try:
+            data = json.loads(r.stdout)
+            bead = data[0] if isinstance(data, list) else data
+        except (json.JSONDecodeError, IndexError):
+            close_errors.append(f"{bid}: bd show returned invalid JSON")
+            continue
 
-    # 4. Build close reason
-    summary = args.summary or "completed"
-    files_str = args.files or ""
-    reason = f"SUMMARY: {summary}. FILES: {files_str}. CONTEXT: {args.context_pct}%"
+        status = bead.get("status", "")
+        if status == "closed":
+            closed_beads.append({"id": bid, "already": True})
+            continue
+        if status != "in_progress":
+            close_errors.append(f"{bid}: status is '{status}', expected 'in_progress'")
+            continue
 
-    # 5. Close bead
-    r = _run(f'{bd} close {args.bead_id} --reason "{reason}" --json')
-    if r.returncode != 0:
-        _out({"ok": False, "errors": [f"bd close failed: {r.stderr.strip()[:100]}"]})
-        return
+        # 4. Build close reason
+        summary = args.summary or "completed"
+        files_str = args.files or ""
+        reason = f"SUMMARY: {summary}. FILES: {files_str}. CONTEXT: {args.context_pct}%"
 
-    # 6. Verify close
-    r = _run(f"{bd} show {args.bead_id} --json")
-    try:
-        data = json.loads(r.stdout)
-        bead = data[0] if isinstance(data, list) else data
-    except (json.JSONDecodeError, IndexError):
-        bead = {}
+        # 5. Close bead
+        r = _run(f'{bd} close {bid} --reason "{reason}" --json')
+        if r.returncode != 0:
+            close_errors.append(f"{bid}: bd close failed: {r.stderr.strip()[:100]}")
+            continue
 
-    if bead.get("status") != "closed":
-        # Retry once
-        _run(f'{bd} close {args.bead_id} --reason "{reason}" --json')
-        r = _run(f"{bd} show {args.bead_id} --json")
+        # 6. Verify close
+        r = _run(f"{bd} show {bid} --json")
         try:
             data = json.loads(r.stdout)
             bead = data[0] if isinstance(data, list) else data
         except (json.JSONDecodeError, IndexError):
             bead = {}
+
         if bead.get("status") != "closed":
-            _out({"ok": False, "errors": ["bead still not closed after retry"]})
-            return
+            _run(f'{bd} close {bid} --reason "{reason}" --json')
+            r = _run(f"{bd} show {bid} --json")
+            try:
+                data = json.loads(r.stdout)
+                bead = data[0] if isinstance(data, list) else data
+            except (json.JSONDecodeError, IndexError):
+                bead = {}
+            if bead.get("status") != "closed":
+                close_errors.append(f"{bid}: still not closed after retry")
+                continue
+
+        closed_beads.append({"id": bid})
 
     try:
         reg, reg_path = _load_registry(rp)
-        _update_heartbeat(reg, reg_path, f"closed {args.bead_id}")
+        _update_heartbeat(reg, reg_path, f"closed {','.join(b['id'] for b in closed_beads)}")
     except Exception:
         pass
 
-    result: dict = {"ok": True, "status": "closed", "context_pct": args.context_pct}
+    if close_errors and not closed_beads:
+        _out({"ok": False, "errors": close_errors})
+        return
+
+    result: dict = {"ok": True, "status": "closed", "context_pct": args.context_pct, "closed": [b["id"] for b in closed_beads]}
+    if len(bead_ids) == 1 and closed_beads and closed_beads[0].get("already"):
+        result["already"] = True
+    if close_errors:
+        result["errors"] = close_errors
     if warnings:
         result["warnings"] = warnings
     _out(result)
@@ -758,6 +781,7 @@ def cmd_conflict_check(args: argparse.Namespace) -> None:
 
     # Fetch descriptions and extract file lists
     bead_files: dict[str, list[str]] = {}
+    unparseable: list[str] = []
     for bid in bead_ids:
         r = _run(f"{bd} show {bid} --json")
         if r.returncode != 0:
@@ -771,6 +795,8 @@ def cmd_conflict_check(args: argparse.Namespace) -> None:
         files = _extract_files_from_description(desc)
         if files:
             bead_files[bid] = files
+        else:
+            unparseable.append(bid)
 
     # Build file → [bead_ids] map
     file_map: dict[str, list[str]] = {}
@@ -792,6 +818,8 @@ def cmd_conflict_check(args: argparse.Namespace) -> None:
         "conflicts": conflicts,
         "safe_parallel": safe,
     }
+    if unparseable:
+        result["unparseable"] = unparseable
     if conflicts:
         # Build serial groups: sets of beads that share files
         serial: list[list[str]] = []
@@ -1109,6 +1137,11 @@ def cmd_update_context(args: argparse.Namespace) -> None:
         _append_to_section(epic_file, "## Completed Tasks", summary_block)
         updated.append(f"epic-{epic_slug}.md")
 
+    # Always write to task-summaries.md as a catch-all
+    summaries_file = ctx / "task-summaries.md"
+    _append_to_section(summaries_file, "## Completed Tasks", summary_block)
+    updated.append("task-summaries.md")
+
     # Append gotcha if provided
     gotcha_added = False
     if args.gotcha:
@@ -1118,6 +1151,50 @@ def cmd_update_context(args: argparse.Namespace) -> None:
         updated.append("worker-context.md")
 
     _out({"ok": True, "updated": updated, "gotcha_added": gotcha_added})
+
+
+def cmd_phase_summary(args: argparse.Namespace) -> None:
+    """Show bead status per epic/phase — lighter than phase-complete, no gate logic."""
+    rp = _registry_path()
+    bd = _bd(rp)
+    epic_ids = [e.strip() for e in args.epics.split(",") if e.strip()]
+
+    phases: list[dict] = []
+    for epic_id in epic_ids:
+        r = _run(f"{bd} show {epic_id} --json")
+        epic_title = epic_id
+        try:
+            data = json.loads(r.stdout)
+            epic = data[0] if isinstance(data, list) else data
+            epic_title = epic.get("title", epic.get("name", epic_id))
+        except (json.JSONDecodeError, IndexError):
+            pass
+
+        r = _run(f"{bd} list --parent {epic_id} --json")
+        children = []
+        if r.returncode == 0 and r.stdout.strip():
+            json_start = next((i for i, ch in enumerate(r.stdout.strip()) if ch in ("[", "{")), -1)
+            if json_start >= 0:
+                try:
+                    children = json.loads(r.stdout.strip()[json_start:])
+                    if isinstance(children, dict):
+                        children = children.get("issues", [])
+                except json.JSONDecodeError:
+                    pass
+
+        closed = sum(1 for c in children if c.get("status") == "closed")
+        total = len(children)
+        status = "done" if total > 0 and closed == total else "in_progress" if closed > 0 else "pending"
+
+        phases.append({
+            "epic": epic_id,
+            "title": epic_title,
+            "closed": closed,
+            "total": total,
+            "status": status,
+        })
+
+    _out({"ok": True, "phases": phases})
 
 
 def cmd_phase_complete(args: argparse.Namespace) -> None:
@@ -1553,15 +1630,18 @@ def cmd_sync(args: argparse.Namespace) -> None:
         _save_registry(reg, rp)
 
     idle_count = sum(len(v) for v in available.values())
+    addressable_count = sum(
+        1 for workers in available.values() for w in workers if not w.get("stale")
+    )
     result: dict = {
         "available": available,
         "retired_now": retired,
-        "counts": {"total": total_spawned, "active": total_active, "idle": idle_count, "retired": len(retired)},
+        "counts": {"total": total_spawned, "active": total_active, "idle": idle_count, "addressable": addressable_count, "retired": len(retired)},
     }
     if stalled:
         result["stalled"] = stalled
     ready_count = getattr(args, "ready_count", 0)
-    if ready_count and idle_count > ready_count * 0.5:
+    if ready_count and addressable_count > ready_count * 0.5:
         result["reuse_enforced"] = True
     _out(result)
 
@@ -1645,7 +1725,8 @@ def main() -> None:
 
     # worker-close
     s = sub.add_parser("worker-close")
-    s.add_argument("bead_id")
+    s.add_argument("bead_id", nargs="?", default="")
+    s.add_argument("--beads", default="")
     s.add_argument("--context-pct", type=int, default=0, dest="context_pct")
     s.add_argument("--files", default="")
     s.add_argument("--summary", default="")
@@ -1754,6 +1835,10 @@ def main() -> None:
     s.add_argument("--files", default="")
     s.add_argument("--gotcha", default="")
 
+    # phase-summary
+    s = sub.add_parser("phase-summary")
+    s.add_argument("--epics", required=True)
+
     # phase-complete
     s = sub.add_parser("phase-complete")
     s.add_argument("--epic", required=True, dest="epic_id")
@@ -1797,6 +1882,7 @@ def main() -> None:
         "validate-plan": cmd_validate_plan,
         "wire-plan": cmd_wire_plan,
         "update-context": cmd_update_context,
+        "phase-summary": cmd_phase_summary,
         "phase-complete": cmd_phase_complete,
         "worker-prompt": cmd_worker_prompt,
     }

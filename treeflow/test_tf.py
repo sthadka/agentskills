@@ -1571,7 +1571,7 @@ class TestUpdateContext:
             "--summary", "done",
         ], env={"BD_STUB_RESPONSE": "not json", "BD_STUB_EXIT": "1"})
         assert out["ok"] is True
-        assert out["updated"] == []
+        assert "task-summaries.md" in out["updated"]
 
 
 # ── Phase-Complete Tests ──────────────────────────────────────
@@ -2289,3 +2289,147 @@ class TestWirePlan:
         out = tf(workspace, ["wire-plan", str(plan_file), "--ids", str(ids_file)])
         assert out["ok"] is False
         assert len(out["errors"]) > 0
+
+
+# ── Sync Stale Reuse Enforcement Tests ──────────────────────
+
+
+class TestSyncStaleReuse:
+    def test_all_stale_workers_no_reuse_enforced(self, workspace):
+        """When all idle workers are stale, reuse_enforced should not be set."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        reg = load_registry(workspace)
+        for i in range(5):
+            reg["workers"][f"w{i}"] = {
+                "status": "idle", "skill": "code", "context_pct": 60,
+                "notification": "received", "idle_since": ts_minutes_ago(45),
+            }
+        save_registry(workspace, reg)
+        out = tf(workspace, ["sync", "--ready-count", "2"])
+        assert "reuse_enforced" not in out
+        assert out["counts"]["addressable"] == 0
+
+    def test_fresh_workers_trigger_reuse(self, workspace):
+        """Non-stale idle workers should count toward reuse_enforced."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        reg = load_registry(workspace)
+        for i in range(3):
+            reg["workers"][f"w{i}"] = {
+                "status": "idle", "skill": "code", "context_pct": 60,
+                "notification": "received", "idle_since": ts_minutes_ago(2),
+            }
+        save_registry(workspace, reg)
+        out = tf(workspace, ["sync", "--ready-count", "2"])
+        assert out.get("reuse_enforced") is True
+        assert out["counts"]["addressable"] == 3
+
+
+# ── Conflict-Check Unparseable Tests ──────────────────────
+
+
+class TestConflictCheckUnparseable:
+    def test_unparseable_beads_flagged(self, workspace, bd_stub):
+        """Beads without Files: lines should appear in unparseable list."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = [
+            {"id": "bead-1", "description": "Do something without files listed"},
+            {"id": "bead-2", "description": "Also no files here"},
+        ]
+        # bd show returns each bead by ID, but stub returns same for all
+        out = tf(workspace, ["conflict-check", "--beads", "bead-1,bead-2"],
+                 env={"BD_STUB_RESPONSE": json.dumps(beads[0])})
+        assert "unparseable" in out
+        assert len(out["unparseable"]) == 2
+
+    def test_parseable_beads_not_flagged(self, workspace, bd_stub):
+        """Beads with Files: lines should not appear in unparseable."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        bead = {"id": "bead-1", "description": "**Files:** `src/main.go`, `src/util.go`"}
+        out = tf(workspace, ["conflict-check", "--beads", "bead-1"],
+                 env={"BD_STUB_RESPONSE": json.dumps(bead)})
+        assert "unparseable" not in out
+
+
+# ── Update-Context Task-Summaries Tests ──────────────────────
+
+
+class TestUpdateContextSummaries:
+    def test_always_writes_task_summaries(self, workspace, bd_stub):
+        """update-context should always write to task-summaries.md."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        bead = [{"id": "bead-1", "title": "My Task", "parent": "epic-1"}]
+        parent = [{"id": "epic-1", "title": "My Epic"}]
+        out = tf(workspace, [
+            "update-context", "--bead", "bead-1", "--worker", "w1",
+            "--summary", "did the thing", "--files", "src/main.go",
+        ], env={"BD_STUB_RESPONSE": json.dumps(bead)})
+        assert "task-summaries.md" in out["updated"]
+        ctx_dir = workspace / ".beads" / "context-test"
+        assert (ctx_dir / "task-summaries.md").exists()
+
+
+# ── Phase-Summary Tests ──────────────────────
+
+
+class TestPhaseSummary:
+    def test_phase_summary_output(self, workspace, bd_stub):
+        """phase-summary should return status per epic."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        # Stub returns children for list --parent
+        children = [
+            {"id": "t1", "status": "closed"},
+            {"id": "t2", "status": "closed"},
+        ]
+        out = tf(workspace, ["phase-summary", "--epics", "epic-1"],
+                 env={"BD_STUB_RESPONSE": json.dumps(children)})
+        assert out["ok"] is True
+        assert len(out["phases"]) == 1
+        assert out["phases"][0]["status"] == "done"
+        assert out["phases"][0]["closed"] == 2
+        assert out["phases"][0]["total"] == 2
+
+    def test_in_progress_phase(self, workspace, bd_stub):
+        """phase-summary with open children should show in_progress."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        children = [
+            {"id": "t1", "status": "closed"},
+            {"id": "t2", "status": "in_progress"},
+        ]
+        out = tf(workspace, ["phase-summary", "--epics", "epic-1"],
+                 env={"BD_STUB_RESPONSE": json.dumps(children)})
+        assert out["phases"][0]["status"] == "in_progress"
+        assert out["phases"][0]["closed"] == 1
+
+
+# ── Worker-Close Multi-Bead Tests ──────────────────────
+
+
+class TestWorkerCloseMultiBead:
+    def test_close_multiple_beads(self, workspace, bd_stub):
+        """worker-close --beads should close all listed beads."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "w1", "b1", "--skill", "code"])
+        (workspace / "src.rs").write_text("fn main() {}")
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: impl"], cwd=workspace, check=True)
+
+        out = tf(workspace, [
+            "worker-close", "--beads", "b1,b2,b3",
+            "--context-pct", "50", "--summary", "done",
+        ], env={"BD_STUB_RESPONSE": json.dumps([{"status": "closed"}])})
+        assert out["ok"] is True
+        assert len(out["closed"]) == 3
+        assert set(out["closed"]) == {"b1", "b2", "b3"}
+
+    def test_single_bead_backward_compat(self, workspace, bd_stub):
+        """Single positional bead_id should still work."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "w1", "bead-abc", "--skill", "code"])
+        (workspace / "src.rs").write_text("fn main() {}")
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: impl"], cwd=workspace, check=True)
+
+        out = tf(workspace, ["worker-close", "bead-abc", "--context-pct", "50"],
+                 env={"BD_STUB_RESPONSE": json.dumps([{"status": "closed"}])})
+        assert out["ok"] is True
+        assert "bead-abc" in out["closed"]
