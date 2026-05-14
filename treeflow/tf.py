@@ -560,6 +560,7 @@ def cmd_notify(args: argparse.Namespace) -> None:
         result["auto_retired"] = True
 
     # Include bead status so orchestrator doesn't need a separate bd show call
+    result["bead_status"] = "unknown"
     bd = _bd(rp)
     r = _run(f"{bd} show {args.bead_id} --json")
     try:
@@ -567,7 +568,23 @@ def cmd_notify(args: argparse.Namespace) -> None:
         bead = data[0] if isinstance(data, list) else data
         result["bead_status"] = bead.get("status", "unknown")
     except (json.JSONDecodeError, IndexError):
-        pass
+        bead = {}
+
+    # Auto-close parent epic if all siblings are closed
+    if result["bead_status"] == "closed" and isinstance(bead, dict):
+        parent_id = bead.get("parent", "")
+        if parent_id:
+            r_children = _run(f"{bd} list --parent {parent_id} --json")
+            try:
+                children = json.loads(r_children.stdout)
+                if isinstance(children, dict):
+                    children = children.get("issues", [])
+                all_closed = all(c.get("status") == "closed" for c in children) if children else False
+                if all_closed:
+                    _run(f'{bd} close {parent_id} --reason "all children closed" --json')
+                    result["parent_auto_closed"] = parent_id
+            except (json.JSONDecodeError, IndexError):
+                pass
 
     _out(result)
 
@@ -901,6 +918,127 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
     _out(result)
 
 
+def cmd_wire_plan(args: argparse.Namespace) -> None:
+    """Auto-wire parent-child and blocking deps from a plan file + bd create output."""
+    plan_path = Path(args.file)
+    if not plan_path.exists():
+        _out({"ok": False, "error": f"file not found: {args.file}"})
+        return
+
+    # Load bd create -f --json output: list of created issues with titles + IDs
+    ids_path = Path(args.ids)
+    if not ids_path.exists():
+        _out({"ok": False, "error": f"ids file not found: {args.ids}"})
+        return
+    try:
+        created = json.loads(ids_path.read_text())
+        if isinstance(created, dict):
+            created = created.get("issues", created.get("created", []))
+    except json.JSONDecodeError:
+        _out({"ok": False, "error": "ids file is not valid JSON"})
+        return
+
+    # Build title→ID mapping (normalize titles for fuzzy matching)
+    def _norm(t: str) -> str:
+        return re.sub(r'\s+', ' ', t.strip().lower())
+
+    title_to_id: dict[str, str] = {}
+    for item in created:
+        title = item.get("title", item.get("name", ""))
+        iid = item.get("id", "")
+        if title and iid:
+            title_to_id[_norm(title)] = iid
+
+    # Parse plan structure: extract issues, their types, parent epics, and deps
+    content = plan_path.read_text()
+    lines = content.split("\n")
+
+    issues: list[dict] = []
+    current: dict | None = None
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## ") and not stripped.startswith("### "):
+            if current:
+                issues.append(current)
+            title = stripped[3:].strip()
+            current = {"title": title, "type": "task", "deps": [], "in_section": ""}
+        elif current and stripped.startswith("### "):
+            current["in_section"] = stripped[4:].strip().lower()
+        elif current:
+            sec = current["in_section"]
+            if sec == "type" and stripped and not stripped.startswith("#"):
+                current["type"] = stripped.lower()
+            elif sec == "dependencies" and stripped:
+                current["deps"].append(stripped)
+
+    if current:
+        issues.append(current)
+
+    # Resolve parent-child: tasks belong to the most recent preceding epic
+    rp = _registry_path()
+    bd = _bd(rp)
+    parent_child_wired = 0
+    blocking_wired = 0
+    errors = []
+    current_epic_id = ""
+
+    for iss in issues:
+        norm_title = _norm(iss["title"])
+        iss_id = title_to_id.get(norm_title, "")
+        if not iss_id:
+            errors.append(f"no ID found for: {iss['title']}")
+            continue
+
+        if iss["type"] == "epic":
+            current_epic_id = iss_id
+            continue
+
+        # Wire parent-child
+        if current_epic_id:
+            r = _run(f"{bd} dep add {iss_id} {current_epic_id} -t parent-child")
+            combined = (r.stderr + r.stdout).lower()
+            if r.returncode == 0 or "unique" in combined or "duplicate" in combined or "already" in combined:
+                parent_child_wired += 1
+            else:
+                errors.append(f"parent-child failed for {iss_id}: {r.stderr.strip()[:100]}")
+
+        # Wire blocking deps from ### Dependencies section
+        for dep_line in iss.get("deps", []):
+            for part in re.split(r'[,;]\s*', dep_line):
+                part = part.strip()
+                match = re.match(r'(?:blocks?:)\s*(.+)', part, re.IGNORECASE)
+                if match:
+                    ref = match.group(1).strip().strip('"').strip("'")
+                    ref_norm = _norm(ref)
+                    # Try exact match, then prefix match
+                    blocker_id = title_to_id.get(ref_norm, "")
+                    if not blocker_id:
+                        for t, tid in title_to_id.items():
+                            if t.startswith(ref_norm) or ref_norm.startswith(t):
+                                blocker_id = tid
+                                break
+                    if blocker_id:
+                        r = _run(f"{bd} dep {blocker_id} --blocks {iss_id}")
+                        combined = (r.stderr + r.stdout).lower()
+                        if r.returncode == 0 or "unique" in combined or "duplicate" in combined or "already" in combined:
+                            blocking_wired += 1
+                        else:
+                            errors.append(f"dep failed {blocker_id}→{iss_id}: {r.stderr.strip()[:100]}")
+                    else:
+                        errors.append(f"dep ref not found: '{ref}' in task '{iss['title']}'")
+
+    result: dict = {
+        "ok": len(errors) == 0,
+        "parent_child": parent_child_wired,
+        "blocking": blocking_wired,
+        "total_issues": len(issues),
+    }
+    if errors:
+        result["errors"] = errors[:20]
+    _out(result)
+
+
 def _slugify(text: str) -> str:
     """Convert text to a slug for filenames."""
     return re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')[:50]
@@ -1115,10 +1253,15 @@ def cmd_worker_prompt(args: argparse.Namespace) -> None:
     if wc_path.exists():
         project_context = wc_path.read_text()
 
-    # Find latest phase file
+    # Include latest phase file, capped to avoid bloating worker context
     phase_files = sorted(ctx.glob("phase-*.md"))
     if phase_files:
-        project_context += "\n\n" + phase_files[-1].read_text()
+        phase_content = phase_files[-1].read_text()
+        lines = phase_content.split("\n")
+        if len(lines) > 60:
+            lines = lines[:20] + ["\n... (earlier summaries trimmed) ...\n"] + lines[-40:]
+            phase_content = "\n".join(lines)
+        project_context += "\n\n" + phase_content
 
     # Fetch bead data
     bead_data = []
@@ -1387,6 +1530,14 @@ def cmd_sync(args: argparse.Namespace) -> None:
             retired.append({"worker": wname, "ctx": ctx, "reason": "cross_session"})
             continue
 
+        # Skip workers that never called back — they're likely session-ended
+        notif = w.get("notification", "")
+        if notif == "pending":
+            w["status"] = "retired"
+            w["retired_at"] = now
+            retired.append({"worker": wname, "ctx": ctx, "reason": "never_notified"})
+            continue
+
         # Available for reuse — flag stale idle workers
         skill = w.get("skill", "unknown")
         if skill not in available:
@@ -1590,6 +1741,11 @@ def main() -> None:
     s.add_argument("file")
     s.add_argument("--check-parallelism", action="store_true", dest="check_parallelism")
 
+    # wire-plan
+    s = sub.add_parser("wire-plan")
+    s.add_argument("file")
+    s.add_argument("--ids", required=True)
+
     # update-context
     s = sub.add_parser("update-context")
     s.add_argument("--bead", required=True, dest="bead_id")
@@ -1639,6 +1795,7 @@ def main() -> None:
         "dep": cmd_dep,
         "close": cmd_close,
         "validate-plan": cmd_validate_plan,
+        "wire-plan": cmd_wire_plan,
         "update-context": cmd_update_context,
         "phase-complete": cmd_phase_complete,
         "worker-prompt": cmd_worker_prompt,

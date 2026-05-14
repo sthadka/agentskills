@@ -93,14 +93,30 @@ python3 .beads/tf.py validate-plan plan.md
 ```
 This detects `---` separators, counts epics/tasks, and prints a dry-run preview.
 
-## Post-Creation Dependencies
+## Post-Creation Wiring
 
-Issues created in the same file cannot reference each other's IDs (unknown at creation time). Add cross-issue dependencies after creation using `tf.py dep` (idempotent — handles duplicate deps gracefully):
+After creating issues, use `wire-plan` to auto-wire parent-child hierarchy and blocking dependencies in one command:
 
 ```bash
-bd create -f plan.md --json
-# Parse returned IDs, then chain dependency additions:
-python3 .beads/tf.py dep <user-model-id> <login-id> && python3 .beads/tf.py dep <login-id> <logout-id> && python3 .beads/tf.py dep <logout-id> <tests-id>
-# Add hierarchy (parent-child type — use bd dep add directly):
-bd dep add <user-model-id> <epic-id> -t parent-child && bd dep add <login-id> <epic-id> -t parent-child
+bd create -f plan.md --json > created.json
+python3 .beads/tf.py wire-plan plan.md --ids created.json
+```
+
+`wire-plan` automatically:
+- **Parent-child:** tasks under an epic heading become children of that epic
+- **Blocking deps:** parses `### Dependencies` sections for `blocks:<title>` references and wires them
+
+The `### Dependencies` section uses title-based references (matched by prefix against created issue titles):
+
+```markdown
+## Add POST /api/auth/login endpoint
+
+### Dependencies
+blocks:Add POST /api/auth/logout endpoint, blocks:Write unit tests for authentication
+```
+
+For manual dep wiring, `tf.py dep` remains available (idempotent — handles duplicates gracefully):
+
+```bash
+python3 .beads/tf.py dep <blocker-id> <blocked-id>
 ```

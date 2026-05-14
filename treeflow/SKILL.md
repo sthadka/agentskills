@@ -234,13 +234,14 @@ python3 .beads/tf.py sync --ready-count {N}
 Pass `--ready-count` with the number of ready tasks from step 1. This single command handles all housekeeping:
 - Auto-retires workers at ≥90% context (can't reuse meaningfully)
 - Auto-retires workers at <40% context (not worth reuse overhead)
+- Auto-retires idle workers that never sent a notification (session-ended, not addressable)
 - Flags active workers as `stalled` if no heartbeat for >20 min
 - Flags idle workers as `stale` if idle >30 min (likely from a prior session or laptop sleep)
 - Returns `available` workers grouped by skill domain, ready for reuse
-- Sets `reuse_enforced: true` when idle workers exceed `ready_tasks × 0.5` — force reuse over fresh spawns
+- Sets `reuse_enforced: true` when idle workers exceed `ready_tasks × 0.5` — prefer reuse over fresh spawns
 
 **Decision rule** based on sync output:
-1. If `reuse_enforced: true` → **must reuse** an idle worker. Only spawn fresh if no idle worker has a matching skill domain.
+1. If `reuse_enforced: true` → **prefer reuse** of an idle worker. If SendMessage fails (worker no longer addressable), spawn fresh — this is the expected fallback, not an error.
 2. `available` has a worker in the same skill domain as the ready task → **reuse** via SendMessage
 3. `available` is empty or no domain match → spawn fresh
 4. **If SendMessage is unavailable** (detected in Entry Protocol) → always spawn fresh
@@ -391,15 +392,17 @@ git remote -v | grep -q push && git push || echo "No remote configured, skipping
 
 Also ensure all context files are saved. (`bd sync` is deprecated — do not use.)
 
-## Context Compression Recovery
+## Context Compression Recovery (Reorientation Protocol)
 
-After the system compresses your context, your in-memory state is lost. **Immediately run:**
+After the system compresses your context, your in-memory state is lost. Run these steps in order before resuming orchestration:
 
-```bash
-python3 .beads/tf.py status && python3 .beads/tf.py registry
-```
+1. **Get overview:** `python3 .beads/tf.py status` — active workers, pending notifications, overall counts
+2. **Check worker states:** `python3 .beads/tf.py registry` — who is active/idle/retired, their beads and context %
+3. **Find unblocked work:** `bd ready --json` — what tasks can be dispatched next
+4. **Process pending notifications** before dispatching new work — any `task-notification` messages in the queue should be handled first via `tf.py notify`
+5. **Read context files** if needed: `cat .beads/context-*/worker-context.md` and the latest `phase-*.md` file
 
-This rebuilds your picture of active workers, their current beads, pending notifications, and overall progress. The registry is file-based and survives compression — trust it over any summary the system provides.
+The registry is file-based and survives compression — trust it over any summary the system provides.
 
 ## Error Handling
 

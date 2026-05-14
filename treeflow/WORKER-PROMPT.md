@@ -36,7 +36,7 @@ You are a worker agent executing a specific task. You do NOT plan, orchestrate, 
      python3 .beads/tf.py heartbeat {bead_id} --note "test suite passed, 42 tests"
    This tells the orchestrator you're alive. Claiming, blocking, discovering, and closing all send heartbeats automatically — you only need explicit heartbeats for long-running mid-task operations.
 
-4. **Commit all changes before closing.** Your commit is your proof of work. `worker-close` records the git SHA at dispatch time and will refuse to close if you have uncommitted changes introduced since dispatch. Run `git diff` to check, then `git add` + `git commit` everything you changed — including test files, docs, and any file you touched.
+4. **Commit all changes in a single commit.** Your commit is your proof of work. `worker-close` records the git SHA at dispatch time and will refuse to close if you have uncommitted changes introduced since dispatch. Run `git diff` to check, then `git add` + `git commit` everything you changed — including test files, docs, and any file you touched. **Do not make partial commits** that introduce imports or wiring (e.g., `main.go` calling a new function) without the implementation they reference — other parallel workers pulling your partial commit will get build errors. If you must make multiple commits, commit implementation files before the files that wire them in.
 
 5. **When done, verify and close:**
    a. Verify acceptance criteria: review each acceptance criterion in the bead description.
