@@ -1,0 +1,495 @@
+id: stateflow
+version: "2.1"
+initial: entry_check
+
+context:
+  plan_name: ""
+  sendmessage_available: false
+  plan_file: ""
+  beads_created: 0
+  dispatch_plan: null
+  open_bead_count: 0
+  blocked_bead_count: 0
+  closed_bead_count: 0
+  active_workers: 0
+  idle_workers: 0
+  ready_count: 0
+  has_ready_work: "false"
+  current_phase: 1
+  tdd_task_count: 0
+  worker_model: ""
+  reuse_enforced: "false"
+  addressable_workers: 0
+  last_bead_status: ""
+  last_worker_auto_retired: "false"
+  test_result: ""
+
+parsers:
+  - name: tf_status
+    match_command: "python3.*tf\\.py status"
+    patterns:
+      - type: json
+        jq: ".w.active"
+        extract: {active_workers: ".w.active"}
+      - type: json
+        jq: ".w.idle"
+        extract: {idle_workers: ".w.idle"}
+      - type: json
+        jq: ".beads.open"
+        extract: {open_bead_count: ".beads.open"}
+      - type: json
+        jq: ".beads.blocked"
+        extract: {blocked_bead_count: ".beads.blocked"}
+      - type: json
+        jq: ".beads.closed"
+        extract: {closed_bead_count: ".beads.closed"}
+
+  - name: tf_notify
+    match_command: "python3.*tf\\.py notify"
+    states: [awaiting_completions, processing_completions]
+    patterns:
+      - type: json
+        jq: ".late"
+        when_value: true
+        event: LATE_NOTIFICATION
+      - type: json
+        jq: ".bead_status"
+        when_value: "blocked"
+        event: WORKER_BLOCKED
+      - type: json
+        jq: ".bead_status"
+        extract: {last_bead_status: ".bead_status"}
+      - type: json
+        jq: ".auto_retired"
+        when_value: true
+        extract: {last_worker_auto_retired: "true"}
+
+  - name: bd_ready
+    match_command: "^bd ready"
+    patterns:
+      - type: json
+        jq: ". | length"
+        when_value: 0
+        event: NO_READY_WORK
+        extract: {ready_count: "0", has_ready_work: "false"}
+      - type: json
+        jq: ". | length > 0"
+        when_value: true
+        extract: {has_ready_work: "true"}
+
+  - name: tf_sync
+    match_command: "python3.*tf\\.py sync"
+    patterns:
+      - type: json
+        jq: ".reuse_enforced"
+        extract: {reuse_enforced: ".reuse_enforced"}
+      - type: json
+        jq: ".counts.addressable"
+        extract: {addressable_workers: ".counts.addressable"}
+
+  - name: tf_phase_complete
+    match_command: "python3.*tf\\.py phase-complete"
+    patterns:
+      - type: json
+        jq: ".pass"
+        when_value: false
+        event: PHASE_GATE_BLOCKED
+      - type: json
+        jq: ".build"
+        when_value: "fail"
+        event: PHASE_BUILD_FAILED
+      - type: json
+        jq: ".pass"
+        when_value: true
+        event: PHASE_GATE_PASSED
+
+  - name: test_runner
+    match_command: "^(go test|pytest|npm test|cargo test|jest)"
+    states: [tdd_verification, phase_gating]
+    patterns:
+      - regex: '^ok\s|PASSED|passed'
+        extract: {test_result: "pass"}
+      - regex: '^FAIL|FAILED|failed|ERRORS'
+        extract: {test_result: "fail"}
+
+events:
+  PLAN_COMPLETE:
+    required_fields: [plan_file, beads_created]
+  READY_TO_DISPATCH:
+    required_fields: [dispatch_plan]
+  WORK_READY:
+    required_fields: [plan_name, sendmessage_available]
+  NEEDS_PLANNING:
+    required_fields: [plan_name, sendmessage_available]
+  DISPATCHED:
+    required_fields: [dispatch_plan]
+
+guards:
+  has_dispatch_plan:
+    field: dispatch_plan
+    op: exists
+
+  no_open_beads:
+    field: open_bead_count
+    op: eq
+    value: "0"
+
+  has_open_beads:
+    not:
+      field: open_bead_count
+      op: eq
+      value: "0"
+
+  max_concurrency_ok:
+    field: active_workers
+    op: lt
+    value: 7
+
+  tests_passing:
+    field: test_result
+    op: eq
+    value: "pass"
+
+states:
+  entry_check:
+    allowed_tools: [Read, Bash]
+    bash_policy:
+      allowed_patterns:
+        - "^bd (ready|doctor|init|list|blocked|show|graph)"
+        - "^python3.*tf\\.py (init|bd-path|status)"
+        - "^(which|grep|find|cat|ls|head|tail)"
+        - "^git (status|log|remote)"
+        - "^jq"
+        - "^awty "
+    instructions: |
+      Verify orchestration infrastructure.
+      1. Check for SendMessage availability. Set sendmessage_available in context.
+      2. Run `bd ready --json | jq -c` to check for existing work.
+      3. If bd fails: run `bd doctor`, then `bd init` if user provides a goal.
+      4. If ready issues exist: determine plan_name from epic title or user input.
+         Run `python3 ~/.claude/skills/stateflow/tf.py init {plan-name} --bd-path "$(which bd)"`.
+      5. Run `python3 .beads/tf.py bd-path` smoke test.
+      6. If beads exist and ready: fire WORK_READY.
+      7. If user provided goal but no beads: fire NEEDS_PLANNING.
+      8. If no goal and no beads: fire NEED_GOAL.
+      You are a pure orchestrator. Never read or write source code.
+      Initialize awty: `awty init stateflow/workflow.yaml`
+    max_iterations: 15
+    output_schema:
+      required_fields: [plan_name]
+    on:
+      NEEDS_PLANNING: planning
+      WORK_READY: orchestration_ready
+      NEED_GOAL:
+        target: entry_check
+        requires_approval: true
+        approval_message: "No goal or PRD provided. Please describe what should be built."
+      FAIL: failed
+
+  planning:
+    allowed_tools: [Read, Bash, Write, Edit]
+    checkpoint_edit: true
+    bash_policy:
+      allowed_patterns:
+        - "^bd (create|dep|init|ready|list|show|graph)"
+        - "^python3.*tf\\.py (validate-plan|dep|routing|init|wire-plan|bd-path|worker-prompt)"
+        - "^(grep|find|cat|ls|head|tail|wc)"
+        - "^jq"
+        - "^awty "
+    instructions: |
+      Create the implementation plan and beads infrastructure.
+      If the user provided a spec/analysis document that is NOT in beads format
+      (no `## Epic:` / `### Task:` headings), your first task is to convert it.
+      Read PLAN-FORMAT.md and create a new `.beads/{plan-name}-plan.md` in beads format.
+      1. Analyze goal/PRD. If sculptor artifacts exist, follow SCULPTOR-IMPORT.md.
+      2. Write plan file: target file paths, [parallel] markers, skill hints,
+         acceptance criteria, spec-section references. Mark TDD tasks with [TDD].
+      3. Validate: `python3 .beads/tf.py validate-plan plan.md`
+      4. Create beads: `bd create -f plan.md --json`
+      5. Wire dependencies: `python3 .beads/tf.py dep <blocker> <blocked>`
+      6. Write worker-context.md from WORKER-CONTEXT-TEMPLATE.md.
+      7. Add routing: `python3 .beads/tf.py routing --add "pattern:domain:prefix"`
+      8. Ask user what model workers should use.
+      9. Copy cross-worker invariants to worker-context.md and CLAUDE.md.
+      Write/Edit ONLY .beads/ files, plan.md, worker-context.md, and CLAUDE.md.
+      Never write source code.
+      For TDD: include [TDD] in description, add tdd label, list test file paths.
+      Set beads_created and tdd_task_count in context. Fire PLAN_COMPLETE when done.
+    max_iterations: 100
+    output_schema:
+      required_fields: [plan_file, beads_created]
+    on:
+      PLAN_COMPLETE: plan_validation
+      FAIL: failed
+
+  plan_validation:
+    allowed_tools: [Read, Bash]
+    bash_policy:
+      allowed_patterns:
+        - "^bd (ready|blocked|list|show|graph)"
+        - "^python3.*tf\\.py (status|registry|bd-path|phase-gate)"
+        - "^(grep|find|cat|ls|head|tail)"
+        - "^jq"
+        - "^awty "
+    instructions: |
+      Validate the plan before entering the orchestration loop.
+      1. `bd ready --json | jq -c` — verify at least one task is ready.
+      2. `bd graph --all` — check for dependency cycles.
+      3. Verify setup task (if any) is first in the ready queue.
+      4. Review tf.py status (auto-run on entry) — confirm registry initialized.
+      5. If valid: fire VALIDATED. If cycles or structural issues: fire PLAN_INVALID.
+      Read-only — do NOT modify any files.
+    max_iterations: 10
+    on_enter:
+      command: "python3 .beads/tf.py status"
+      parser: tf_status
+    on:
+      VALIDATED: orchestration_ready
+      PLAN_INVALID: planning
+      FAIL: failed
+
+  orchestration_ready:
+    allowed_tools: [Read, Bash]
+    safe_next: awaiting_completions
+    bash_policy:
+      allowed_patterns:
+        - "^bd (ready|blocked|list|show|update)"
+        - "^python3.*tf\\.py (conflict-check|sync|registry|status|stalled|worker-prompt)"
+        - "^(grep|find|cat|ls|head|tail)"
+        - "^jq"
+        - "^awty "
+    instructions: |
+      Top of the orchestration loop. Prepare work for dispatch.
+      Status counts are auto-populated on entry (see on_enter).
+      1. `bd ready --json | jq -c` — parser detects empty/non-empty.
+      2. `python3 .beads/tf.py conflict-check --beads <ids>` for parallelism.
+      3. MANDATORY: `python3 .beads/tf.py sync --ready-count N` before dispatch.
+      4. Decide: reuse idle workers or spawn fresh (see sync output).
+      5. Batch 3+ small same-domain tasks into one worker.
+      6. `python3 .beads/tf.py worker-prompt --beads <ids>` for each worker.
+      7. For [TDD] tasks: ensure worker prompt includes RED/GREEN/REFACTOR.
+      8. Set dispatch_plan in context. Fire READY_TO_DISPATCH.
+      IMPORTANT: After dispatching, you MUST fire DISPATCHED from the dispatching
+      state. Do not use safe_next to skip dispatch recording.
+      If no ready work exists, fire ASSESS_COMPLETE — guards auto-route
+      to session_end (no open beads) or awaiting_completions (blocked work).
+      Check stalled: `python3 .beads/tf.py stalled`.
+    max_iterations: 40
+    on_enter:
+      command: "python3 .beads/tf.py status"
+      parser: tf_status
+      skip_on_reentry: true
+    output_schema:
+      required_fields: [dispatch_plan]
+    on:
+      READY_TO_DISPATCH:
+        target: dispatching
+        guards: [has_dispatch_plan, max_concurrency_ok]
+      ASSESS_COMPLETE:
+        - target: session_end
+          guard: no_open_beads
+        - target: awaiting_completions
+          guard: has_open_beads
+      FAIL: failed
+
+  dispatching:
+    allowed_tools: [Read, Bash, Agent, SendMessage]
+    bash_policy:
+      allowed_patterns:
+        - "^python3.*tf\\.py (dispatch|registry|status|worker-prompt|bd-path)"
+        - "^bd (show|ready)"
+        - "^(grep|cat|ls)"
+        - "^jq"
+        - "^awty "
+    instructions: |
+      Execute the dispatch plan from context.
+      For each worker in dispatch_plan:
+      - New: Agent tool (name, description, prompt from tf.py worker-prompt,
+        run_in_background: true, model if configured).
+      - Reused: SendMessage with reuse prompt.
+      - Record: `python3 .beads/tf.py dispatch {worker} {bead} --skill {domain}`
+      Dispatch multiple independent workers in a SINGLE message for parallelism.
+      Never edit source code. Never git add/commit source files.
+      Fire DISPATCHED when all workers are dispatched and recorded.
+    max_iterations: 60
+    on_exit:
+      clear_context: [dispatch_plan]
+    on:
+      DISPATCHED: awaiting_completions
+      FAIL: failed
+
+  awaiting_completions:
+    allowed_tools: [Read, Bash, SendMessage]
+    safe_next: orchestration_ready
+    bash_policy:
+      allowed_patterns:
+        - "^python3.*tf\\.py (stalled|status|registry|sync|retire)"
+        - "^bd (ready|show|blocked|list|update)"
+        - "^(grep|cat|ls)"
+        - "^jq"
+        - "^awty "
+    instructions: |
+      Wait for worker completions. Handle stalls.
+      1. When <task-notification> arrives: fire NOTIFICATION_RECEIVED.
+      2. Check stalled: `python3 .beads/tf.py stalled`
+         - Stalled + SendMessage available: send status check.
+         - No response ~5 min: retire, reopen bead.
+      3. For reused workers: verify bead moves to in_progress within ~5 min.
+      4. If new ready beads appear: fire NEW_WORK_READY.
+      Do NOT dispatch from this state — return to orchestration_ready.
+      SendMessage is only for stall checks and relaying user questions.
+    max_iterations: 50
+    on:
+      NOTIFICATION_RECEIVED: processing_completions
+      NEW_WORK_READY: orchestration_ready
+      STALL_ESCALATION:
+        target: awaiting_completions
+        requires_approval: true
+        approval_message: "A worker stalled twice on the same task. Retry or skip?"
+      FAIL: failed
+
+  processing_completions:
+    allowed_tools: [Read, Bash, Write, SendMessage]
+    safe_next: orchestration_ready
+    on_enter:
+      commands:
+        - command: "python3 .beads/tf.py status"
+          parser: tf_status
+        - command: "bd ready --json | jq -c"
+          parser: bd_ready
+      clear_context: [open_bead_count, has_ready_work]
+    bash_policy:
+      allowed_patterns:
+        - "^python3.*tf\\.py (notify|update-context|registry|status|phase-complete|phase-gate|close)"
+        - "^bd (ready|show|blocked|list|close|create)"
+        - "^(grep|find|cat|ls|head|tail)"
+        - "^jq"
+        - "^awty "
+    instructions: |
+      Process worker completion notifications.
+      For each notification:
+      1. Extract: worker name, bead ID, context %, 1-line summary.
+      2. Record: `python3 .beads/tf.py notify {worker} {bead} --context-pct N --summary "..."`
+         Parser auto-detects: late → LATE_NOTIFICATION, blocked → WORKER_BLOCKED.
+      3. Update context: `python3 .beads/tf.py update-context --bead {id} --worker {name}
+         --summary "..." --files "..."`
+      4. TDD: if [TDD]-labeled task completed, fire TDD_TASK_COMPLETE.
+      5. DISCARD full <result> content after extraction.
+      6. Check newly ready: `bd ready --json | jq -c`
+      7. Fire ASSESS_NEXT — guards auto-route to session_end, phase_gating,
+         or orchestration_ready based on bead counts and ready work.
+      Write ONLY .beads/context-* files. Never write source code.
+    max_iterations: 40
+    on:
+      ASSESS_NEXT:
+        - target: session_end
+          guard: no_open_beads
+        - target: orchestration_ready
+      PHASE_COMPLETE: phase_gating
+      TDD_TASK_COMPLETE: tdd_verification
+      LATE_NOTIFICATION: processing_completions
+      WORKER_BLOCKED:
+        target: awaiting_completions
+        requires_approval: true
+        approval_message: "A worker is blocked and needs your input."
+      FAIL: failed
+
+  tdd_verification:
+    allowed_tools: [Read, Bash, Write]
+    bash_policy:
+      allowed_patterns:
+        - "^(go test|make test|pytest|npm test|cargo test|jest)"
+        - "^python3.*tf\\.py (status|registry|notify|update-context)"
+        - "^bd (ready|show|create|list)"
+        - "^(grep|find|cat|ls|head|tail|wc)"
+        - "^git (log|diff|show)"
+        - "^jq"
+        - "^awty "
+    instructions: |
+      Post-hoc TDD verification (hooks don't fire in sub-agents).
+      1. Check worker summary for test evidence. No mention → TDD_INCOMPLETE.
+      2. Verify test files exist (grep bead's Files: section). Missing → TDD_INCOMPLETE.
+      3. Run test suite. Parser auto-populates test_result.
+         Failing tests → TDD_INCOMPLETE.
+      4. Optionally: `git log --oneline --name-only <dispatch_sha>..HEAD` to check
+         test-before-impl ordering.
+      5. All pass: fire TDD_VERIFIED. Any fail: create follow-up bead:
+         `bd create "Fix TDD gaps for {bead_title}" -t task -p 1 --json`
+         Then fire TDD_INCOMPLETE.
+      Write ONLY .beads/context-* files.
+      Reference: see tdd-creation.yaml for the full TDD state machine.
+    max_iterations: 15
+    on:
+      TDD_VERIFIED:
+        target: orchestration_ready
+        guard: tests_passing
+      TDD_INCOMPLETE: orchestration_ready
+      FAIL: failed
+
+  phase_gating:
+    allowed_tools: [Read, Bash, Write]
+    bash_policy:
+      allowed_patterns:
+        - "^python3.*tf\\.py (phase-complete|phase-gate|smoke-test|status|registry)"
+        - "^bd (ready|show|list|close|graph)"
+        - "^(go test|make test|pytest|npm test|cargo test|jest)"
+        - "^(go build|go vet|make build|npm run build|cargo build)"
+        - "^(grep|find|cat|ls|head|tail)"
+        - "^jq"
+        - "^awty "
+    instructions: |
+      Validate phase completion before advancing.
+      1. `python3 .beads/tf.py phase-complete --epic {epic-id} [--build-cmd "cmd"] [--phase-num N]`
+         Parser auto-fires: PHASE_GATE_PASSED, PHASE_BUILD_FAILED, or PHASE_GATE_BLOCKED.
+      2. On PHASE_GATE_PASSED: verify spec-trace at integration points.
+         Close phase epic if all children closed. Fire NEXT_PHASE_READY or ALL_PHASES_COMPLETE.
+      3. On PHASE_BUILD_FAILED: create fix task, fire GATE_FAILED.
+      4. On PHASE_GATE_BLOCKED: blocking items remain. Fire GATE_FAILED.
+      5. TDD phases: verify test files for all [TDD] beads. Run test suite if configured.
+      Write ONLY .beads/context-* phase summary files.
+    max_iterations: 15
+    on_enter:
+      command: "python3 .beads/tf.py status"
+      parser: tf_status
+    on:
+      NEXT_PHASE_READY: orchestration_ready
+      ALL_PHASES_COMPLETE: session_end
+      GATE_FAILED: orchestration_ready
+      PHASE_GATE_PASSED: orchestration_ready
+      PHASE_BUILD_FAILED: orchestration_ready
+      PHASE_GATE_BLOCKED: orchestration_ready
+      FAIL: failed
+
+  session_end:
+    allowed_tools: [Read, Bash]
+    bash_policy:
+      allowed_patterns:
+        - "^python3.*tf\\.py (status|registry)"
+        - "^bd (list|show|ready)"
+        - "^git (remote|push|status|log|diff)"
+        - "^(grep|cat|ls)"
+        - "^jq"
+        - "^awty "
+    instructions: |
+      Finalize the orchestration session.
+      1. `python3 .beads/tf.py status` for final overview.
+      2. Verify all beads closed: `bd list --status=open --json | jq -c`
+      3. If open beads remain: report as incomplete work.
+      4. Push: `git remote -v | grep -q push && git push || echo "No remote"`
+      5. Summary: total tasks, workers spawned, reuse ratio, TDD task count.
+      6. Fire DONE.
+    max_iterations: 10
+    on:
+      DONE: completed
+      FAIL: failed
+
+  completed:
+    type: final
+    instructions: |
+      Orchestration complete. All tasks dispatched, workers finished, beads closed.
+
+  failed:
+    type: final
+    instructions: |
+      Orchestration failed. Run `awty history` to review the event log.
+      Check `python3 .beads/tf.py status` and `bd list --status=open` for incomplete work.

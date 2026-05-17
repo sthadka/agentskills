@@ -1,0 +1,100 @@
+id: tdd-creation
+version: "1.0"
+initial: spec
+
+states:
+  spec:
+    allowed_tools: [Read, Write]
+    instructions: |
+      Write spec and acceptance criteria for the feature.
+      Define what the feature should do, inputs, outputs, and edge cases.
+      Set spec_file in context before transitioning with SPEC_DONE.
+    output_schema:
+      required_fields: [spec_file]
+    on:
+      SPEC_DONE: test_writing
+      FAIL: failed
+
+  test_writing:
+    allowed_tools: [Read, Write, Grep]
+    instructions: |
+      Write failing tests based on the spec. Tests must not pass yet —
+      the implementation does not exist. Write comprehensive test cases
+      covering happy path and edge cases defined in the spec.
+      Transition with TESTS_WRITTEN when tests are written.
+    checkpoint_edit: true
+    on:
+      TESTS_WRITTEN: verify_red
+      FAIL: failed
+
+  verify_red:
+    allowed_tools: [Bash]
+    bash_policy:
+      allowed_patterns:
+        - "go test"
+        - "make test"
+        - "pytest"
+        - "npm test"
+        - "cargo test"
+    instructions: |
+      Run the test suite to confirm tests are failing (red). This is expected.
+      If tests fail, transition with TESTS_FAIL to proceed to implementation.
+      If tests unexpectedly pass, the tests may not be testing the right thing —
+      transition with TESTS_PASS to return to test_writing and fix them.
+    on_enter:
+      command: "go test ./..."
+      parser: go_test
+    on:
+      TESTS_FAIL: implementing
+      TESTS_PASS: test_writing
+
+  implementing:
+    allowed_tools: [Read, Edit, Write, Bash]
+    bash_policy:
+      allowed_patterns:
+        - "go build"
+        - "go vet"
+        - "go test"
+        - "make"
+        - "grep"
+        - "find"
+    instructions: |
+      Write the minimum implementation to make all tests pass.
+      Follow the spec defined in spec_file. Do not over-engineer.
+      Once implementation is in place, transition with IMPLEMENTATION_DONE.
+    checkpoint_edit: true
+    max_iterations: 40
+    on:
+      IMPLEMENTATION_DONE: verify_green
+      FAIL: failed
+
+  verify_green:
+    allowed_tools: [Bash]
+    bash_policy:
+      allowed_patterns:
+        - "go test"
+        - "make test"
+        - "pytest"
+        - "npm test"
+        - "cargo test"
+    instructions: |
+      Run the test suite to confirm all tests pass (green).
+      If tests pass, the feature is implemented — transition with TESTS_PASS.
+      If tests still fail, return to implementing with TESTS_FAIL.
+    on_enter:
+      command: "go test ./..."
+      parser: go_test
+    on:
+      TESTS_PASS: completed
+      TESTS_FAIL: implementing
+
+  completed:
+    type: final
+    instructions: |
+      TDD cycle complete. All tests pass. Review the implementation,
+      refactor if needed, and commit with a meaningful message.
+
+  failed:
+    type: final
+    instructions: |
+      Workflow failed. Review the event log with `awty history` for details.
