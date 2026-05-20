@@ -635,6 +635,7 @@ def parse_plan(text: str) -> dict:
                 'subtasks': [],
                 'is_tdd': is_tdd,
                 'extra_lines': [],
+                'body_lines': [],
             }
             current_phase['tasks'].append(current_task)
             current_subtask = None
@@ -648,6 +649,7 @@ def parse_plan(text: str) -> dict:
                 'description': desc,
                 'ac': [],
                 'extra_lines': [],
+                'body_lines': [],
             }
             current_task['subtasks'].append(current_subtask)
             continue
@@ -670,6 +672,18 @@ def parse_plan(text: str) -> dict:
                     current_subtask['extra_lines'].append(stripped)
                 else:
                     current_task['extra_lines'].append(stripped)
+                continue
+
+        # Body text: any other non-blank line under the current task/subtask
+        if current_task is not None and line.strip() and not line.startswith('## '):
+            target = current_subtask if current_subtask else current_task
+            target['body_lines'].append(line.rstrip())
+
+    # Scan body_lines for "TDD recommended" (not just [TDD] in title)
+    for phase in phases:
+        for task in phase['tasks']:
+            if not task['is_tdd'] and any('tdd recommended' in bl.lower() for bl in task.get('body_lines', [])):
+                task['is_tdd'] = True
 
     return {
         'title': title,
@@ -690,26 +704,50 @@ def make_task_slug(desc: str) -> str:
 
 
 def read_idea_description(idea_dir: Path) -> str:
-    """Extract problem + solution from idea.md for the epic description."""
+    """Extract problem + solution from idea.md for the epic description.
+    Falls back to first paragraph of spec.md if idea.md is missing."""
     idea_path = idea_dir / 'idea.md'
-    if not idea_path.exists():
-        return ''
+    if idea_path.exists():
+        text = idea_path.read_text()
+        sections: list[str] = []
+        capture = False
 
-    text = idea_path.read_text()
-    sections: list[str] = []
-    capture = False
+        for line in text.splitlines():
+            if line.startswith('## Problem') or line.startswith('## Solution'):
+                capture = True
+                continue
+            if line.startswith('## ') and capture:
+                capture = False
+                continue
+            if capture:
+                sections.append(line)
 
-    for line in text.splitlines():
-        if line.startswith('## Problem') or line.startswith('## Solution'):
-            capture = True
-            continue
-        if line.startswith('## ') and capture:
-            capture = False
-            continue
-        if capture:
-            sections.append(line)
+        result = '\n'.join(sections).strip()
+        if result:
+            return result
 
-    return '\n'.join(sections).strip()
+    spec_path = idea_dir / 'spec.md'
+    if spec_path.exists():
+        lines = spec_path.read_text().splitlines()
+        para: list[str] = []
+        started = False
+        for line in lines:
+            if not started and line.startswith('# '):
+                continue
+            if not started and not line.strip():
+                continue
+            if not started and line.strip():
+                started = True
+            if started:
+                if not line.strip() and para:
+                    break
+                if line.strip():
+                    para.append(line)
+        result = '\n'.join(para).strip()
+        if result:
+            return result
+
+    return ''
 
 
 def generate_beads_plan(plan: dict, epic_description: str) -> str:
@@ -751,9 +789,13 @@ def generate_beads_plan(plan: dict, epic_description: str) -> str:
             out.append('1' if phase['is_setup'] else '2')
             out.append('')
 
-            # Description: task desc + sub-tasks + extra lines
+            # Description: task desc + body + sub-tasks + extra lines
             out.append('### Description')
             out.append(task['description'])
+            if task.get('body_lines'):
+                out.append('')
+                for bl in task['body_lines']:
+                    out.append(bl)
             if task['extra_lines']:
                 out.append('')
                 for el in task['extra_lines']:
@@ -765,6 +807,8 @@ def generate_beads_plan(plan: dict, epic_description: str) -> str:
                     out.append(f'- {st["description"]}')
                     for el in st.get('extra_lines', []):
                         out.append(f'  {el}')
+                    for bl in st.get('body_lines', []):
+                        out.append(f'  {bl.strip()}')
             out.append('')
 
             # Acceptance criteria
@@ -793,6 +837,76 @@ def generate_beads_plan(plan: dict, epic_description: str) -> str:
     return '\n'.join(out)
 
 
+def parse_dependency_section(deps_text: str, phases: list[dict]) -> dict[int, list[int]] | None:
+    """Parse '## Dependencies' text into explicit phase dependency map.
+
+    Returns {phase_idx: [depends_on_phase_idx, ...]} or None if unparseable
+    (caller falls back to linear chain).
+    """
+    if not deps_text or deps_text.strip().lower() in ('none', ''):
+        return None
+
+    phase_idx_by_num: dict[int, int] = {}
+    for i, phase in enumerate(phases):
+        m = re.match(r'Phase\s+(\d+)', phase['name'])
+        if m:
+            phase_idx_by_num[int(m.group(1))] = i
+
+    if not phase_idx_by_num:
+        return None
+
+    result: dict[int, list[int]] = {}
+    found_any = False
+
+    for line in deps_text.splitlines():
+        line = line.strip().lstrip('- ')
+        if not line:
+            continue
+
+        # "Phase N depends on Phase M" or "Phase N depends on Phases M, O, and P"
+        m = re.match(r'Phase\s+(\d+)\b.*?depends on\s+(.*)', line, re.IGNORECASE)
+        if m:
+            src_num = int(m.group(1))
+            if src_num not in phase_idx_by_num:
+                continue
+            src_idx = phase_idx_by_num[src_num]
+            rest = m.group(2).strip()
+
+            if 'all preceding' in rest.lower():
+                result[src_idx] = [phase_idx_by_num[n] for n in sorted(phase_idx_by_num) if n < src_num]
+                found_any = True
+                continue
+
+            dep_nums = [int(x) for x in re.findall(r'\d+', rest)]
+            dep_indices = [phase_idx_by_num[n] for n in dep_nums if n in phase_idx_by_num]
+            if dep_indices:
+                result[src_idx] = dep_indices
+                found_any = True
+            continue
+
+        # "Phase N has no (internal) dependencies"
+        m = re.match(r'Phase\s+(\d+)\b.*?has no\s+(?:internal\s+)?dependenc', line, re.IGNORECASE)
+        if m:
+            src_num = int(m.group(1))
+            if src_num in phase_idx_by_num:
+                result[phase_idx_by_num[src_num]] = []
+                found_any = True
+            continue
+
+    if not found_any:
+        return None
+
+    # Phases not mentioned: fall back to "blocked by previous phase"
+    all_phase_nums = sorted(phase_idx_by_num.keys())
+    for i, num in enumerate(all_phase_nums):
+        idx = phase_idx_by_num[num]
+        if idx not in result and i > 0:
+            prev_idx = phase_idx_by_num[all_phase_nums[i - 1]]
+            result[idx] = [prev_idx]
+
+    return result
+
+
 def generate_deps(plan: dict) -> str:
     """Generate dependency relationships as a readable list."""
     out: list[str] = []
@@ -811,25 +925,38 @@ def generate_deps(plan: dict) -> str:
             slug = make_task_slug(task['description'])
             all_tasks.append((pi, ti, slug, phase))
 
-    # Setup → Phase 1
+    # Build phase_idx -> list of (task_idx, slug)
+    phase_task_map: dict[int, list[tuple[int, str]]] = {}
+    for pi, phase in enumerate(plan['phases']):
+        if not phase['is_setup']:
+            phase_task_map[pi] = [(ti, slug) for ppi, ti, slug, ph in all_tasks if ppi == pi]
+
+    explicit_deps = parse_dependency_section(plan.get('dependencies', ''), plan['phases'])
+
+    # Setup blocks target phases
     setup_slugs = [slug for pi, ti, slug, ph in all_tasks if ph['is_setup']]
     first_non_setup = [
         (pi, ti, slug, ph) for pi, ti, slug, ph in all_tasks if not ph['is_setup']
     ]
     if setup_slugs and first_non_setup:
         first_phase_idx = first_non_setup[0][0]
-        first_phase_tasks = [
+        setup_target_indices = {first_phase_idx}
+        if explicit_deps is not None:
+            for pi_key, dep_list in explicit_deps.items():
+                if dep_list == []:
+                    setup_target_indices.add(pi_key)
+        setup_target_slugs = [
             slug for pi, ti, slug, ph in all_tasks
-            if pi == first_phase_idx and not ph['is_setup']
+            if pi in setup_target_indices and not ph['is_setup']
         ]
-        out.append('# Setup blocks all Phase 1 tasks')
-        for ss in setup_slugs:
-            for fpt in first_phase_tasks:
-                out.append(f'"{ss}" blocks "{fpt}"')
-        out.append('')
+        if setup_target_slugs:
+            out.append('# Setup blocks initial/independent phases')
+            for ss in setup_slugs:
+                for stt in setup_target_slugs:
+                    out.append(f'"{ss}" blocks "{stt}"')
+            out.append('')
 
-    # Within sequential phases: chain tasks
-    # Between phases: last of N blocks first of N+1
+    # Cross-phase and within-phase deps
     prev_phase_idx = -1
     prev_phase_last_slugs: list[str] = []
 
@@ -837,25 +964,66 @@ def generate_deps(plan: dict) -> str:
         if phase['is_setup']:
             continue
 
-        phase_tasks = [(ti, slug) for ppi, ti, slug, ph in all_tasks if ppi == pi]
+        phase_tasks = phase_task_map.get(pi, [])
         if not phase_tasks:
             continue
 
         # Cross-phase deps
-        if prev_phase_last_slugs and phase_tasks:
-            phase_label = phase['name']
-            out.append(f'# {phase_label} — cross-phase dependencies')
-            first_slugs = (
-                [slug for _, slug in phase_tasks]
-                if phase['is_parallel'] or plan['phases'][prev_phase_idx]['is_parallel']
-                else [phase_tasks[0][1]]
-            )
-            for ps in prev_phase_last_slugs:
-                for fs in first_slugs:
-                    out.append(f'"{ps}" blocks "{fs}"')
-            out.append('')
+        if explicit_deps is not None:
+            dep_phase_indices = explicit_deps.get(pi)
+            if dep_phase_indices is None:
+                # Not mentioned — fall back to previous phase
+                if prev_phase_last_slugs:
+                    phase_label = phase['name']
+                    out.append(f'# {phase_label} — cross-phase dependencies')
+                    first_slugs = (
+                        [slug for _, slug in phase_tasks]
+                        if phase['is_parallel'] or plan['phases'][prev_phase_idx]['is_parallel']
+                        else [phase_tasks[0][1]]
+                    )
+                    for ps in prev_phase_last_slugs:
+                        for fs in first_slugs:
+                            out.append(f'"{ps}" blocks "{fs}"')
+                    out.append('')
+            elif dep_phase_indices:
+                # Explicit dependency list
+                phase_label = phase['name']
+                out.append(f'# {phase_label} — cross-phase dependencies')
+                for dep_pi in dep_phase_indices:
+                    dep_tasks = phase_task_map.get(dep_pi, [])
+                    if not dep_tasks:
+                        continue
+                    dep_phase = plan['phases'][dep_pi]
+                    if dep_phase['is_parallel']:
+                        dep_last_slugs = [slug for _, slug in dep_tasks]
+                    else:
+                        dep_last_slugs = [dep_tasks[-1][1]] if dep_tasks else []
+                    first_slugs = (
+                        [slug for _, slug in phase_tasks]
+                        if phase['is_parallel']
+                        else [phase_tasks[0][1]]
+                    )
+                    for ds in dep_last_slugs:
+                        for fs in first_slugs:
+                            out.append(f'"{ds}" blocks "{fs}"')
+                out.append('')
+            # else: dep_phase_indices == [] — only Setup (already wired)
+        else:
+            # Fallback: linear chain (existing behavior)
+            if prev_phase_last_slugs and phase_tasks:
+                phase_label = phase['name']
+                out.append(f'# {phase_label} — cross-phase dependencies')
+                first_slugs = (
+                    [slug for _, slug in phase_tasks]
+                    if phase['is_parallel'] or plan['phases'][prev_phase_idx]['is_parallel']
+                    else [phase_tasks[0][1]]
+                )
+                for ps in prev_phase_last_slugs:
+                    for fs in first_slugs:
+                        out.append(f'"{ps}" blocks "{fs}"')
+                out.append('')
 
-        # Within-phase deps
+        # Within-phase deps (unchanged)
         if not phase['is_parallel'] and len(phase_tasks) > 1:
             out.append(f'# {phase["name"]} — sequential task chain')
             for i in range(len(phase_tasks) - 1):
@@ -1085,7 +1253,13 @@ def cmd_wire_deps(args: list[str]) -> int:
             print(f'File not found: {id_map_path}')
             return 1
         mapping = json.loads(id_map_path.read_text())
-        issues = [{'id': v, 'title': k} for k, v in mapping.items()]
+        if isinstance(mapping, list):
+            issues = [{'id': d['id'], 'title': d['title']} for d in mapping if 'id' in d]
+        elif isinstance(mapping, dict):
+            issues = [{'id': v, 'title': k} for k, v in mapping.items()]
+        else:
+            print(f'Unexpected id-map format: expected list or dict, got {type(mapping).__name__}')
+            return 1
 
     # Parse and wire deps
     deps_text = deps_path.read_text()

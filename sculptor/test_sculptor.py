@@ -597,6 +597,60 @@ class TestParsePlan:
         assert plan["phases"] == []
         assert plan["title"] == ""
 
+    def test_task_body_preserved(self):
+        from sculptor_mod import parse_plan
+
+        text = textwrap.dedent("""\
+            # Implementation Plan: Test
+
+            ## Phase 1: Core [parallel]
+            - [ ] Task 1.1: Schema types — db/schema.go
+              Implement bucket name constants: BucketAdvisory, BucketDetail
+              Implement Qualifier(rec) function with precedence
+              Spec: spec.md §Data Model
+              - AC: Qualifier produces correct keys
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        plan = parse_plan(text)
+        task = plan['phases'][0]['tasks'][0]
+        assert len(task['body_lines']) > 0
+        body = '\n'.join(task['body_lines'])
+        assert 'BucketAdvisory' in body
+        assert 'Qualifier' in body
+        assert 'spec.md' in body
+
+    def test_tdd_recommended_in_body(self):
+        from sculptor_mod import parse_plan
+
+        text = textwrap.dedent("""\
+            # Implementation Plan: Test
+
+            ## Phase 1: Core
+            - [ ] Task 1.1: Schema types
+              TDD recommended for this task.
+              - AC: Types defined
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        plan = parse_plan(text)
+        task = plan['phases'][0]['tasks'][0]
+        assert task['is_tdd'] is True
+
 
 # ── make_task_slug Tests ─────────────────────────────────────────
 
@@ -804,6 +858,144 @@ class TestGenerateDeps:
         assert '"1.2: B" blocks "2.1: X"' in deps
         assert '"1.2: B" blocks "2.2: Y"' in deps
 
+    def test_explicit_deps_override_linear_chain(self):
+        from sculptor_mod import generate_deps
+        plan = self._make_plan("""\
+            # Plan: Test
+
+            ## Setup
+            - [ ] S1: Init
+              - AC: done
+
+            ## Phase 1: Schema [parallel]
+            - [ ] 1.1: Types
+              - AC: done
+            - [ ] 1.2: Reader
+              - AC: done
+
+            ## Phase 2: Writer
+            - [ ] 2.1: Write
+              - AC: done
+
+            ## Phase 3: Store [parallel]
+            - [ ] 3.1: Matcher
+              - AC: done
+            - [ ] 3.2: Indexer
+              - AC: done
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            - Phase 2 depends on Phase 1
+            - Phase 3 depends on Phase 1
+
+            ## Risks
+            None
+        """)
+        deps = generate_deps(plan)
+        # Phase 3 blocked by Phase 1 tasks, NOT Phase 2
+        assert '"1.1: Types" blocks "3.1: Matcher"' in deps
+        assert '"1.2: Reader" blocks "3.1: Matcher"' in deps
+        assert '"1.1: Types" blocks "3.2: Indexer"' in deps
+        assert '"1.2: Reader" blocks "3.2: Indexer"' in deps
+        assert '"2.1: Write" blocks "3.1: Matcher"' not in deps
+        assert '"2.1: Write" blocks "3.2: Indexer"' not in deps
+
+    def test_parallel_phases_from_setup(self):
+        from sculptor_mod import generate_deps
+        plan = self._make_plan("""\
+            # Plan: Test
+
+            ## Setup
+            - [ ] S1: Init
+              - AC: done
+
+            ## Phase 1: DB [parallel]
+            - [ ] 1.1: Schema
+              - AC: done
+
+            ## Phase 2: Input [parallel]
+            - [ ] 2.1: Source
+              - AC: done
+
+            ## Phase 3: Output [parallel]
+            - [ ] 3.1: Formatter
+              - AC: done
+
+            ## Phase 4: Pipeline
+            - [ ] 4.1: Scan
+              - AC: done
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            - Phase 1 has no internal dependencies
+            - Phase 2 has no internal dependencies
+            - Phase 3 has no internal dependencies
+            - Phase 4 depends on Phases 1, 2, 3
+
+            ## Risks
+            None
+        """)
+        deps = generate_deps(plan)
+        # Phase 2 blocked by Setup only, NOT Phase 1
+        assert '"S1: Init" blocks "2.1: Source"' in deps
+        assert '"1.1: Schema" blocks "2.1: Source"' not in deps
+        # Phase 3 blocked by Setup only
+        assert '"S1: Init" blocks "3.1: Formatter"' in deps
+        assert '"1.1: Schema" blocks "3.1: Formatter"' not in deps
+        assert '"2.1: Source" blocks "3.1: Formatter"' not in deps
+        # Phase 4 blocked by all three phases
+        assert '"1.1: Schema" blocks "4.1: Scan"' in deps
+        assert '"2.1: Source" blocks "4.1: Scan"' in deps
+        assert '"3.1: Formatter" blocks "4.1: Scan"' in deps
+
+    def test_side_branch_phase(self):
+        from sculptor_mod import generate_deps
+        plan = self._make_plan("""\
+            # Plan: Test
+
+            ## Setup
+            - [ ] S1: Init
+              - AC: done
+
+            ## Phase 1: Read
+            - [ ] 1.1: Reader
+              - AC: done
+
+            ## Phase 2: Write
+            - [ ] 2.1: Writer
+              - AC: done
+
+            ## Phase 3: Scan
+            - [ ] 3.1: Pipeline
+              - AC: done
+
+            ## Phase 4: Integration Tests
+            - [ ] 4.1: Round trip
+              - AC: done
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            - Phase 2 depends on Phase 1
+            - Phase 3 depends on Phase 1
+            - Phase 4 depends on all preceding phases
+
+            ## Risks
+            None
+        """)
+        deps = generate_deps(plan)
+        # Phase 3 blocked by Phase 1, NOT Phase 2
+        assert '"1.1: Reader" blocks "3.1: Pipeline"' in deps
+        assert '"2.1: Writer" blocks "3.1: Pipeline"' not in deps
+        # Phase 4 blocked by Phase 2 (side branch) + Phase 3
+        assert '"2.1: Writer" blocks "4.1: Round trip"' in deps
+        assert '"3.1: Pipeline" blocks "4.1: Round trip"' in deps
+
 
 # ── parse_deps_file Tests ────────────────────────────────────────
 
@@ -949,6 +1141,32 @@ class TestGenerateBeadsPlan:
         output = generate_beads_plan(plan, "")
         assert "Data loss possible" in output
 
+    def test_task_body_in_output(self):
+        from sculptor_mod import generate_beads_plan, parse_plan
+
+        text = textwrap.dedent("""\
+            # Implementation Plan: Test
+
+            ## Phase 1: Core [parallel]
+            - [ ] Task 1.1: Schema types — db/schema.go
+              Implement bucket name constants: BucketAdvisory, BucketDetail
+              Spec: spec.md §Data Model
+              - AC: Qualifier produces correct keys
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        plan = parse_plan(text)
+        output = generate_beads_plan(plan, "")
+        assert "BucketAdvisory" in output
+        assert "spec.md" in output
+
 
 # ── read_idea_description Tests ──────────────────────────────────
 
@@ -978,6 +1196,22 @@ class TestReadIdeaDescription:
         from sculptor_mod import read_idea_description
 
         assert read_idea_description(tmp_path) == ""
+
+    def test_fallback_to_spec(self, tmp_path):
+        from sculptor_mod import read_idea_description
+
+        (tmp_path / "spec.md").write_text(textwrap.dedent("""\
+            # Voir Vulnerability Scanner
+
+            A high-performance vulnerability scanner that ingests
+            advisory data from multiple sources.
+
+            ## Architecture
+            The system uses a pipeline model.
+        """))
+        desc = read_idea_description(tmp_path)
+        assert "high-performance vulnerability scanner" in desc
+        assert "Architecture" not in desc
 
 
 # ── export-beads Tests (no --run, filesystem only) ───────────────
@@ -1103,6 +1337,18 @@ class TestWireDepsCLI:
         r = sculptor(["wire-deps"])
         assert r["returncode"] == 1
         assert "Usage" in r["stdout"]
+
+    def test_accepts_bd_create_list_output(self, tmp_path):
+        import json
+        deps = tmp_path / "deps.txt"
+        deps.write_text('"A" blocks "B"\n')
+        id_map = tmp_path / "id-map.json"
+        id_map.write_text(json.dumps([
+            {"id": "x-1", "title": "A", "status": "open"},
+            {"id": "x-2", "title": "B", "status": "open"},
+        ]))
+        r = sculptor(["wire-deps", str(deps), "--id-map", str(id_map)])
+        assert "AttributeError" not in r.get("stderr", "")
 
 
 # ── CLI Smoke Tests ──────────────────────────────────────────────
