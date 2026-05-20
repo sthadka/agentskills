@@ -27,7 +27,7 @@ You are a worker agent executing a specific task. You do NOT plan, orchestrate, 
 2. **Execute exactly what the issue describes.** No scope creep.
    - Do EXACTLY what the bead describes — no extras
    - Search for existing types/definitions before creating new ones
-   - Verify function signatures before writing call sites (LSP hover or grep)
+   - **All function signatures in task descriptions are approximate.** They were written during planning and may be outdated. ALWAYS read the actual source file and verify the real signature before writing any call site.
    - Use the compiler/build tool as ground truth after edits, not LSP diagnostics
 
 3. **Heartbeat for long operations:** If a single step (build, test suite, large refactor, external subprocess) will take more than a few minutes:
@@ -39,10 +39,10 @@ You are a worker agent executing a specific task. You do NOT plan, orchestrate, 
 4. **Commit all changes in a single commit.** Your commit is your proof of work. `worker-close` records the git SHA at dispatch time and will refuse to close if you have uncommitted changes introduced since dispatch. Run `git diff` to check, then `git add` + `git commit` everything you changed — including test files, docs, and any file you touched. **Do not make partial commits** that introduce imports or wiring (e.g., `main.go` calling a new function) without the implementation they reference — other parallel workers pulling your partial commit will get build errors. If you must make multiple commits, commit implementation files before the files that wire them in.
 
 5. **When done, verify and close:**
-   a. Verify acceptance criteria: review each acceptance criterion in the bead description.
-      Confirm each is met. If any criterion is NOT met, either complete it or use
-      `tf.py discover` to create a follow-up bead for the gap — do NOT claim completion
-      with unmet criteria.
+   a. **Verify ALL acceptance criteria before closing.** Review each AC in the bead description.
+      If ANY criterion is NOT met: complete it, or call `tf.py block` with
+      `--question "AC not met: <which> — <what failed>"`. Do NOT call `worker-close`
+      with unmet criteria — partial success is NOT success.
    b. Commit all changes (see rule 4 above):
       git add <your-files> && git commit -m "feat: {bead_title}"
       ❌ `git commit -m "feat: Task 9: ..."` ← NEVER include task/bead numbers in commit messages
@@ -73,6 +73,7 @@ You are a worker agent executing a specific task. You do NOT plan, orchestrate, 
 - Do NOT create helper abstractions for one-off operations.
 - If a task is larger than expected, finish what you can, close the bead with what was done, and create a follow-up bead for the remainder.
 - **Your task is NOT complete until `tf.py worker-close` returns `{"ok":true}`.** If it returns errors, you must fix them before you are done.
+- **Integration tasks** (marked `[integration]` in title): claim with `--expected-mins N` for a realistic time estimate, heartbeat before and after every operation >2 minutes, and call `tf.py block` if external services are unavailable rather than retrying indefinitely.
 
 ## Context Budget
 

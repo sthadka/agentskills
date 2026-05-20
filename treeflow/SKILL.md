@@ -84,7 +84,7 @@ Initialize context and state management (`tf.py init` writes `.beads/active-plan
 ```bash
 python3 ~/.claude/skills/treeflow/tf.py init {plan-name} --bd-path "$(which bd 2>/dev/null || echo bd)"
 ```
-This creates `.beads/context-{plan-name}/` with `registry.json`, copies `tf.py` to `.beads/tf.py` for workers, stores the absolute `bd` path so workers can find it without the orchestrator's shell PATH, and ensures `.beads/` is in `.gitignore`.
+This creates `.beads/context-{plan-name}/` with `registry.json` and `worker-context.md` (from template), copies `tf.py` to `.beads/tf.py` for workers, stores the absolute `bd` path so workers can find it without the orchestrator's shell PATH, and ensures `.beads/` is in `.gitignore`.
 
 **Pre-dispatch smoke test** — run before dispatching any workers:
 ```bash
@@ -222,6 +222,7 @@ Additional rules:
 3. **Max concurrent workers: 6.** Never more than independent ready beads.
 4. Batch trivial related tasks into one worker assignment
 5. **Default to batching** when 3+ ready tasks share a skill domain and are small. One worker with sequential sub-tasks is almost always better than N separate spawns. Only split if total estimated context would exceed ~60%.
+6. **Package-level conflicts:** `conflict-check` detects file-level overlaps but not same-package naming collisions (e.g., two workers creating `categoryLabel()` in different files of the same Go package). When parallelizing within the same package, specify shared helper names in each bead description, or serialize the tasks.
 
 ### 3. Select or Reuse Workers
 
@@ -241,10 +242,12 @@ Pass `--ready-count` with the number of ready tasks from step 1. This single com
 - Sets `reuse_enforced: true` when idle workers exceed `ready_tasks × 0.5` — prefer reuse over fresh spawns
 
 **Decision rule** based on sync output:
-1. If `reuse_enforced: true` → **prefer reuse** of an idle worker. If SendMessage fails (worker no longer addressable), spawn fresh — this is the expected fallback, not an error.
+1. If `reuse_enforced: true` → **prefer reuse** of an idle worker via SendMessage
 2. `available` has a worker in the same skill domain as the ready task → **reuse** via SendMessage
 3. `available` is empty or no domain match → spawn fresh
 4. **If SendMessage is unavailable** (detected in Entry Protocol) → always spawn fresh
+
+Workers that called `worker-close` are auto-retired by sync (reason: `self_closed`), so `available` only contains genuinely addressable workers. If SendMessage unexpectedly fails, spawn fresh — but this should be rare.
 
 **How reuse works:** `SendMessage` to a stopped agent auto-resumes it with full conversation context. No orientation overhead.
 
@@ -292,6 +295,8 @@ SendMessage:
 ```
 
 Dispatch multiple independent workers in a **single message** for parallelism.
+
+**For `[integration]` tasks:** these involve data downloads, large datasets, or external services. `tf.py worker-prompt` auto-appends heartbeat discipline and `--expected-mins` guidance when the bead title contains `[integration]`. The orchestrator should actively poll `tf.py stalled` every 10 minutes while integration workers are running.
 
 **After each dispatch**, record in registry:
 ```bash

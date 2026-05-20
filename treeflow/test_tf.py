@@ -870,18 +870,19 @@ class TestHelpers:
             "last_heartbeat": "2026-04-12T12:00:00Z",
             "last_heartbeat_note": "compiling",
         })
-        assert info == {
-            "worker": "rust-1",
-            "bead": "abc",
-            "last_hb": "2026-04-12T12:00:00Z",
-            "note": "compiling",
-        }
+        assert info["worker"] == "rust-1"
+        assert info["bead"] == "abc"
+        assert info["last_hb"] == "2026-04-12T12:00:00Z"
+        assert info["note"] == "compiling"
+        assert isinstance(info["silent_mins"], int)
+        assert info["silent_mins"] > 0
 
     def test_stalled_info_defaults(self):
         info = self.tf_mod._stalled_info("rust-1", {})
         assert info["bead"] == "?"
         assert info["last_hb"] == "?"
         assert info["note"] == ""
+        assert "silent_mins" not in info
 
     def test_stalled_info_falls_back_to_dispatched_at(self):
         info = self.tf_mod._stalled_info("rust-1", {
@@ -1535,17 +1536,19 @@ class TestUpdateContext:
         assert wc.exists()
         assert "LSP lies about imports" in wc.read_text()
 
-    def test_no_gotcha_no_file(self, workspace, bd_stub):
+    def test_no_gotcha_no_append(self, workspace, bd_stub):
         tf(workspace, ["init", "test", "--bd-path", bd_stub])
         ctx = workspace / ".beads" / "context-test"
+        wc = ctx / "worker-context.md"
+        content_before = wc.read_text() if wc.exists() else ""
         out = tf(workspace, [
             "update-context",
             "--bead", "1", "--worker", "w1",
             "--summary", "done",
         ], env={"BD_STUB_RESPONSE": json.dumps({"id": "1", "title": "T1"})})
         assert out["gotcha_added"] is False
-        wc = ctx / "worker-context.md"
-        assert not wc.exists()
+        content_after = wc.read_text() if wc.exists() else ""
+        assert content_after == content_before
 
     def test_appends_to_existing_epic_file(self, workspace, bd_stub):
         tf(workspace, ["init", "test", "--bd-path", bd_stub])
@@ -2433,3 +2436,186 @@ class TestWorkerCloseMultiBead:
                  env={"BD_STUB_RESPONSE": json.dumps([{"status": "closed"}])})
         assert out["ok"] is True
         assert "bead-abc" in out["closed"]
+
+
+# ── Fix 1: Worker Reuse (closed_self) Tests ─────────────────────
+
+
+class TestSyncSelfClosed:
+    """Workers that called worker-close should be auto-retired by sync."""
+
+    def test_sync_retires_self_closed_worker(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+        tf(workspace, ["notify", "rust-1", "bead-abc", "--context-pct", "55"])
+
+        reg = load_registry(workspace)
+        reg["workers"]["rust-1"]["closed_self"] = True
+        save_registry(workspace, reg)
+
+        out = tf(workspace, ["sync"])
+        assert len(out["retired_now"]) == 1
+        assert out["retired_now"][0]["reason"] == "self_closed"
+        assert "rust" not in out.get("available", {})
+
+    def test_sync_keeps_idle_worker_without_closed_self(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+        tf(workspace, ["notify", "rust-1", "bead-abc", "--context-pct", "55"])
+
+        out = tf(workspace, ["sync"])
+        assert "rust" in out["available"]
+        assert out["available"]["rust"][0]["name"] == "rust-1"
+
+    def test_worker_close_sets_closed_self_flag(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "w1", "bead-abc", "--skill", "code"],
+           env={"CLAUDE_AGENT_NAME": "w1"})
+
+        (workspace / "src.rs").write_text("fn main() {}")
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: impl"], cwd=workspace, check=True)
+
+        out = tf(workspace, ["worker-close", "bead-abc", "--context-pct", "50",
+                              "--files", "src.rs", "--summary", "done. AC: all met"],
+                 env={"BD_STUB_RESPONSE": json.dumps([{"status": "closed"}]),
+                      "CLAUDE_AGENT_NAME": "w1"})
+        assert out["ok"] is True
+
+        reg = load_registry(workspace)
+        assert reg["workers"]["w1"].get("closed_self") is True
+
+
+# ── Fix 2: Stalled Action in Status Tests ──────────────────────
+
+
+class TestStatusStalledAction:
+    """Status should include stalled_action hint when workers are stalled."""
+
+    def test_stalled_includes_action_hint(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+
+        reg = load_registry(workspace)
+        reg["workers"]["rust-1"]["last_heartbeat"] = ts_minutes_ago(25)
+        save_registry(workspace, reg)
+
+        out = tf(workspace, ["status"])
+        assert "stalled" in out
+        assert "stalled_action" in out
+
+    def test_no_stalled_action_when_no_stalls(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        out = tf(workspace, ["status"])
+        assert "stalled_action" not in out
+
+    def test_stalled_info_includes_silent_mins(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+
+        reg = load_registry(workspace)
+        reg["workers"]["rust-1"]["last_heartbeat"] = ts_minutes_ago(30)
+        save_registry(workspace, reg)
+
+        out = tf(workspace, ["stalled"])
+        assert len(out["stalled"]) == 1
+        assert out["stalled"][0]["silent_mins"] >= 29
+
+
+# ── Fix 3: AC Warning in Worker Close Tests ────────────────────
+
+
+class TestWorkerCloseACWarning:
+    """Worker close should warn when summary doesn't mention AC status."""
+
+    def test_warns_missing_ac_in_summary(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "w1", "bead-abc", "--skill", "code"],
+           env={"CLAUDE_AGENT_NAME": "w1"})
+
+        (workspace / "src.rs").write_text("fn main() {}")
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: impl"], cwd=workspace, check=True)
+
+        out = tf(workspace, ["worker-close", "bead-abc", "--context-pct", "50",
+                              "--files", "src.rs", "--summary", "did the thing"],
+                 env={"BD_STUB_RESPONSE": json.dumps([{"status": "closed"}]),
+                      "CLAUDE_AGENT_NAME": "w1"})
+        assert out["ok"] is True
+        assert any("AC" in w for w in out.get("warnings", []))
+
+    def test_no_ac_warning_when_present(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "w1", "bead-abc", "--skill", "code"],
+           env={"CLAUDE_AGENT_NAME": "w1"})
+
+        (workspace / "src.rs").write_text("fn main() {}")
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: impl"], cwd=workspace, check=True)
+
+        out = tf(workspace, ["worker-close", "bead-abc", "--context-pct", "50",
+                              "--files", "src.rs", "--summary", "done. AC: all criteria met"],
+                 env={"BD_STUB_RESPONSE": json.dumps([{"status": "closed"}]),
+                      "CLAUDE_AGENT_NAME": "w1"})
+        assert out["ok"] is True
+        ac_warnings = [w for w in out.get("warnings", []) if "AC" in w]
+        assert len(ac_warnings) == 0
+
+
+# ── Fix 4: Init Creates Worker Context Tests ──────────────────
+
+
+class TestInitWorkerContext:
+    """tf.py init should create worker-context.md from template."""
+
+    def test_creates_worker_context(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        wc = workspace / ".beads" / "context-test" / "worker-context.md"
+        assert wc.exists()
+        content = wc.read_text()
+        assert "Tech Stack" in content or "Worker Context" in content
+
+    def test_init_idempotent_preserves_worker_context(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        wc = workspace / ".beads" / "context-test" / "worker-context.md"
+        wc.write_text("# Custom context\nMy project-specific content")
+
+        # Re-init should not overwrite
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        assert wc.read_text() == "# Custom context\nMy project-specific content"
+
+
+# ── Fix 7: Integration Task Prompt Tests ───────────────────────
+
+
+class TestWorkerPromptIntegration:
+    """Worker prompt should append integration guidance for [integration] tasks."""
+
+    def test_integration_task_adds_heartbeat_guidance(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+
+        bead_resp = json.dumps([{
+            "id": "bead-1",
+            "title": "[integration] Run E2E test suite",
+            "description": "Run full E2E test against real data",
+            "status": "open",
+        }])
+        out = tf(workspace, ["worker-prompt", "--beads", "bead-1"],
+                 env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
+        assert "Integration Task" in out["prompt"]
+        assert "heartbeat" in out["prompt"].lower()
+
+    def test_non_integration_task_no_extra_guidance(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+
+        bead_resp = json.dumps([{
+            "id": "bead-1",
+            "title": "Add unit tests for parser",
+            "description": "Write tests for the OVAL parser module",
+            "status": "open",
+        }])
+        out = tf(workspace, ["worker-prompt", "--beads", "bead-1"],
+                 env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
+        assert "Integration Task" not in out["prompt"]

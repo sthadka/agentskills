@@ -170,12 +170,20 @@ def _idle_minutes(worker: dict) -> float | None:
 
 def _stalled_info(wname: str, w: dict) -> dict:
     """Build a compact stalled-worker dict for output."""
-    return {
+    last_hb = w.get("last_heartbeat", w.get("dispatched_at", "?"))
+    info: dict = {
         "worker": wname,
         "bead": w.get("bead", "?"),
-        "last_hb": w.get("last_heartbeat", w.get("dispatched_at", "?")),
+        "last_hb": last_hb,
         "note": w.get("last_heartbeat_note", ""),
     }
+    if last_hb and last_hb != "?":
+        try:
+            elapsed = (datetime.now(timezone.utc) - _parse_ts(last_hb)).total_seconds() / 60
+            info["silent_mins"] = round(elapsed)
+        except Exception:
+            pass
+    return info
 
 
 # ── Subcommands ──────────────────────────────────────────────
@@ -208,6 +216,15 @@ def cmd_init(args: argparse.Namespace) -> None:
         "phases": {},
     }
     _save_registry(data, reg)
+
+    # Write worker-context.md stub from template if not already present
+    wc_path = ctx / "worker-context.md"
+    if not wc_path.exists():
+        template_path = Path(__file__).resolve().parent / "WORKER-CONTEXT-TEMPLATE.md"
+        if template_path.exists():
+            wc_path.write_text(template_path.read_text())
+        else:
+            wc_path.write_text("# Worker Context\n\n## Overview\n\n## Tech Stack\n\n## Known Gotchas\n")
 
     # Copy tf.py to .beads/ for project-local access
     src = Path(__file__).resolve()
@@ -277,6 +294,8 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
     except Exception:
         pass
 
+    files = [f.strip() for f in args.files.split(",")] if args.files else []
+
     if dispatch_sha:
         r_wt = _run(f"git diff {dispatch_sha} --name-only")
         r_ci = _run(f"git diff {dispatch_sha} HEAD --name-only")
@@ -290,8 +309,7 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
         uncommitted = (wt_changed - committed) | new_untracked
         if uncommitted:
             errors.append(f"uncommitted: {','.join(sorted(uncommitted)[:5])}")
-    elif args.files:
-        files = [f.strip() for f in args.files.split(",")]
+    elif files:
         for f in files:
             r = _run(f"git diff --name-only -- {f}")
             if r.stdout.strip():
@@ -313,13 +331,17 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
         return
 
     # Scan for dead-code markers (warnings only — does not block close)
-    if args.files:
+    if files:
         pattern = r"#\[allow\(dead_code\)\]|# noqa: F841|// @ts-ignore|\bTODO\b|\bFIXME\b|\bHACK\b"
         file_args = " ".join(shlex.quote(f) for f in files)
         r = _run(f"grep -nE '{pattern}' {file_args}")
         if r.stdout.strip():
             for line in r.stdout.strip().split("\n")[:10]:
                 warnings.append(f"dead-code marker: {line.strip()}")
+
+    # Warn if summary doesn't mention acceptance criteria status
+    if args.summary and "AC:" not in args.summary and "acceptance" not in args.summary.lower():
+        warnings.append("summary missing AC status — include 'AC: <status>' to confirm all criteria met")
 
     # 2. Check last commit message for task/bead number anti-pattern
     r = _run("git log -1 --pretty=%s")
@@ -400,6 +422,9 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
     try:
         reg, reg_path = _load_registry(rp)
         _update_heartbeat(reg, reg_path, f"closed {','.join(b['id'] for b in closed_beads)}")
+        if worker_name and worker_name in reg.get("workers", {}):
+            reg["workers"][worker_name]["closed_self"] = True
+            _save_registry(reg, reg_path)
     except Exception:
         pass
 
@@ -1484,6 +1509,19 @@ Complete each in order — claim, implement, commit, close — before starting t
 
 """ + "\n\n".join(sub_tasks)
 
+    # Append integration task guidance if any bead is marked [integration]
+    for bd_item in bead_data:
+        if "[integration]" in bd_item.get("title", "").lower():
+            prompt += ("\n\n## Integration Task — Extended Operations\n"
+                       "This is an integration/E2E task. Long-running operations are expected.\n"
+                       "- Claim with a time estimate: `python3 .beads/tf.py claim {id} --expected-mins N`\n"
+                       "- Heartbeat BEFORE and AFTER every operation >2 minutes: "
+                       "`tf.py heartbeat {id} --note \"downloading feed 2/5\"`\n"
+                       "- If an external service times out, call `tf.py block` rather than retrying indefinitely\n"
+                       "- When the pipeline succeeds and produces output, record results and close immediately "
+                       "— do not run secondary verification loops")
+            break
+
     if getattr(args, "prompt_only", False):
         print(prompt)
         return
@@ -1615,6 +1653,13 @@ def cmd_sync(args: argparse.Namespace) -> None:
             retired.append({"worker": wname, "ctx": ctx, "reason": "never_notified"})
             continue
 
+        # Skip workers that called worker-close — they've terminated
+        if w.get("closed_self"):
+            w["status"] = "retired"
+            w["retired_at"] = now
+            retired.append({"worker": wname, "ctx": ctx, "reason": "self_closed"})
+            continue
+
         # Available for reuse — flag stale idle workers
         skill = w.get("skill", "unknown")
         if skill not in available:
@@ -1698,6 +1743,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         result["active"] = active_workers
     if stalled_workers:
         result["stalled"] = stalled_workers
+        result["stalled_action"] = "SendMessage to check status, or retire + reopen bead if unresponsive"
     if pending_from:
         result["pending_notif"] = pending_from
     _out(result)
