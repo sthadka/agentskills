@@ -404,7 +404,7 @@ def cmd_lint_plan(args: list[str]) -> int:
     # 6. Spec coverage validation
     if spec_path and spec_path.exists():
         spec_text = spec_path.read_text()
-        spec_sections = [s.strip() for s in re.findall(r'^## (.+)$', spec_text, re.MULTILINE)]
+        spec_sections = [s.strip() for s in re.findall(r'^#{2,6}\s+(.+)$', spec_text, re.MULTILINE)]
 
         coverage_table = parse_spec_coverage_table(text)
         if coverage_table:
@@ -510,7 +510,7 @@ def cmd_lint_cross(args: list[str]) -> int:
 
         # 3. Cross-reference consistency — Spec: spec.md §X citations
         spec_sections = [
-            s.strip() for s in re.findall(r'^## (.+)$', spec_text, re.MULTILINE)
+            s.strip() for s in re.findall(r'^#{2,6}\s+(.+)$', spec_text, re.MULTILINE)
         ]
         spec_refs = re.findall(r'[Ss]pec(?::\s*spec\.md)?\s*§\s*(.+?)(?:\s*[—\-–]|$)', plan_text)
         for ref in spec_refs:

@@ -49,6 +49,8 @@ When the user presents an idea:
    - What problem does this solve? Who is it for?
    - What does success look like?
    - What constraints exist? (time, tech, team, budget)
+   - How do similar tools/projects architect this? What modules or layers are typical?
+   - Are there architectural efficiencies to consider early? (shared data model, reusable components, plugin boundaries)
    - What's the desired outcome of this session? (polished idea? PRD? spec? plan?)
 3. **Identify research sources** — Determine what's available:
    - Existing codebase or project context?
@@ -78,12 +80,17 @@ This replaces speculation with concrete data.
 * **Don't wait idle for background research agents.** Start writing the research doc with findings you already have. Integrate agent results when they complete.
 * **Aggressive first-round annotation is ideal.** Encourage users to mark everything in one pass: "Mark everything — questions, corrections, constraints, preferences — all in one pass." Providing more detailed ideas, options, and exploration paths early reduces annotation cycles.
 * **Surface shared design surfaces early.** Ask: "Are there shared data structures or config formats that serve multiple interfaces?" This prevents rework when these emerge late.
+* **Map the architectural landscape.** When exploring prior art, note how similar projects organize their modules, data flow, and extension points. These patterns inform the idea document's architecture and prevent reinventing solved problems.
 
 ### Clarify Out of scope
 
 **Prompt for "what this is NOT."** During intake, explicitly ask: "What are the non-goals or things you've already ruled out?" Users often have strong instincts about scope exclusions but won't volunteer them until asked. Getting these early prevents unnecessary design options and speeds up annotation rounds.
 
 When possible, share early exploration paths which the user can say yes or no to.
+
+### Resolve Key Architectural Decisions
+
+Before leaving research, identify architectural choices the idea document needs to crystallize — runtime, data layer, module boundaries, communication patterns. Research should narrow each to a recommended option with rationale, so the idea doc presents decisions rather than open questions. Flag any that genuinely cannot be resolved without prototyping; these become explicit open questions in the idea doc.
 
 ### Output
 
@@ -204,16 +211,23 @@ Proceed to Phase 7 once user approves.
 
 Share feedback after the previous phase is finalized:
 
-1. Write `{idea-name}/feedback.md` covering:
-   - What went well in the session
-   - What could've been better (process improvements)
-   - Feedback for the user (what made them effective, suggestions)
-   - Suggestions for skill improvement (concrete SKILL.md changes)
-   - Any other feedback or ideas that will help the agent and the user to be more effective.
+1. Write `{idea-name}/feedback.md`. See [FEEDBACK-TEMPLATE.md](FEEDBACK-TEMPLATE.md) for the template.
 2. This captures learnings while they're fresh and feeds back into the Learnings section.
 3. **Commit**: `<idea-name>: feedback — session retrospective`
 
 **The skill is complete. The polished documents are the deliverables. We'll not write any code from here onwards.**
+
+## Handling Late-Stage Changes
+
+When a user raises a concern in a later phase that affects an earlier artifact (e.g., a data model change during plan writing that reshapes the spec):
+
+1. **Identify the earliest affected phase.** A data model change affects the spec (Phase 5). A problem reframing affects the idea doc (Phase 3). A new constraint might affect research (Phase 2).
+2. **Regress to that phase.** Tell the user: "This changes {artifact}. Let me update it, then we'll flow forward from there."
+3. **Update the artifact** at the regressed phase. Run through its annotation cycle if the change is substantial.
+4. **Flow forward** through each subsequent phase's artifact, updating for consistency. Don't skip phases — a spec change may cascade into plan changes.
+5. **Commit each update separately**: `<idea-name>: revision — cascading update to <artifact> from <trigger>`.
+
+This keeps the document chain internally consistent rather than letting later artifacts drift from earlier ones.
 
 ## Validation Tool
 

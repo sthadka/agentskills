@@ -37,6 +37,16 @@ Before finalizing, verify the spec includes:
 - Language/framework version requirements and feature availability
 - Known pitfalls with the chosen tech stack
 
+## Conditional Sections
+
+The template above covers the common case. Some project types have domain-specific concerns that need their own sections. Recognize when generic headings don't capture the project's essential structure:
+
+- A data pipeline may need "Stage Topology" or "Error Recovery"
+- A CLI tool may need "Command Tree" and "Flag Conventions"
+- A real-time system may need "Latency Budget" and "Backpressure"
+
+When you identify these, add them as peer sections in the spec. The test: "Would an implementing agent have to guess about this without a dedicated section?" If yes, add the section.
+
 ## Using Appendix Files
 
 When the spec references external data formats, integrations, or complex inputs, link to appendix files rather than duplicating sample payloads inline. See [APPENDIX-TEMPLATE.md](APPENDIX-TEMPLATE.md) for the appendix format.
@@ -46,14 +56,14 @@ When the spec references external data formats, integrations, or complex inputs,
 
 ## When to Split
 
-If the spec exceeds ~500 lines or includes more than 3 full implementation examples (complete functions, class bodies, field maps), split into two files:
+Split the spec into `spec.md` and `spec-examples.md` when:
 
-- `spec.md` — architecture, data model, API surface, integrations, security (the "what and why")
-- `spec-examples.md` — reference implementations, code samples, field maps, sample payloads (the "how")
+- **Distinct audiences**: Architecture decisions for reviewers vs. implementation details for workers. Split so each audience gets a focused document.
+- **Code examples dominating**: When complete function bodies, field maps, or sample payloads push the spec past the point where the design narrative is hard to follow, move implementation-grade code to `spec-examples.md`.
+
+Don't split by line count alone. A 600-line spec that reads linearly is better than a 400-line spec with a companion file that fragments the reader's attention.
 
 Both files travel together. The spec links to examples: `See [spec-examples.md](spec-examples.md) §Implementation — ACSClient` rather than inlining the full code.
-
-This keeps the spec scannable while preserving implementation-grade detail for workers.
 
 ## Learnings
 

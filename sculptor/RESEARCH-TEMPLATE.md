@@ -5,23 +5,42 @@ Write findings to `{idea-name}/research.md` with these sections:
 ```markdown
 # Research: {Idea Name}
 
-## Problem Space
-[What problem exists, who has it, why it matters]
+## Problem Statement
+[What problem exists, who has it, constraints that shape the solution]
 
-## Prior Art
-[Existing solutions, competitors, relevant projects]
+## Landscape
+[Organized per-tool or per-project. Each subsection covers one existing solution,
+competitor, or relevant project.]
 
-## Technical Landscape
-[Relevant technologies, constraints, opportunities]
+### {Tool/Project A}
+[What it does, how it works, strengths, weaknesses, relevance to our approach]
 
-## Key Insights
-[What we learned that shapes the approach]
+### {Tool/Project B}
+[What it does, how it works, strengths, weaknesses, relevance to our approach]
 
-## Out of scope
-[Things we have explicitly decided to remove from scope]
+## Available Resources
+[APIs, libraries, data sources, infrastructure we can leverage.
+Concrete assessment of each — not just a list.]
+
+## Approach Options
+
+### Option A: {Name}
+[Description, trade-offs, effort estimate]
+
+### Option B: {Name}
+[Description, trade-offs, effort estimate]
+
+### Recommendation
+[Which option and why]
+
+## Out of Scope
+[Things we have explicitly decided to exclude]
 
 ## Open Questions
-[Things we still need to figure out]
+[Things we still need to figure out — flag which block the next phase]
+
+## Sources
+[Links, documents, commands used to gather findings]
 ```
 
 ## Appendix Files
@@ -30,9 +49,9 @@ For any topic that warrants a deep dive (competitor analysis, API exploration, b
 
 Link each appendix from the relevant section above, e.g.:
 ```markdown
-## Prior Art
+## Landscape
 ...detailed analysis in [appendix-competitor-analysis.md](appendix-competitor-analysis.md)
 
-## Technical Landscape
+## Available Resources
 ...API response formats documented in [appendix-stripe-api.md](appendix-stripe-api.md)
 ```

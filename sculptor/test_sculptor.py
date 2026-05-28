@@ -410,6 +410,31 @@ class TestLintPlan:
         assert "Data Model" in r["stdout"]
         assert "API" in r["stdout"]
 
+    def test_spec_coverage_nested_headings(self, tmp_path):
+        spec = tmp_path / "spec.md"
+        spec.write_text(
+            "# Spec\n## Architecture\nArch\n### Package Layout\nPkgs\n"
+            "## Data Model\nModel\n### SQLite Schema\nSchema\n"
+        )
+
+        plan = tmp_path / "plan.md"
+        plan_text = self.GOOD_PLAN + textwrap.dedent("""\
+
+            ## Spec Coverage
+
+            | Spec Section | Task |
+            |---|---|
+            | Architecture | S1: Init |
+            | Package Layout | S1: Init |
+            | Data Model | 1.1: Build it |
+        """)
+        plan.write_text(plan_text)
+
+        r = sculptor(["lint-plan", str(plan), "--spec", str(spec)])
+        assert r["returncode"] == 1
+        assert "SQLite Schema" in r["stdout"]
+        assert "Architecture" not in r["stdout"] or "not covered" not in r["stdout"].split("Architecture")[0]
+
     def test_spec_coverage_dangling_ref(self, tmp_path):
         # Task refs are checked as simple IDs (no spaces) split by comma.
         # "S99" is an ID-style ref that doesn't match any plan task.
@@ -525,6 +550,41 @@ class TestLintCross:
         """)
         r = sculptor(["lint-cross", str(idea_dir)])
         assert r["returncode"] == 0
+
+    def test_nested_spec_section_ref(self, idea_dir):
+        write_file(idea_dir / "spec.md", """\
+            # Spec
+            ## Architecture
+            Arch details
+            ### Package Layout
+            Packages
+        """)
+        write_file(idea_dir / "plan.md", """\
+            # Plan
+            - [ ] Build it
+              - AC: done
+              - Spec: spec.md §Package Layout
+        """)
+        r = sculptor(["lint-cross", str(idea_dir)])
+        assert r["returncode"] == 0
+
+    def test_bad_nested_spec_section_ref(self, idea_dir):
+        write_file(idea_dir / "spec.md", """\
+            # Spec
+            ## Architecture
+            Arch details
+            ### Package Layout
+            Packages
+        """)
+        write_file(idea_dir / "plan.md", """\
+            # Plan
+            - [ ] Build it
+              - AC: done
+              - Spec: spec.md §Nonexistent Sub Section
+        """)
+        r = sculptor(["lint-cross", str(idea_dir)])
+        assert r["returncode"] == 1
+        assert "Nonexistent Sub Section" in r["stdout"]
 
     def test_missing_dir(self):
         r = sculptor(["lint-cross", "/nonexistent/dir"])
