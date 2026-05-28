@@ -572,9 +572,10 @@ def cmd_notify(args: argparse.Namespace) -> None:
     now = _now()
 
     worker = reg["workers"].get(args.worker)
+    agent_id = getattr(args, "agent_id", "") or ""
     if not worker:
         # Worker not in registry — add it
-        reg["workers"][args.worker] = {
+        entry: dict = {
             "status": "idle",
             "skill": args.skill or "unknown",
             "context_pct": args.context_pct,
@@ -583,6 +584,9 @@ def cmd_notify(args: argparse.Namespace) -> None:
             "idle_since": now,
             "summary": (args.summary or "")[:200],
         }
+        if agent_id:
+            entry["agent_id"] = agent_id
+        reg["workers"][args.worker] = entry
         _save_registry(reg, rp)
         _out({"ok": True, "late": False, "worker": args.worker})
         return
@@ -599,6 +603,8 @@ def cmd_notify(args: argparse.Namespace) -> None:
     else:
         worker["idle_since"] = now
     worker["bead"] = args.bead_id
+    if agent_id:
+        worker["agent_id"] = agent_id
     if args.summary:
         worker["summary"] = args.summary[:200]
 
@@ -721,10 +727,11 @@ def cmd_phase_gate(args: argparse.Namespace) -> None:
         if st != "closed":
             blocking.append({"bead": bid, "reason": f"status={st}"})
 
-    # Check all workers have notification=received
+    # Check workers assigned to this phase's beads have notification=received
+    phase_bead_ids = {b.get("id", "") for b in beads}
     for wname, w in reg["workers"].items():
         notif = w.get("notification", "")
-        if notif == "pending":
+        if notif == "pending" and w.get("bead", "") in phase_bead_ids:
             blocking.append({"worker": wname, "bead": w.get("bead", "?"), "reason": "notification pending"})
 
     if blocking:
@@ -873,6 +880,102 @@ def cmd_dep(args: argparse.Namespace) -> None:
     _out({"ok": False, "error": f"bd dep failed: {r.stderr.strip()[:200]}"})
 
 
+def cmd_import_deps(args: argparse.Namespace) -> None:
+    """Bulk-import deps from a file using "Title A" blocks "Title B" format."""
+    dep_path = Path(args.file)
+    if not dep_path.exists():
+        _out({"ok": False, "error": f"file not found: {args.file}"})
+        return
+
+    # Parse dep lines
+    pairs: list[tuple[str, str]] = []
+    for line in dep_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r'"([^"]+)"\s+blocks\s+"([^"]+)"', line)
+        if m:
+            pairs.append((m.group(1), m.group(2)))
+
+    if not pairs:
+        _out({"ok": True, "applied": 0, "already_existed": 0, "errors": [], "unresolved": []})
+        return
+
+    # Build title→ID mapping via bd list
+    rp = _registry_path()
+    bd = _bd(rp)
+    r = _run(f"{bd} list --json")
+    stdout = r.stdout.strip()
+    json_start = next((i for i, ch in enumerate(stdout) if ch in ("[", "{")), -1)
+    all_beads = []
+    if json_start >= 0:
+        try:
+            all_beads = json.loads(stdout[json_start:])
+        except json.JSONDecodeError:
+            pass
+    if isinstance(all_beads, dict):
+        all_beads = all_beads.get("issues", [])
+
+    title_to_id: dict[str, str] = {}
+    for b in all_beads:
+        title = b.get("title", b.get("name", ""))
+        bid = b.get("id", "")
+        if title and bid:
+            title_to_id[_norm(title)] = bid
+
+    def _resolve(title: str) -> str:
+        norm_t = _norm(title)
+        if norm_t in title_to_id:
+            return title_to_id[norm_t]
+        for t, tid in title_to_id.items():
+            if t.startswith(norm_t) or norm_t.startswith(t):
+                return tid
+        return ""
+
+    unresolved = []
+    applied = 0
+    already_existed = 0
+    errors = []
+
+    if args.validate:
+        for blocker_title, blocked_title in pairs:
+            if not _resolve(blocker_title):
+                unresolved.append(blocker_title)
+            if not _resolve(blocked_title):
+                unresolved.append(blocked_title)
+        unresolved = sorted(set(unresolved))
+        _out({"ok": len(unresolved) == 0, "total": len(pairs), "resolved": len(pairs) * 2 - len(unresolved), "unresolved": unresolved})
+        return
+
+    for blocker_title, blocked_title in pairs:
+        blocker_id = _resolve(blocker_title)
+        blocked_id = _resolve(blocked_title)
+        if not blocker_id:
+            unresolved.append(blocker_title)
+            continue
+        if not blocked_id:
+            unresolved.append(blocked_title)
+            continue
+
+        r = _run(f"{bd} dep {blocker_id} --blocks {blocked_id}")
+        if r.returncode == 0:
+            applied += 1
+        else:
+            combined = (r.stderr + r.stdout).lower()
+            if "unique" in combined or "duplicate" in combined or "already exists" in combined:
+                already_existed += 1
+            else:
+                errors.append(f"{blocker_title} -> {blocked_title}: {r.stderr.strip()[:100]}")
+
+    unresolved = sorted(set(unresolved))
+    result: dict = {"ok": len(errors) == 0 and len(unresolved) == 0, "applied": applied, "already_existed": already_existed}
+    if errors:
+        result["errors"] = errors
+    if unresolved:
+        result["unresolved"] = unresolved
+    _out(result)
+
+
 def cmd_close(args: argparse.Namespace) -> None:
     """Close a bead via bd close, normalizing output to a simple JSON object."""
     rp = _registry_path()
@@ -893,6 +996,103 @@ def cmd_close(args: argparse.Namespace) -> None:
     except (json.JSONDecodeError, IndexError):
         pass
     _out({"ok": True, "id": args.bead_id, "status": status})
+
+
+def _parse_bd_json(stdout: str) -> list:
+    """Parse JSON from bd output, skipping any non-JSON prefix."""
+    stdout = stdout.strip()
+    json_start = next((i for i, ch in enumerate(stdout) if ch in ("[", "{")), -1)
+    if json_start < 0:
+        return []
+    try:
+        data = json.loads(stdout[json_start:])
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, dict):
+        return data.get("issues", [])
+    return data if isinstance(data, list) else []
+
+
+def cmd_ready(args: argparse.Namespace) -> None:
+    """Return dispatchable tasks: bd ready filtered (no epics) + supplemented from bd list."""
+    rp = _registry_path()
+    bd = _bd(rp)
+
+    # Primary: bd ready
+    r = _run(f"{bd} ready --json")
+    ready_beads = _parse_bd_json(r.stdout)
+
+    # Filter out epics
+    ready_beads = [b for b in ready_beads if b.get("type", "").lower() != "epic"]
+    ready_ids = {b.get("id", "") for b in ready_beads}
+
+    # Supplement: open beads with no blockers that bd ready missed
+    r2 = _run(f"{bd} list --status=open --json")
+    all_open = _parse_bd_json(r2.stdout)
+    supplemented = 0
+    for b in all_open:
+        bid = b.get("id", "")
+        if bid in ready_ids:
+            continue
+        if b.get("type", "").lower() == "epic":
+            continue
+        blocked_by = b.get("blocked_by") or b.get("blockedBy") or []
+        if not blocked_by:
+            ready_beads.append(b)
+            ready_ids.add(bid)
+            supplemented += 1
+
+    _out({"ok": True, "ready": ready_beads, "supplemented": supplemented})
+
+
+def cmd_recover(args: argparse.Namespace) -> None:
+    """Scan for orphaned beads (in_progress but no active worker) after context compaction."""
+    reg, rp = _load_registry()
+    bd = _bd(rp)
+
+    # Get all in-progress beads
+    r = _run(f"{bd} list --status=in_progress --json")
+    in_progress = _parse_bd_json(r.stdout)
+
+    # Build worker bead mapping
+    active_beads: set[str] = set()
+    worker_history: dict[str, str] = {}  # bead_id -> last worker name
+    for wname, w in reg.get("workers", {}).items():
+        bead = w.get("bead", "")
+        if w.get("status") == "active":
+            active_beads.add(bead)
+        if bead:
+            worker_history[bead] = wname
+
+    orphaned = []
+    for b in in_progress:
+        bid = b.get("id", "")
+        if bid not in active_beads:
+            entry: dict = {"id": bid, "title": b.get("title", b.get("name", ""))}
+            if bid in worker_history:
+                entry["last_worker"] = worker_history[bid]
+            orphaned.append(entry)
+
+    _out({"ok": True, "orphaned": orphaned})
+
+
+def cmd_ad_hoc(args: argparse.Namespace) -> None:
+    """Register an informal task in the registry for stall detection without a bead."""
+    reg, rp = _load_registry()
+    now = _now()
+    worker = args.worker
+    reg["workers"][worker] = {
+        "status": "active",
+        "skill": args.skill or "general",
+        "context_pct": 0,
+        "bead": f"ad-hoc:{args.name}",
+        "notification": "pending",
+        "dispatched_at": now,
+        "last_heartbeat": now,
+        "last_heartbeat_note": f"ad-hoc task: {args.name}",
+    }
+    _save_registry(reg, rp)
+    _out({"ok": True, "worker": worker, "bead": f"ad-hoc:{args.name}"})
 
 
 def cmd_validate_plan(args: argparse.Namespace) -> None:
@@ -992,9 +1192,6 @@ def cmd_wire_plan(args: argparse.Namespace) -> None:
         return
 
     # Build title→ID mapping (normalize titles for fuzzy matching)
-    def _norm(t: str) -> str:
-        return re.sub(r'\s+', ' ', t.strip().lower())
-
     title_to_id: dict[str, str] = {}
     for item in created:
         title = item.get("title", item.get("name", ""))
@@ -1090,6 +1287,10 @@ def cmd_wire_plan(args: argparse.Namespace) -> None:
     if errors:
         result["errors"] = errors[:20]
     _out(result)
+
+
+def _norm(t: str) -> str:
+    return re.sub(r'\s+', ' ', t.strip().lower())
 
 
 def _slugify(text: str) -> str:
@@ -1261,9 +1462,23 @@ def cmd_phase_complete(args: argparse.Namespace) -> None:
                 files = [f.strip() for f in reason[start:end].split(",") if f.strip()]
                 all_files.extend(files)
 
+    # Also aggregate files from task-summaries.md (written by update-context)
+    summaries_path = ctx / "task-summaries.md"
+    if summaries_path.exists():
+        summaries_text = summaries_path.read_text()
+        closed_ids = {b.get("id", "") for b in beads if b.get("status") == "closed"}
+        for bid in closed_ids:
+            pattern = rf"### BD-{re.escape(bid)}:.*?\n\*\*Worker\*\*.*?\*\*Files\*\*:\s*(.*?)(?:\n|$)"
+            m = re.search(pattern, summaries_text)
+            if m:
+                files_from_summary = [f.strip() for f in m.group(1).split(",") if f.strip()]
+                all_files.extend(files_from_summary)
+
+    phase_bead_ids = {b.get("id", "") for b in beads}
     for wname, w in reg.get("workers", {}).items():
-        if w.get("notification") == "pending":
-            blocking.append({"worker": wname, "bead": w.get("bead", "?"), "reason": "notification pending"})
+        if w.get("notification") == "pending" and w.get("bead", "") in phase_bead_ids:
+            bead_title = next((b.get("title", "") for b in beads if b.get("id") == w.get("bead")), "")
+            blocking.append({"worker": wname, "bead": w.get("bead", "?"), "bead_title": bead_title, "reason": "notification pending"})
 
     if blocking:
         _out({"pass": False, "blocking": blocking})
@@ -1660,14 +1875,22 @@ def cmd_sync(args: argparse.Namespace) -> None:
             retired.append({"worker": wname, "ctx": ctx, "reason": "self_closed"})
             continue
 
-        # Available for reuse — flag stale idle workers
+        # Auto-retire workers idle too long — agent runtime likely ended
+        idle_min = _idle_minutes(w)
+        if idle_min is not None and idle_min > 10:
+            w["status"] = "retired"
+            w["retired_at"] = now
+            retired.append({"worker": wname, "ctx": ctx, "reason": "idle_too_long", "idle_min": round(idle_min)})
+            continue
+
+        # Available for reuse
         skill = w.get("skill", "unknown")
         if skill not in available:
             available[skill] = []
         entry: dict = {"name": wname, "ctx": ctx, "bead": w.get("bead", "")}
-        idle_min = _idle_minutes(w)
-        if idle_min is not None and idle_min > 30:
-            entry["stale"] = True
+        if w.get("agent_id"):
+            entry["agent_id"] = w["agent_id"]
+        if idle_min is not None:
             entry["idle_min"] = round(idle_min)
         available[skill].append(entry)
 
@@ -1675,9 +1898,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
         _save_registry(reg, rp)
 
     idle_count = sum(len(v) for v in available.values())
-    addressable_count = sum(
-        1 for workers in available.values() for w in workers if not w.get("stale")
-    )
+    addressable_count = idle_count
     result: dict = {
         "available": available,
         "retired_now": retired,
@@ -1813,6 +2034,7 @@ def main() -> None:
     s.add_argument("--context-pct", type=int, default=0, dest="context_pct")
     s.add_argument("--summary", default="")
     s.add_argument("--skill", default="")
+    s.add_argument("--agent-id", default="", dest="agent_id")
 
     # batch-notify
     s = sub.add_parser("batch-notify")
@@ -1853,10 +2075,27 @@ def main() -> None:
     # status
     sub.add_parser("status")
 
+    # ready (filtered bd ready + supplement)
+    sub.add_parser("ready")
+
+    # recover (find orphaned in-progress beads)
+    sub.add_parser("recover")
+
+    # ad-hoc (register informal task without bead)
+    s = sub.add_parser("ad-hoc")
+    s.add_argument("--name", required=True)
+    s.add_argument("--worker", required=True)
+    s.add_argument("--skill", default="general")
+
     # dep (idempotent bd dep wrapper)
     s = sub.add_parser("dep")
     s.add_argument("blocker")
     s.add_argument("blocked")
+
+    # import-deps (bulk dep import from deps.txt)
+    s = sub.add_parser("import-deps")
+    s.add_argument("file")
+    s.add_argument("--validate", action="store_true")
 
     # close (normalized bd close wrapper)
     s = sub.add_parser("close")
@@ -1923,7 +2162,11 @@ def main() -> None:
         "routing": cmd_routing,
         "sync": cmd_sync,
         "status": cmd_status,
+        "ready": cmd_ready,
+        "recover": cmd_recover,
+        "ad-hoc": cmd_ad_hoc,
         "dep": cmd_dep,
+        "import-deps": cmd_import_deps,
         "close": cmd_close,
         "validate-plan": cmd_validate_plan,
         "wire-plan": cmd_wire_plan,

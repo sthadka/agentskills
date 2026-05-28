@@ -95,3 +95,25 @@ bd update <id> --status blocked --json && bd create "Unblock: <reason>" -t task 
 # Decompose large issue into subtasks in one call
 bd create "Subtask 1" -t task --parent <id> --json && bd create "Subtask 2" -t task --parent <id> --json && bd close <id> --json
 ```
+
+## `tf.py` Extended Commands
+
+These commands extend the base orchestration beyond what `bd` provides:
+
+```bash
+# Find dispatchable tasks (filters epics, supplements missed unblocked beads)
+python3 .beads/tf.py ready
+
+# Bulk import deps from "Title A" blocks "Title B" format
+python3 .beads/tf.py import-deps deps.txt            # Apply all deps
+python3 .beads/tf.py import-deps deps.txt --validate  # Validate only (check title resolution)
+
+# Find orphaned beads after context compaction (in_progress with no active worker)
+python3 .beads/tf.py recover
+
+# Register ad-hoc task for stall detection (no bead required)
+python3 .beads/tf.py ad-hoc --name "refactor-tests" --worker refactor-1 --skill python
+
+# Record completion with agent ID for reliable reuse
+python3 .beads/tf.py notify {worker} {bead} --context-pct N --summary "..." --agent-id {id}
+```

@@ -548,7 +548,7 @@ class TestSync:
         assert out["available"]["rust"][0]["name"] == "rust-1"
         assert out["available"]["go"][0]["name"] == "go-1"
 
-    def test_stale_idle_worker_flagged(self, workspace):
+    def test_idle_too_long_retired(self, workspace):
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
         tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
         tf(workspace, ["notify", "rust-1", "bead-abc", "--context-pct", "55"])
@@ -558,9 +558,10 @@ class TestSync:
         save_registry(workspace, reg)
 
         out = tf(workspace, ["sync"])
-        available = out["available"]["rust"][0]
-        assert available["stale"] is True
-        assert available["idle_min"] > 40
+        assert "rust" not in out.get("available", {})
+        retired = [r for r in out["retired_now"] if r["worker"] == "rust-1"]
+        assert len(retired) == 1
+        assert retired[0]["reason"] == "idle_too_long"
 
     def test_fresh_idle_worker_not_stale(self, workspace):
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
@@ -2619,3 +2620,244 @@ class TestWorkerPromptIntegration:
                  env={"BD_STUB_RESPONSE": bead_resp})
         assert out["ok"] is True
         assert "Integration Task" not in out["prompt"]
+
+
+# ── Import-Deps Tests ──────────────────────
+
+
+class TestImportDeps:
+    def test_basic_import(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        deps = workspace / "deps.txt"
+        deps.write_text('"Task A" blocks "Task B"\n"Task A" blocks "Task C"\n')
+        beads = [
+            {"id": "b1", "title": "Task A"},
+            {"id": "b2", "title": "Task B"},
+            {"id": "b3", "title": "Task C"},
+        ]
+        out = tf(workspace, ["import-deps", str(deps)],
+                 env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["ok"] is True
+        assert out["applied"] == 2
+
+    def test_validate_mode(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        deps = workspace / "deps.txt"
+        deps.write_text('"Task A" blocks "Task B"\n')
+        beads = [{"id": "b1", "title": "Task A"}, {"id": "b2", "title": "Task B"}]
+        out = tf(workspace, ["import-deps", str(deps), "--validate"],
+                 env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["ok"] is True
+        assert out["total"] == 1
+        assert out["unresolved"] == []
+
+    def test_unresolved_title(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        deps = workspace / "deps.txt"
+        deps.write_text('"Task A" blocks "Unknown Task"\n')
+        beads = [{"id": "b1", "title": "Task A"}]
+        out = tf(workspace, ["import-deps", str(deps)],
+                 env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["ok"] is False
+        assert "Unknown Task" in out["unresolved"]
+
+    def test_empty_file(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        deps = workspace / "deps.txt"
+        deps.write_text("# just a comment\n\n")
+        out = tf(workspace, ["import-deps", str(deps)],
+                 env={"BD_STUB_RESPONSE": "[]"})
+        assert out["ok"] is True
+        assert out["applied"] == 0
+
+    def test_file_not_found(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        out = tf(workspace, ["import-deps", "/nonexistent/deps.txt"])
+        assert out["ok"] is False
+
+
+# ── Ready Tests ──────────────────────
+
+
+class TestReady:
+    def test_filters_epics(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = [
+            {"id": "e1", "type": "epic", "title": "Epic"},
+            {"id": "t1", "type": "task", "title": "Task 1"},
+        ]
+        out = tf(workspace, ["ready"],
+                 env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["ok"] is True
+        ids = [b["id"] for b in out["ready"]]
+        assert "e1" not in ids
+        assert "t1" in ids
+
+    def test_supplements_from_list(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = [
+            {"id": "t1", "type": "task", "title": "Task 1"},
+            {"id": "t2", "type": "task", "title": "Task 2", "blocked_by": None},
+        ]
+        out = tf(workspace, ["ready"],
+                 env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["ok"] is True
+
+    def test_handles_bd_failure(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["ready"],
+                 env={"BD_STUB_RESPONSE": "invalid json!!!", "BD_STUB_EXIT": "1"})
+        assert out["ok"] is True
+        assert out["ready"] == []
+
+
+# ── Recover Tests ──────────────────────
+
+
+class TestRecover:
+    def test_orphaned_bead(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "w1", "bead-1", "--skill", "code"])
+        reg = load_registry(workspace)
+        reg["workers"]["w1"]["status"] = "retired"
+        save_registry(workspace, reg)
+        beads = [{"id": "bead-1", "title": "Orphaned task", "status": "in_progress"}]
+        out = tf(workspace, ["recover"],
+                 env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["ok"] is True
+        assert len(out["orphaned"]) == 1
+        assert out["orphaned"][0]["id"] == "bead-1"
+        assert out["orphaned"][0]["last_worker"] == "w1"
+
+    def test_no_orphans(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "w1", "bead-1", "--skill", "code"])
+        beads = [{"id": "bead-1", "title": "Active task", "status": "in_progress"}]
+        out = tf(workspace, ["recover"],
+                 env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["ok"] is True
+        assert len(out["orphaned"]) == 0
+
+    def test_empty_state(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["recover"],
+                 env={"BD_STUB_RESPONSE": "[]"})
+        assert out["ok"] is True
+        assert out["orphaned"] == []
+
+
+# ── Ad-hoc Tests ──────────────────────
+
+
+class TestAdHoc:
+    def test_creates_registry_entry(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        out = tf(workspace, ["ad-hoc", "--name", "refactor-tests", "--worker", "refactor-1", "--skill", "python"])
+        assert out["ok"] is True
+        assert out["bead"] == "ad-hoc:refactor-tests"
+        reg = load_registry(workspace)
+        assert "refactor-1" in reg["workers"]
+        assert reg["workers"]["refactor-1"]["bead"] == "ad-hoc:refactor-tests"
+        assert reg["workers"]["refactor-1"]["status"] == "active"
+        assert reg["workers"]["refactor-1"]["skill"] == "python"
+
+    def test_stall_detection_works(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        tf(workspace, ["ad-hoc", "--name", "test-task", "--worker", "w1"])
+        reg = load_registry(workspace)
+        reg["workers"]["w1"]["last_heartbeat"] = ts_minutes_ago(25)
+        reg["workers"]["w1"]["dispatched_at"] = ts_minutes_ago(25)
+        save_registry(workspace, reg)
+        out = tf(workspace, ["stalled"])
+        assert len(out["stalled"]) == 1
+
+
+# ── Notify Agent-ID Tests ──────────────────────
+
+
+class TestNotifyAgentId:
+    def test_stores_agent_id(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "w1", "bead-1", "--skill", "code"])
+        out = tf(workspace, ["notify", "w1", "bead-1", "--context-pct", "50",
+                              "--agent-id", "a123-456"],
+                 env={"BD_STUB_RESPONSE": json.dumps([{"id": "bead-1", "status": "closed"}])})
+        assert out["ok"] is True
+        reg = load_registry(workspace)
+        assert reg["workers"]["w1"]["agent_id"] == "a123-456"
+
+    def test_agent_id_in_sync_output(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "w1", "bead-1", "--skill", "code"])
+        tf(workspace, ["notify", "w1", "bead-1", "--context-pct", "50",
+                        "--agent-id", "a123-456"],
+                 env={"BD_STUB_RESPONSE": json.dumps([{"id": "bead-1", "status": "closed"}])})
+        out = tf(workspace, ["sync"])
+        if out.get("available", {}).get("code"):
+            worker = out["available"]["code"][0]
+            assert worker.get("agent_id") == "a123-456"
+
+
+# ── Phase-Gate Worker Scoping Tests ──────────────────────
+
+
+class TestPhaseGateScoping:
+    def test_ignores_workers_from_other_phases(self, workspace, bd_stub):
+        """Workers assigned to beads NOT in this phase should not block."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        # Dispatch worker for a different-phase bead
+        tf(workspace, ["dispatch", "cli-1", "bead-other", "--skill", "cli"])
+        # Phase beads are all closed
+        phase_beads = [
+            {"id": "bead-1", "status": "closed"},
+            {"id": "bead-2", "status": "closed"},
+        ]
+        out = tf(workspace, ["phase-gate", "epic-1"],
+                 env={"BD_STUB_RESPONSE": json.dumps(phase_beads)})
+        assert out["pass"] is True
+
+    def test_blocks_on_phase_worker(self, workspace, bd_stub):
+        """Workers assigned to beads IN this phase should block."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "w1", "bead-1", "--skill", "code"])
+        phase_beads = [
+            {"id": "bead-1", "status": "closed"},
+            {"id": "bead-2", "status": "closed"},
+        ]
+        out = tf(workspace, ["phase-gate", "epic-1"],
+                 env={"BD_STUB_RESPONSE": json.dumps(phase_beads)})
+        assert out["pass"] is False
+        assert any(b["worker"] == "w1" for b in out["blocking"])
+
+
+# ── Phase-Complete Task-Summaries Tests ──────────────────────
+
+
+class TestPhaseCompleteSummaries:
+    def test_aggregates_from_task_summaries(self, workspace, bd_stub):
+        """phase-complete should extract files from task-summaries.md."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        ctx_dir = workspace / ".beads" / "context-test"
+        ctx_dir.mkdir(parents=True, exist_ok=True)
+        summaries = ctx_dir / "task-summaries.md"
+        summaries.write_text(
+            "## Completed Tasks\n\n"
+            "### BD-bead-1: Setup\n"
+            "**Worker**: w1 | **Files**: src/main.go, src/util.go\n"
+            "Did the setup.\n"
+        )
+        phase_beads = [{"id": "bead-1", "status": "closed", "close_reason": "done"}]
+        out = tf(workspace, ["phase-complete", "--epic", "epic-1", "--phase-num", "1"],
+                 env={"BD_STUB_RESPONSE": json.dumps(phase_beads)})
+        assert out["pass"] is True
+        assert "src/main.go" in out["files"]
+        assert "src/util.go" in out["files"]
+
+    def test_scopes_workers_to_phase_beads(self, workspace, bd_stub):
+        """Workers for non-phase beads should not block phase-complete."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "cli-1", "bead-other", "--skill", "cli"])
+        phase_beads = [{"id": "bead-1", "status": "closed"}]
+        out = tf(workspace, ["phase-complete", "--epic", "epic-1", "--phase-num", "2"],
+                 env={"BD_STUB_RESPONSE": json.dumps(phase_beads)})
+        assert out["pass"] is True

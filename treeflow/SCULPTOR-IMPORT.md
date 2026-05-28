@@ -104,14 +104,27 @@ task
 bd create -f .beads/plan.md --json
 ```
 
-Then add dependencies per the rules above. Use `tf.py dep` for blocking deps (idempotent — handles duplicate deps from parent-child hierarchy). See [COMMANDS.md](COMMANDS.md) for full syntax.
+Then wire dependencies. **Preferred: inline deps in plan.md** — add a `### Dependencies` section per task with references like `blocks: 2.1, 2.2`. Then use `tf.py wire-plan` to resolve and apply all deps from the plan structure:
+```bash
+python3 .beads/tf.py wire-plan .beads/plan.md --ids created.json
+```
+
+**Alternative: separate deps.txt** — if the sculptor outputs deps as a separate file using `"A" blocks "B"` format:
+```bash
+# Validate all titles resolve first
+python3 .beads/tf.py import-deps deps.txt --validate
+# Apply all deps in bulk
+python3 .beads/tf.py import-deps deps.txt
+```
+
+For individual deps, use `tf.py dep` (idempotent). See [COMMANDS.md](COMMANDS.md) for full syntax.
 
 ### 4. Validate
 ```bash
-bd ready --json
+python3 .beads/tf.py ready
 ```
 
-Setup task should be the first (or only) ready issue.
+Setup task should be the first (or only) ready issue. Epics are automatically filtered out.
 
 ### 5. Populate cross-worker invariants
 

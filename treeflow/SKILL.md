@@ -60,6 +60,9 @@ Note `sendmessage: false` in `worker-context.md` under Known Gotchas. Skip the r
 ### Find Work
 
 ```bash
+# After init: use tf.py ready (filters epics, supplements missed beads)
+python3 .beads/tf.py ready
+# Before init: use bd directly
 bd ready --json | jq -c
 ```
 
@@ -112,7 +115,7 @@ State management commands — all output compact JSON:
 # Orchestrator commands
 python3 .beads/tf.py init {plan-name} --bd-path "$(which bd 2>/dev/null || echo bd)" [--worker-model MODEL]  # Create context dir + registry + gitignore
 python3 .beads/tf.py dispatch {worker} {bead} --skill {domain} [--output-file path]  # Record dispatch
-python3 .beads/tf.py notify {worker} {bead} --context-pct N --summary "..." [--skill domain]  # Record completion
+python3 .beads/tf.py notify {worker} {bead} --context-pct N --summary "..." [--skill domain] [--agent-id ID]  # Record completion
 python3 .beads/tf.py phase-gate {epic-id}                # Check phase complete
 python3 .beads/tf.py smoke-test --build-cmd "cmd" --beads a,b  # Build + wiring check
 python3 .beads/tf.py conflict-check --beads a,b,c                     # File-conflict analysis for parallelism safety
@@ -124,7 +127,11 @@ python3 .beads/tf.py retire {worker}                     # Mark worker retired
 python3 .beads/tf.py routing --add "pattern:domain:prefix"  # Add routing entry
 python3 .beads/tf.py status                              # One-line overview
 python3 .beads/tf.py close {bead_id} --reason "..."                    # Close bead with normalized JSON output
+python3 .beads/tf.py ready                                             # Dispatchable tasks (filtered epics, supplemented from bd list)
+python3 .beads/tf.py recover                                           # Find orphaned in-progress beads (post-compaction recovery)
+python3 .beads/tf.py ad-hoc --name {name} --worker {worker} [--skill domain]  # Register informal task for stall detection
 python3 .beads/tf.py dep {blocker} {blocked}                           # Add dep idempotently (UNIQUE errors = success)
+python3 .beads/tf.py import-deps {file} [--validate]                   # Bulk import deps from "A" blocks "B" format
 python3 .beads/tf.py validate-plan {file}                              # Validate plan md for bd create -f
 python3 .beads/tf.py worker-prompt --beads {id}[,id2,id3] [--reuse --prior-bead {prev}]  # Assemble worker prompt
 python3 .beads/tf.py update-context --bead {id} --worker {name} --summary "..." --files "..." [--gotcha "..."]  # Append to context
@@ -143,6 +150,9 @@ python3 .beads/tf.py worker-close {bead_id} --context-pct N --files f1,f2 --summ
 
 For batch issue creation with `bd create -f`, see [PLAN-FORMAT.md](PLAN-FORMAT.md). **Always validate first:**
 ```bash
+# Before init: run from skill source path
+python3 ~/.claude/skills/treeflow/tf.py validate-plan plan.md
+# After init: run from local copy
 python3 .beads/tf.py validate-plan plan.md
 ```
 If validation fails (e.g., `---` separators detected), fix the plan file before running `bd create -f`.
@@ -236,20 +246,22 @@ Pass `--ready-count` with the number of ready tasks from step 1. This single com
 - Auto-retires workers at ≥90% context (can't reuse meaningfully)
 - Auto-retires workers at <40% context (not worth reuse overhead)
 - Auto-retires idle workers that never sent a notification (session-ended, not addressable)
+- Auto-retires workers idle >10 min (agent runtime likely ended — known platform limitation)
 - Flags active workers as `stalled` if no heartbeat for >20 min
-- Flags idle workers as `stale` if idle >30 min (likely from a prior session or laptop sleep)
-- Returns `available` workers grouped by skill domain, ready for reuse
+- Returns `available` workers grouped by skill domain, with `agent_id` if stored
 - Sets `reuse_enforced: true` when idle workers exceed `ready_tasks × 0.5` — prefer reuse over fresh spawns
 
 **Decision rule** based on sync output:
 1. If `reuse_enforced: true` → **prefer reuse** of an idle worker via SendMessage
-2. `available` has a worker in the same skill domain as the ready task → **reuse** via SendMessage
+2. `available` has a worker in the same skill domain as the ready task → **reuse** via SendMessage (use `agent_id` if available, fall back to worker name)
 3. `available` is empty or no domain match → spawn fresh
 4. **If SendMessage is unavailable** (detected in Entry Protocol) → always spawn fresh
 
-Workers that called `worker-close` are auto-retired by sync (reason: `self_closed`), so `available` only contains genuinely addressable workers. If SendMessage unexpectedly fails, spawn fresh — but this should be rare.
+Workers that called `worker-close` are auto-retired by sync (reason: `self_closed`), so `available` only contains genuinely addressable workers. If SendMessage unexpectedly fails, spawn fresh.
 
 **How reuse works:** `SendMessage` to a stopped agent auto-resumes it with full conversation context. No orientation overhead.
+
+**Known limitation:** Workers become unreachable after context compaction. The agent runtime ends but treeflow's registry doesn't know. Sync mitigates this by retiring workers idle >10 min, but reuse is most reliable within the same context window. If `SendMessage` fails, always fall back to spawning fresh — don't retry.
 
 **When to batch instead of reuse:** If multiple tasks for the same domain are known upfront, batch them in one worker prompt at dispatch time — this avoids the SendMessage round-trip. Reuse is most valuable for follow-up tasks discovered *after* a worker finishes.
 
@@ -287,10 +299,10 @@ Agent tool:
   model: "{model}"    ← include only if non-empty from worker-prompt output
 ```
 
-**Reused worker:**
+**Reused worker** (use `agent_id` from sync output if available, fall back to name):
 ```
 SendMessage:
-  to: "{worker-name}"
+  to: "{agent-id or worker-name}"
   message: <reuse prompt from tf.py worker-prompt --reuse>
 ```
 
@@ -307,11 +319,12 @@ python3 .beads/tf.py dispatch {worker-name} {bead-id} --skill {domain} [--output
 
 When a `<task-notification>` arrives:
 
-1. **Extract essentials from `<result>`**: worker name, bead ID, context %, 1-line summary
+1. **Extract essentials from `<result>`**: worker name, bead ID, context %, 1-line summary, and agent ID (from the task-notification metadata)
 2. **Record in registry** (handles all state transitions atomically):
    ```bash
-   python3 .beads/tf.py notify {worker-name} {bead-id} --context-pct {N} --summary "{1-line}"
+   python3 .beads/tf.py notify {worker-name} {bead-id} --context-pct {N} --summary "{1-line}" --agent-id {agent-id}
    ```
+   The `--agent-id` stores the agent's runtime ID for more reliable SendMessage reuse.
 3. **Check response fields**:
    - `late: true` → late notification for an already-processed bead — no further action needed
    - `bead_status` → included automatically, no separate `bd show` needed:
@@ -403,11 +416,12 @@ After the system compresses your context, your in-memory state is lost. Run thes
 
 1. **Get overview:** `python3 .beads/tf.py status` — active workers, pending notifications, overall counts
 2. **Check worker states:** `python3 .beads/tf.py registry` — who is active/idle/retired, their beads and context %
-3. **Find unblocked work:** `bd ready --json` — what tasks can be dispatched next
-4. **Process pending notifications** before dispatching new work — any `task-notification` messages in the queue should be handled first via `tf.py notify`
-5. **Read context files** if needed: `cat .beads/context-*/worker-context.md` and the latest `phase-*.md` file
+3. **Find orphaned beads:** `python3 .beads/tf.py recover` — beads in_progress with no active worker (common after compaction)
+4. **Find unblocked work:** `python3 .beads/tf.py ready` — dispatchable tasks (filtered, supplemented)
+5. **Process pending notifications** before dispatching new work — any `task-notification` messages in the queue should be handled first via `tf.py notify`
+6. **Read context files** if needed: `cat .beads/context-*/worker-context.md` and the latest `phase-*.md` file
 
-The registry is file-based and survives compression — trust it over any summary the system provides.
+The registry is file-based and survives compression — trust it over any summary the system provides. Workers from before compaction are likely unreachable — retire them and spawn fresh.
 
 ## Error Handling
 
