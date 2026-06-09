@@ -169,7 +169,7 @@ Follow beadflow's planning process: analyze goal, write plan file, `bd create -f
 
 **Additional treeflow requirements for task descriptions:**
 
-1. **Include target file paths** — every task MUST list the files/directories it will create or modify. The orchestrator needs this for parallelism safety.
+1. **Include target file paths** — every task MUST include a `Files:` line listing all files it will create or modify. Use `Files (new):` and `Files (modifies):` to distinguish. `validate-plan` will warn on tasks missing this section. Without it, `conflict-check` cannot detect file-level parallelism conflicts.
 2. **Mark parallel groups** — add `[parallel]` for tasks within a phase that have no cross-dependencies.
 3. **Add skill hints** — when obvious, note the skill domain (e.g., "Go implementation", "React component", "test suite", "CI/CD setup").
 4. **Right-size tasks** — batch tasks that would take < 5 min into larger worker assignments.
@@ -181,9 +181,13 @@ Follow beadflow's planning process: analyze goal, write plan file, `bd create -f
 10. **Cross-command features** — if a spec requirement spans multiple commands or modules, create one task per command/module with its own acceptance criteria. Never combine — cross-command tasks reliably produce one implementation and one omission.
 11. **Pre-surface technical obstacles** — when planning identifies technical friction (API shape mismatch, library constraints, ordering dependencies), write the obstacle and its resolution into the task description. Workers discovering obstacles mid-implementation defer; workers given the solution upfront implement it.
 12. **Spec-section references** — each task should cite the spec section it implements (e.g., `Spec: spec.md §3 — VAD preprocessing`). After all tasks are created, verify coverage: every spec section should map to at least one task.
+13. **Soft dependencies (depends_on)** — if task A creates types/interfaces that task B imports, add `depends_on:Task A title` in Task B's Dependencies section. This prevents batching them into the same parallel group without blocking readiness.
+14. **Every "implement package" task must produce tests** — add to the task description: "Write unit tests for all pure functions. Table-driven tests for normalization/conversion helpers are mandatory."
+15. **Producer tasks must name their consumer** — "implement `pkg/cache`" is incomplete without "used by Task N — `scan.go` to gate feed downloads on `cache.IsStale()`". Without an explicit consumer, the package becomes dead code. If no consumer task exists, create a corresponding "wire X into Y" task.
+16. **Never paraphrase spec identifiers** — flag names, command names, field names, and type names in worker prompts must be copied verbatim from the spec. Do not type `--date1` from memory when the spec says `--date-a`. Reference the spec section instead: "implement the diff command as defined in spec.md §CLI Surface — read that section and use the exact flag names."
 
 **Good treeflow task description:**
-> "Create `internal/workflow/oom_report.go`: OOMReportWorkflow(ctx) error — runs weekly. Files: `internal/workflow/oom_report.go`, `internal/workflow/oom_report_test.go`. [Go implementation]"
+> "Create `internal/workflow/oom_report.go`: OOMReportWorkflow(ctx) error — runs weekly. Files (new): `internal/workflow/oom_report.go`, `internal/workflow/oom_report_test.go`. Used by: Task 12 — `cmd/pipeline.go` calls OOMReportWorkflow in the weekly schedule. Spec: spec.md §4.2. [Go implementation]"
 
 After planning:
 
@@ -193,7 +197,7 @@ After planning:
    python3 ~/.claude/skills/treeflow/tf.py init {plan-name} --bd-path "$(which bd 2>/dev/null || echo bd)" [--worker-model MODEL]
    ```
    The `--bd-path` flag stores the absolute path in `registry.json` so workers can find `bd` without needing the orchestrator's shell PATH.
-3. Write `worker-context.md` from [WORKER-CONTEXT-TEMPLATE.md](WORKER-CONTEXT-TEMPLATE.md) — fill in all sections, skip anything in CLAUDE.md
+3. Write `worker-context.md` from [WORKER-CONTEXT-TEMPLATE.md](WORKER-CONTEXT-TEMPLATE.md) — fill in all sections, skip anything in CLAUDE.md. The **Conventions** and **Security** sections are mandatory — these are the cross-cutting behaviors that silently diverge when left to worker discretion (logging standard, test requirements, input validation rules).
 4. Add skill routing: `python3 .beads/tf.py routing --add "pattern:domain:prefix"` for each file-domain mapping
 5. Copy `## Cross-worker Invariants` from `plan.md` into `worker-context.md` and `CLAUDE.md`. If the plan has no invariants section, prompt the user: "Are there cross-cutting contracts that every worker must know? (e.g., 'all DB writes must update the FTS index', 'all file writes must be atomic')"
 
@@ -204,10 +208,10 @@ Run continuously until all beads are closed or user input is needed.
 ### 1. Find Ready Work
 
 ```bash
-bd ready --json | jq -c
+python3 .beads/tf.py ready
 ```
 
-Filter out epics and orchestration beads — only dispatch task-type beads to workers. Epics appear in `bd ready` but are never dispatched.
+Use `tf.py ready` instead of `bd ready` directly — it filters epics and supplements with `bd list --status=open` to catch tasks that `bd ready` silently caps. If `capped: true` in the output, `bd ready` missed tasks (the full set is in `ready`).
 
 - No ready tasks → assess: `bd blocked --json | jq -c && bd list --status=open --json | jq -c`
   - Blocked issues → analyze and attempt to resolve
@@ -221,10 +225,13 @@ Run file-conflict analysis on ready beads:
 python3 .beads/tf.py conflict-check --beads bead1,bead2,bead3
 ```
 
-This extracts `Files:` lists from bead descriptions and returns:
+This extracts `Files:` / `Files (new):` / `Files (modifies):` lists from bead descriptions (with fallback path inference) and returns:
 - `safe_parallel` — beads with no file overlap, safe to dispatch concurrently
 - `conflicts` — files touched by multiple beads
+- `modify_conflicts` — files both modified by 2+ beads (higher severity than create+modify)
 - `serial_groups` — sets of beads that must be serialized due to shared files
+- `soft_deps` — `depends_on:` relationships (serialization constraints without blocking readiness)
+- `inferred` — beads where files were inferred from description text (no explicit `Files:` line)
 
 Additional rules:
 1. **Same directory, different files** → safe with caution
@@ -246,22 +253,24 @@ Pass `--ready-count` with the number of ready tasks from step 1. This single com
 - Auto-retires workers at ≥90% context (can't reuse meaningfully)
 - Auto-retires workers at <40% context (not worth reuse overhead)
 - Auto-retires idle workers that never sent a notification (session-ended, not addressable)
-- Auto-retires workers idle >10 min (agent runtime likely ended — known platform limitation)
+- Auto-retires workers idle >4 min (workers become non-addressable within 2-5 min)
 - Flags active workers as `stalled` if no heartbeat for >20 min
 - Returns `available` workers grouped by skill domain, with `agent_id` if stored
-- Sets `reuse_enforced: true` when idle workers exceed `ready_tasks × 0.5` — prefer reuse over fresh spawns
+- `addressable` count only includes workers idle ≤3 min (truly fresh)
+- Sets `reuse_enforced: true` when fresh (≤3 min idle) workers exceed `ready_tasks × 0.5`
 
 **Decision rule** based on sync output:
-1. If `reuse_enforced: true` → **prefer reuse** of an idle worker via SendMessage
-2. `available` has a worker in the same skill domain as the ready task → **reuse** via SendMessage (use `agent_id` if available, fall back to worker name)
-3. `available` is empty or no domain match → spawn fresh
-4. **If SendMessage is unavailable** (detected in Entry Protocol) → always spawn fresh
+1. If `reuse_enforced: true` → **prefer reuse** of the freshest idle worker (lowest `idle_min`) via SendMessage
+2. `available` has a worker in the same skill domain with `idle_min` ≤ 3 → **reuse** via SendMessage (use `agent_id` if available, fall back to worker name)
+3. Workers with `idle_min` > 3 are listed but may not be addressable — prefer spawning fresh over attempting reuse
+4. `available` is empty or no domain match → spawn fresh
+5. **If SendMessage is unavailable** (detected in Entry Protocol) → always spawn fresh
 
-Workers that called `worker-close` are auto-retired by sync (reason: `self_closed`), so `available` only contains genuinely addressable workers. If SendMessage unexpectedly fails, spawn fresh.
+Workers that called `worker-close` are auto-retired by sync (reason: `self_closed`), so `available` only contains genuinely addressable workers. If SendMessage fails, immediately retire the worker and spawn fresh — do not retry.
 
 **How reuse works:** `SendMessage` to a stopped agent auto-resumes it with full conversation context. No orientation overhead.
 
-**Known limitation:** Workers become unreachable after context compaction. The agent runtime ends but treeflow's registry doesn't know. Sync mitigates this by retiring workers idle >10 min, but reuse is most reliable within the same context window. If `SendMessage` fails, always fall back to spawning fresh — don't retry.
+**Known limitation:** Workers become non-addressable within 2-5 minutes of completing their last task. Sync mitigates this by auto-retiring workers idle >4 min and only counting workers idle ≤3 min as addressable. If `SendMessage` fails, always fall back to spawning fresh — don't retry.
 
 **When to batch instead of reuse:** If multiple tasks for the same domain are known upfront, batch them in one worker prompt at dispatch time — this avoids the SendMessage round-trip. Reuse is most valuable for follow-up tasks discovered *after* a worker finishes.
 
@@ -337,18 +346,19 @@ When a `<task-notification>` arrives:
    ```
    This appends the task summary to the epic context file and optionally adds a gotcha to `worker-context.md`.
 6. **Discard the full `<result>` content** — it's now captured in registry and context files
-7. Check for newly ready beads: `bd ready --json | jq -c`
-8. **Phase transition** — if all beads for a phase are done, run the combined gate + smoke test + summary:
+7. **Ignore transient LSP diagnostics** — during active worker runs, `go.sum` missing entries, `could not import` errors, build-tag exclusion warnings, and `undefined: <symbol>` in partially-written files are almost always transient. Do not act on these until the responsible worker completes.
+8. Check for newly ready beads: `python3 .beads/tf.py ready`
+9. **Phase transition** — if all beads for a phase are done, run the combined gate + smoke test + summary:
    ```bash
    python3 .beads/tf.py phase-complete --epic {epic-id} [--build-cmd "{build}"] [--phase-num {N}]
    ```
    - If `pass: false` → wait for `blocking` items to resolve
    - If `pass: true`:
-     a. **Spec-trace verification** — run targeted grep checks against spec requirements for the completed phase. Verify that key identifiers exist at integration points. If missing, create a fix task before proceeding.
+     a. **Spec-trace verification (mandatory)** — run targeted grep checks against the spec for the completed phase. For each CLI command: verify every flag name exists in the code. For each data model: verify every JSON field name matches. For each package: verify the import path exists. If any spec reference can't be grepped, create a fix task before proceeding. A `phase-complete` that returns `beads_closed: 0` without running grep verification is a failed spec-trace.
      b. Phase summary is already written to `phase-{N}.md` by the command
      c. Check `build` field: if `"fail"` → dispatch integration worker to fix
      d. If clean → proceed to next phase
-9. Loop back to step 2
+10. Loop back to step 2
 
 ### 7. Detect and Handle Stalled Workers
 
@@ -366,7 +376,7 @@ Or use `tf.py sync` / `tf.py status` — both include stalled workers in their o
 2. If no response after ~5 min, or SendMessage is unavailable: retire the worker, reopen the bead, spawn fresh
 3. If the task has stalled twice, surface to user — do NOT auto-retry indefinitely
 
-**Cross-session idle workers:** `tf.py sync` flags idle workers with `"stale": true` if idle >30 min (e.g., from a prior session or laptop sleep). **Do NOT reuse stale workers** via SendMessage — retire and spawn fresh. Same-session idle workers (idle <30 min) are safe to reuse.
+**Cross-session idle workers:** `tf.py sync` auto-retires cross-session workers and workers idle >4 min. Only workers idle ≤3 min are counted as addressable. Do not attempt SendMessage on workers with `idle_min` > 3.
 
 **Post-SendMessage claim check (mandatory for all reuse dispatches):**
 After any SendMessage reuse, verify the bead transitions from `open` to `in_progress` within ~5 min:

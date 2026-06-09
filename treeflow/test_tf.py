@@ -1498,6 +1498,78 @@ class TestValidatePlan:
         assert out["ok"] is False
         assert len(out["errors"]) == 3
 
+    def test_warns_missing_files_section(self, workspace):
+        """Tasks without a Files: line should produce a warning."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## Goal: Build Auth
+
+            ### Type
+            epic
+
+            ## Create User model
+
+            ### Description
+            Create models/user.py with fields.
+
+            ## Add login endpoint
+
+            ### Description
+            Login endpoint.
+            Files: `routes/auth.py`, `routes/login.py`
+        """))
+        out = tf(workspace, ["validate-plan", str(plan)])
+        assert "missing_files" in out
+        assert "Create User model" in out["missing_files"]
+        assert "Add login endpoint" not in out["missing_files"]
+
+    def test_no_warning_when_all_have_files(self, workspace):
+        """All tasks with Files: lines should produce no missing_files."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## Goal: Build Auth
+
+            ### Type
+            epic
+
+            ## Create User model
+
+            Files: `models/user.py`
+
+            ## Add login endpoint
+
+            Files: `routes/auth.py`
+        """))
+        out = tf(workspace, ["validate-plan", str(plan)])
+        assert "missing_files" not in out
+
+    def test_detects_depends_on(self, workspace):
+        """validate-plan should count depends_on entries in soft_deps."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## Epic
+
+            ### Type
+            epic
+
+            ## Implement scanner interface
+
+            Files: `pkg/scanner/scanner.go`
+
+            ## Implement snapshot package
+
+            Files: `pkg/scanner/snapshot.go`
+
+            ### Dependencies
+            depends_on:Implement scanner interface
+        """))
+        out = tf(workspace, ["validate-plan", str(plan)])
+        assert out["ok"] is True
+        assert out.get("soft_deps") == 1
+
 
 # ── Update-Context Tests ─────────────────────────────────────
 
@@ -1786,20 +1858,28 @@ class TestValidatePlanParallelism:
 
             ## Task A
 
+            Files: `src/a.py`
+
             ### Dependencies
             blocks:epic
 
             ## Task B
+
+            Files: `src/b.py`
 
             ### Dependencies
             blocks:task-a
 
             ## Task C
 
+            Files: `src/c.py`
+
             ### Dependencies
             blocks:task-b
 
             ## Task D
+
+            Files: `src/d.py`
 
             ### Dependencies
             blocks:task-c
@@ -1820,14 +1900,22 @@ class TestValidatePlanParallelism:
 
             ## Task A
 
+            Files: `src/a.py`
+
             ## Task B
 
+            Files: `src/b.py`
+
             ## Task C
+
+            Files: `src/c.py`
 
             ### Dependencies
             blocks:task-a
 
             ## Task D
+
+            Files: `src/d.py`
 
             ### Dependencies
             blocks:task-b
@@ -1846,11 +1934,19 @@ class TestValidatePlanParallelism:
 
             ## Task A
 
+            Files: `src/a.py`
+
             ## Task B
+
+            Files: `src/b.py`
 
             ## Task C
 
+            Files: `src/c.py`
+
             ## Task D
+
+            Files: `src/d.py`
         """))
         out = tf(workspace, ["validate-plan", str(plan)])
         assert "warnings" in out
@@ -1867,20 +1963,28 @@ class TestValidatePlanParallelism:
 
             ## Task A
 
+            Files: `src/a.py`
+
             ### Dependencies
             blocks:epic
 
             ## Task B
+
+            Files: `src/b.py`
 
             ### Dependencies
             blocks:task-a
 
             ## Task C
 
+            Files: `src/c.py`
+
             ### Dependencies
             blocks:task-b
 
             ## Task D
+
+            Files: `src/d.py`
 
             ### Dependencies
             blocks:task-c
@@ -1900,7 +2004,11 @@ class TestValidatePlanParallelism:
 
             ## Task A
 
+            Files: `src/a.py`
+
             ## Task B
+
+            Files: `src/b.py`
         """))
         out = tf(workspace, ["validate-plan", str(plan)])
         assert "warnings" not in out
@@ -1946,7 +2054,7 @@ class TestSessionTracking:
         reg = load_registry(workspace)
         reg["workers"]["w1"]["status"] = "idle"
         reg["workers"]["w1"]["context_pct"] = 60
-        reg["workers"]["w1"]["idle_since"] = ts_minutes_ago(5)
+        reg["workers"]["w1"]["idle_since"] = ts_minutes_ago(3)
         reg["workers"]["w1"]["notification"] = "received"
         save_registry(workspace, reg)
         out = tf(workspace, ["sync"])
@@ -2144,7 +2252,7 @@ class TestSyncNeverNotified:
         reg = load_registry(workspace)
         reg["workers"]["w1"]["status"] = "idle"
         reg["workers"]["w1"]["context_pct"] = 60
-        reg["workers"]["w1"]["idle_since"] = ts_minutes_ago(5)
+        reg["workers"]["w1"]["idle_since"] = ts_minutes_ago(3)
         reg["workers"]["w1"]["notification"] = "received"
         save_registry(workspace, reg)
         out = tf(workspace, ["sync"])
@@ -2327,6 +2435,21 @@ class TestSyncStaleReuse:
         assert out.get("reuse_enforced") is True
         assert out["counts"]["addressable"] == 3
 
+    def test_borderline_idle_not_addressable(self, workspace):
+        """Workers idle 3.5 min are listed but not counted as addressable (fresh <= 3 min)."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        reg = load_registry(workspace)
+        for i in range(3):
+            reg["workers"][f"w{i}"] = {
+                "status": "idle", "skill": "code", "context_pct": 60,
+                "notification": "received", "idle_since": ts_minutes_ago(4),
+            }
+        save_registry(workspace, reg)
+        out = tf(workspace, ["sync", "--ready-count", "2"])
+        # idle_min ~4 → auto-retired (TTL is 4 min), so 0 idle
+        assert out["counts"]["idle"] == 0
+        assert "reuse_enforced" not in out
+
 
 # ── Conflict-Check Unparseable Tests ──────────────────────
 
@@ -2352,6 +2475,37 @@ class TestConflictCheckUnparseable:
         out = tf(workspace, ["conflict-check", "--beads", "bead-1"],
                  env={"BD_STUB_RESPONSE": json.dumps(bead)})
         assert "unparseable" not in out
+
+    def test_inferred_files_from_backticks(self, workspace, bd_stub):
+        """Beads without Files: but with backtick paths should be inferred."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        bead = {"id": "bead-1", "description": "Implement the scanner in `pkg/scanner/scanner.go` and tests in `pkg/scanner/scanner_test.go`"}
+        out = tf(workspace, ["conflict-check", "--beads", "bead-1"],
+                 env={"BD_STUB_RESPONSE": json.dumps(bead)})
+        assert "unparseable" not in out
+        assert "inferred" in out
+        assert "bead-1" in out["inferred"]
+        assert "pkg/scanner/scanner.go" in out["bead_files"]["bead-1"]
+
+    def test_files_new_and_modifies_detected(self, workspace, bd_stub):
+        """Beads with Files (new): and Files (modifies): should both be parsed."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        bead = {"id": "bead-1", "description": "Files (new): `pkg/auth.go`\nFiles (modifies): `cmd/main.go`"}
+        out = tf(workspace, ["conflict-check", "--beads", "bead-1"],
+                 env={"BD_STUB_RESPONSE": json.dumps(bead)})
+        assert "unparseable" not in out
+        assert "pkg/auth.go" in out["bead_files"]["bead-1"]
+        assert "cmd/main.go" in out["bead_files"]["bead-1"]
+
+    def test_modify_conflicts_flagged(self, workspace, bd_stub):
+        """Two beads both modifying the same file should produce modify_conflicts."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        bead = {"id": "bead-1", "description": "Files (modifies): `shared.go`, `other.go`"}
+        out = tf(workspace, ["conflict-check", "--beads", "bead-1,bead-2"],
+                 env={"BD_STUB_RESPONSE": json.dumps(bead)})
+        # Both beads get the same stub response (both modify shared.go)
+        assert "modify_conflicts" in out
+        assert "shared.go" in out["modify_conflicts"]
 
 
 # ── Update-Context Task-Summaries Tests ──────────────────────
@@ -2709,6 +2863,29 @@ class TestReady:
                  env={"BD_STUB_RESPONSE": "invalid json!!!", "BD_STUB_EXIT": "1"})
         assert out["ok"] is True
         assert out["ready"] == []
+
+    def test_capped_flag_when_supplemented(self, workspace, bd_stub):
+        """When bd ready misses tasks, capped flag should be set."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = [
+            {"id": "t1", "type": "task", "title": "Task 1"},
+            {"id": "t2", "type": "task", "title": "Task 2", "blocked_by": None},
+        ]
+        out = tf(workspace, ["ready"],
+                 env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["ok"] is True
+        # Both t1 and t2 are returned by bd ready AND bd list,
+        # so supplement finds them in ready_ids already → no capping
+        assert "capped" not in out
+
+    def test_no_capped_when_all_returned(self, workspace, bd_stub):
+        """When bd ready returns everything, capped should not be set."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = [{"id": "t1", "type": "task", "title": "Task 1"}]
+        out = tf(workspace, ["ready"],
+                 env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["ok"] is True
+        assert "capped" not in out
 
 
 # ── Recover Tests ──────────────────────

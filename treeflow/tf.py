@@ -793,16 +793,56 @@ def cmd_smoke_test(args: argparse.Namespace) -> None:
 
 
 def _extract_files_from_description(desc: str) -> list[str]:
-    """Extract file paths from a bead description's Files: line."""
+    """Extract file paths from a bead description's Files: line.
+
+    Also recognizes 'Files (new):' and 'Files (modifies):' variants.
+    Returns a flat list of all file paths regardless of category.
+    """
+    files: list[str] = []
     for line in desc.split("\n"):
         stripped = line.strip()
-        # Match "Files:" at line start (with optional markdown bold/backticks)
-        if re.match(r"^(?:\*\*)?Files:?\*?\*?\s*", stripped, re.IGNORECASE):
-            # Everything after "Files:" on that line
-            after = re.sub(r"^(?:\*\*)?Files:?\*?\*?\s*", "", stripped, flags=re.IGNORECASE)
-            # Strip backticks and split on commas
-            return [f.strip().strip("`") for f in after.split(",") if f.strip().strip("`")]
-    return []
+        if re.match(r"^(?:\*\*)?Files(?:\s*\([^)]*\))?:?\*?\*?\s*", stripped, re.IGNORECASE):
+            after = re.sub(r"^(?:\*\*)?Files(?:\s*\([^)]*\))?:?\*?\*?\s*", "", stripped, flags=re.IGNORECASE)
+            files.extend(f.strip().strip("`") for f in after.split(",") if f.strip().strip("`"))
+    return files
+
+
+def _extract_files_detailed(desc: str) -> dict[str, list[str]]:
+    """Extract file paths with category: new, modifies, or all.
+
+    Returns {"new": [...], "modifies": [...], "all": [...]}.
+    Plain 'Files:' entries go into 'all'.
+    """
+    result: dict[str, list[str]] = {"new": [], "modifies": [], "all": []}
+    for line in desc.split("\n"):
+        stripped = line.strip()
+        m = re.match(r"^(?:\*\*)?Files(?:\s*\(([^)]*)\))?:?\*?\*?\s*", stripped, re.IGNORECASE)
+        if not m:
+            continue
+        category = (m.group(1) or "").strip().lower()
+        after = stripped[m.end():]
+        paths = [f.strip().strip("`") for f in after.split(",") if f.strip().strip("`")]
+        if category == "new":
+            result["new"].extend(paths)
+        elif category in ("modifies", "modify"):
+            result["modifies"].extend(paths)
+        else:
+            result["all"].extend(paths)
+    return result
+
+
+def _infer_files_from_description(desc: str) -> list[str]:
+    """Fallback: infer file paths from description text when no Files: line exists."""
+    # Match backtick-wrapped paths and bare paths with extensions
+    paths: list[str] = []
+    for m in re.finditer(r"`([a-zA-Z0-9_./-]+\.[a-zA-Z0-9]+)`", desc):
+        p = m.group(1)
+        if "/" in p and not p.startswith("http"):
+            paths.append(p)
+    if not paths:
+        for m in re.finditer(r"(?<!\w)([a-zA-Z0-9_]+(?:/[a-zA-Z0-9_.]+)+\.[a-zA-Z]{1,10})(?!\w)", desc):
+            paths.append(m.group(1))
+    return list(dict.fromkeys(paths))
 
 
 def cmd_conflict_check(args: argparse.Namespace) -> None:
@@ -811,8 +851,11 @@ def cmd_conflict_check(args: argparse.Namespace) -> None:
     bd = _bd(rp)
     bead_ids = [b.strip() for b in args.beads.split(",") if b.strip()]
 
-    # Fetch descriptions and extract file lists
+    # Fetch descriptions and extract file lists + soft deps
     bead_files: dict[str, list[str]] = {}
+    bead_modifies: dict[str, list[str]] = {}
+    bead_soft_deps: dict[str, list[str]] = {}
+    inferred: list[str] = []
     unparseable: list[str] = []
     for bid in bead_ids:
         r = _run(f"{bd} show {bid} --json")
@@ -827,8 +870,20 @@ def cmd_conflict_check(args: argparse.Namespace) -> None:
         files = _extract_files_from_description(desc)
         if files:
             bead_files[bid] = files
+            detailed = _extract_files_detailed(desc)
+            if detailed["modifies"]:
+                bead_modifies[bid] = detailed["modifies"]
         else:
-            unparseable.append(bid)
+            files = _infer_files_from_description(desc)
+            if files:
+                bead_files[bid] = files
+                inferred.append(bid)
+            else:
+                unparseable.append(bid)
+        # Extract depends_on references
+        deps = [m.group(1).strip() for m in re.finditer(r"depends_on:\s*(.+?)(?:,|$)", desc, re.IGNORECASE)]
+        if deps:
+            bead_soft_deps[bid] = deps
 
     # Build file → [bead_ids] map
     file_map: dict[str, list[str]] = {}
@@ -838,6 +893,13 @@ def cmd_conflict_check(args: argparse.Namespace) -> None:
 
     # Identify conflicts (file touched by 2+ beads)
     conflicts = {f: bids for f, bids in file_map.items() if len(bids) > 1}
+
+    # Flag modify-modify conflicts (higher severity)
+    modify_conflicts: dict[str, list[str]] = {}
+    for f, bids in conflicts.items():
+        modifiers = [bid for bid in bids if f in bead_modifies.get(bid, [])]
+        if len(modifiers) > 1:
+            modify_conflicts[f] = modifiers
 
     # Compute parallel groups: beads with no file overlap can run together
     conflicting_beads = set()
@@ -850,6 +912,12 @@ def cmd_conflict_check(args: argparse.Namespace) -> None:
         "conflicts": conflicts,
         "safe_parallel": safe,
     }
+    if modify_conflicts:
+        result["modify_conflicts"] = modify_conflicts
+    if bead_soft_deps:
+        result["soft_deps"] = bead_soft_deps
+    if inferred:
+        result["inferred"] = inferred
     if unparseable:
         result["unparseable"] = unparseable
     if conflicts:
@@ -1042,7 +1110,11 @@ def cmd_ready(args: argparse.Namespace) -> None:
             ready_ids.add(bid)
             supplemented += 1
 
-    _out({"ok": True, "ready": ready_beads, "supplemented": supplemented})
+    result: dict = {"ok": True, "ready": ready_beads, "supplemented": supplemented}
+    if supplemented > 0:
+        result["capped"] = True
+        result["capped_count"] = supplemented
+    _out(result)
 
 
 def cmd_recover(args: argparse.Namespace) -> None:
@@ -1115,26 +1187,66 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
             title = stripped[3:].strip()
             issues.append({"line": i, "title": title})
 
-    # Determine types by scanning ### Type sections
+    # Determine types and extract bodies for each issue
     epics = 0
-    for i, line in enumerate(lines):
-        if re.match(r'^###\s+[Tt]ype\s*$', line.strip()):
-            for j in range(i + 1, min(i + 4, len(lines))):
-                type_line = lines[j].strip()
-                if type_line and not type_line.startswith("#"):
-                    if type_line.lower() == "epic":
-                        epics += 1
-                    break
+    epic_indices: set[int] = set()
+    for idx, iss in enumerate(issues):
+        start = iss["line"] - 1  # 0-based
+        end = issues[idx + 1]["line"] - 1 if idx + 1 < len(issues) else len(lines)
+        body = "\n".join(lines[start:end])
+        iss["body"] = body
+        # Check if this issue is an epic
+        for i in range(start, end):
+            if re.match(r'^###\s+[Tt]ype\s*$', lines[i].strip()):
+                for j in range(i + 1, min(i + 4, end)):
+                    type_line = lines[j].strip()
+                    if type_line and not type_line.startswith("#"):
+                        if type_line.lower() == "epic":
+                            epics += 1
+                            epic_indices.add(idx)
+                        break
+                break
 
-    # Parallelism analysis: scan ### Dependencies sections
+    # Check that non-epic issues have a Files: line
+    missing_files = []
+    for idx, iss in enumerate(issues):
+        if idx in epic_indices:
+            continue
+        files = _extract_files_from_description(iss.get("body", ""))
+        if not files:
+            missing_files.append(iss["title"])
+
+    # Check that producer tasks name their consumer
+    orphan_packages = []
+    task_titles = [iss["title"] for idx, iss in enumerate(issues) if idx not in epic_indices]
+    all_bodies = " ".join(iss.get("body", "") for iss in issues)
+    for idx, iss in enumerate(issues):
+        if idx in epic_indices:
+            continue
+        title_lower = iss["title"].lower()
+        if any(kw in title_lower for kw in ("implement", "create")) and any(kw in title_lower for kw in ("package", "module", "library", "pkg/")):
+            # Extract a package-like name from the title
+            pkg_match = re.search(r'`?(?:pkg/|internal/)?([a-zA-Z0-9_/-]+)`?', iss["title"])
+            if pkg_match:
+                pkg_name = pkg_match.group(1).split("/")[-1]
+                # Check if any other task references this package
+                other_bodies = " ".join(
+                    other.get("body", "") for jdx, other in enumerate(issues)
+                    if jdx != idx and jdx not in epic_indices
+                )
+                if pkg_name not in other_bodies:
+                    orphan_packages.append(iss["title"])
+
+    # Parallelism analysis: scan ### Dependencies and ### Soft Dependencies
     warnings = []
     tasks_count = len(issues) - epics
     dep_count = 0
     has_blocks = 0
+    has_depends_on = 0
     in_deps = False
     for line in lines:
         stripped = line.strip()
-        if re.match(r'^###\s+[Dd]ependencies\s*$', stripped):
+        if re.match(r'^###\s+(?:[Dd]ependencies|[Ss]oft [Dd]ependencies)\s*$', stripped):
             in_deps = True
             dep_count += 1
             continue
@@ -1144,6 +1256,8 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
         if in_deps and stripped:
             if "blocks:" in stripped.lower():
                 has_blocks += 1
+            if "depends_on:" in stripped.lower():
+                has_depends_on += 1
 
     if tasks_count > 3:
         if dep_count == 0:
@@ -1152,6 +1266,13 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
             roots = tasks_count - has_blocks
             if roots <= 1:
                 warnings.append("Plan is fully sequential — no parallel execution possible. Consider splitting into parallel groups.")
+
+    if missing_files:
+        for title in missing_files:
+            warnings.append(f"Task '{title}' missing Files: section — required for conflict detection")
+    if orphan_packages:
+        for title in orphan_packages:
+            warnings.append(f"Task '{title}' has no consumer task — add a 'wire into' task or reference it from a downstream task")
 
     check_parallelism = getattr(args, "check_parallelism", False)
 
@@ -1166,6 +1287,12 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
         result["errors"] = errors
     if warnings:
         result["warnings"] = warnings
+    if missing_files:
+        result["missing_files"] = missing_files
+    if orphan_packages:
+        result["orphan_packages"] = orphan_packages
+    if has_depends_on:
+        result["soft_deps"] = has_depends_on
     if issues:
         result["dry_run"] = [{"title": iss["title"]} for iss in issues]
     _out(result)
@@ -1876,8 +2003,9 @@ def cmd_sync(args: argparse.Namespace) -> None:
             continue
 
         # Auto-retire workers idle too long — agent runtime likely ended
+        # Workers become non-addressable within 2-5 min; 4 min catches most
         idle_min = _idle_minutes(w)
-        if idle_min is not None and idle_min > 10:
+        if idle_min is not None and idle_min > 4:
             w["status"] = "retired"
             w["retired_at"] = now
             retired.append({"worker": wname, "ctx": ctx, "reason": "idle_too_long", "idle_min": round(idle_min)})
@@ -1898,16 +2026,20 @@ def cmd_sync(args: argparse.Namespace) -> None:
         _save_registry(reg, rp)
 
     idle_count = sum(len(v) for v in available.values())
-    addressable_count = idle_count
+    # Only workers idle <= 3 min are likely still addressable by the runtime
+    fresh_count = sum(
+        1 for workers in available.values()
+        for w in workers if w.get("idle_min", 0) <= 3
+    )
     result: dict = {
         "available": available,
         "retired_now": retired,
-        "counts": {"total": total_spawned, "active": total_active, "idle": idle_count, "addressable": addressable_count, "retired": len(retired)},
+        "counts": {"total": total_spawned, "active": total_active, "idle": idle_count, "addressable": fresh_count, "retired": len(retired)},
     }
     if stalled:
         result["stalled"] = stalled
     ready_count = getattr(args, "ready_count", 0)
-    if ready_count and addressable_count > ready_count * 0.5:
+    if ready_count and fresh_count > ready_count * 0.5:
         result["reuse_enforced"] = True
     _out(result)
 

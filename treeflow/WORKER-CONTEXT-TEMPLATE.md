@@ -21,12 +21,22 @@
 {paste the relevant directory tree — focus on where workers will be writing}
 ```
 
-## Coding Conventions
+## Conventions
 
-- Commit messages: conventional format (`feat:`, `fix:`, `chore:`) — enforced by `tf.py worker-close`. Never include task/bead numbers (e.g., ❌ "feat: Task 9: ...")
+- **Commit messages**: conventional format (`feat:`, `fix:`, `chore:`) — enforced by `tf.py worker-close`. Never include task/bead numbers (e.g., ❌ "feat: Task 9: ...")
+- **Logging**: {e.g., use `slog` for structured logging; stderr for diagnostics, stdout for user-facing output}
+- **Error handling**: {e.g., wrap errors with `fmt.Errorf("context: %w", err)` or raise with context}
+- **Test files**: every production source file must have a corresponding `_test` file. Integration tests that require infrastructure use `t.Skip()` but must still exist. Table-driven tests for normalization/conversion helpers are mandatory.
+- **Input validation**: {e.g., validate dates match YYYY-MM-DD, validate names against allowlist, validate paths contain no shell metacharacters}
 - {e.g., Each command implements the Command interface}
 - {e.g., All state in chrome.storage — no module-level globals}
-- {e.g., Shadow DOM: use px only, not rem}
+
+## Security
+
+- Any value interpolated into a shell command, SQL string, or file path must be validated first
+- {e.g., CLI flags: validate dates match `YYYY-MM-DD`, scanner names against allowlist, paths contain no shell metacharacters}
+- {e.g., Never pass user input directly to `fmt.Sprintf` in SQL or shell strings — use parameterized queries or `shlex.quote`}
+- {e.g., Secrets and API keys must come from env vars, never hardcoded}
 
 ## Key Specs
 
@@ -58,6 +68,15 @@
 - mypy errors on dynamic attrs (e.g., SQLAlchemy models) — if tests pass, ignore
 - venv activation varies by OS — use `python -m` prefix for portability
 -->
+
+### Transient LSP Diagnostics During Active Workers
+
+The following LSP diagnostics are expected during worker runs and should be ignored until the worker completes:
+- `go.sum` missing entries — self-resolves after `go get`
+- `could not import` errors — self-resolves after dependency fetch
+- Build tag exclusion warnings (`No packages found for open file`) — expected with `//go:build` tags
+- `undefined: <symbol>` in partially-written files — self-resolves when worker finishes writing
+- Cross-package import errors in monorepos — build is ground truth, not LSP
 
 - Workers never call `bd` directly — all bead operations go through `tf.py` subcommands (`claim`, `block`, `discover`, `worker-close`)
 - **Never run `git stash -u` or `git stash --include-untracked`** — this stashes `.beads/context-*/` files and breaks orchestration state. Use `git stash` (tracked files only) or `git stash push <specific-files>` instead.

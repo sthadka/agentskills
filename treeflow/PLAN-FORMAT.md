@@ -17,7 +17,7 @@ Write a `.md` file using this structure:
 | `### Acceptance Criteria` | Definition of done, success criteria | -- |
 | `### Assignee` | Username | -- |
 | `### Labels` | Comma or space-separated | -- |
-| `### Dependencies` | `blocks:id, discovered-from:id, parent-child:id` | -- |
+| `### Dependencies` | `blocks:id, depends_on:title, discovered-from:id, parent-child:id` | -- |
 
 ## Example Plan File
 
@@ -87,11 +87,20 @@ Tests for register, login, logout, and token refresh in tests/test_auth.py.
 
 **Never use `---` horizontal rules in plan files.** The `---` sequence breaks `bd`'s markdown parser — epics parse but child tasks are silently dropped. Use blank lines or headings to separate sections.
 
+**Every task must include a Files: line.** Use `Files (new):` for files the task creates and `Files (modifies):` for files it changes. Plain `Files:` is also accepted. `validate-plan` warns on tasks missing this section, and `conflict-check` uses it to detect file-level parallelism conflicts. Two tasks both modifying the same file are flagged as `modify_conflicts` (higher severity).
+
+```markdown
+## Implement auth middleware
+
+Files (new): `middleware/auth.go`, `middleware/auth_test.go`
+Files (modifies): `cmd/server/main.go`
+```
+
 **Validate before creating:**
 ```bash
 python3 .beads/tf.py validate-plan plan.md
 ```
-This detects `---` separators, counts epics/tasks, and prints a dry-run preview.
+This detects `---` separators, missing Files: sections, counts epics/tasks, and prints a dry-run preview.
 
 ## Post-Creation Wiring
 
@@ -114,6 +123,19 @@ The `### Dependencies` section uses title-based references (matched by prefix ag
 ### Dependencies
 blocks:Add POST /api/auth/logout endpoint, blocks:Write unit tests for authentication
 ```
+
+### Soft Dependencies (depends_on)
+
+Use `depends_on:` for internal ordering that doesn't block readiness but prevents true parallelism. If task A creates types/interfaces that task B imports, task B should declare `depends_on:Task A title`.
+
+```markdown
+## Implement snapshot package
+
+### Dependencies
+depends_on:Implement scanner interface
+```
+
+Unlike `blocks:`, `depends_on:` does not prevent a task from appearing in `bd ready`. It signals the orchestrator to avoid batching these tasks into the same parallel group. `conflict-check` includes `depends_on` relationships in its `soft_deps` output.
 
 For manual dep wiring, `tf.py dep` remains available (idempotent — handles duplicates gracefully):
 
