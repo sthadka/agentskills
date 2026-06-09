@@ -1570,6 +1570,120 @@ class TestValidatePlan:
         assert out["ok"] is True
         assert out.get("soft_deps") == 1
 
+    def test_detects_rogue_h3_headers(self, workspace):
+        """Unrecognized ### headers inside issue bodies should produce errors."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / ".beads" / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## Setup config loader
+
+            ### Type
+            task
+
+            ### Description
+            Implement config loading.
+            ### Task 2: Database session with ATTACH
+            This line should not be here.
+
+            ## Implement database layer
+
+            ### Type
+            task
+
+            ### Description
+            Database stuff.
+        """))
+        out = tf(workspace, ["validate-plan", str(plan)])
+        assert out["ok"] is False
+        assert any("Task 2: Database session" in e for e in out.get("errors", []))
+
+    def test_recognized_h3_headers_pass(self, workspace):
+        """Recognized ### headers (Type, Priority, etc.) should not trigger errors."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / ".beads" / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## Setup config loader
+
+            ### Type
+            task
+
+            ### Priority
+            high
+
+            ### Description
+            Implement config loading.
+
+            ### Acceptance Criteria
+            - Config loads from file
+        """))
+        out = tf(workspace, ["validate-plan", str(plan)])
+        assert not out.get("errors")
+
+
+# ── Dedup Tests ────────────────────────────────────────────
+
+
+class TestDedup:
+    def test_no_duplicates(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = [
+            {"id": "1", "title": "Task A", "status": "open"},
+            {"id": "2", "title": "Task B", "status": "open"},
+        ]
+        out = tf(workspace, ["dedup"], env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["ok"] is True
+        assert out["duplicates"] == []
+        assert out["dry_run"] is True
+
+    def test_detects_duplicates_dry_run(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = [
+            {"id": "1", "title": "Task A", "status": "open"},
+            {"id": "2", "title": "Task A", "status": "open"},
+            {"id": "3", "title": "Task B", "status": "open"},
+        ]
+        out = tf(workspace, ["dedup"], env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["ok"] is True
+        assert len(out["duplicates"]) == 1
+        dup = out["duplicates"][0]
+        assert dup["title"] == "Task A"
+        assert dup["count"] == 2
+        assert dup["keep"] == "2"
+        assert dup["close"] == ["1"]
+        assert out["dry_run"] is True
+
+    def test_keep_oldest(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = [
+            {"id": "1", "title": "Task A", "status": "open"},
+            {"id": "2", "title": "Task A", "status": "open"},
+        ]
+        out = tf(workspace, ["dedup", "--keep", "oldest"], env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["duplicates"][0]["keep"] == "1"
+        assert out["duplicates"][0]["close"] == ["2"]
+
+    def test_case_insensitive_match(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = [
+            {"id": "1", "title": "Setup Config", "status": "open"},
+            {"id": "2", "title": "setup config", "status": "open"},
+        ]
+        out = tf(workspace, ["dedup"], env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert len(out["duplicates"]) == 1
+
+    def test_three_way_duplicates(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = [
+            {"id": "1", "title": "Task X", "status": "open"},
+            {"id": "2", "title": "Task X", "status": "open"},
+            {"id": "3", "title": "Task X", "status": "open"},
+        ]
+        out = tf(workspace, ["dedup"], env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        dup = out["duplicates"][0]
+        assert dup["count"] == 3
+        assert dup["keep"] == "3"
+        assert dup["close"] == ["1", "2"]
+
 
 # ── Update-Context Tests ─────────────────────────────────────
 

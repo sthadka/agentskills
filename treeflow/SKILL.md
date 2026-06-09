@@ -163,6 +163,14 @@ If validation fails (e.g., `---` separators detected), fix the plan file before 
 
 If the input is a sculptor session directory (contains `plan.md`, `spec.md`, `idea.md`), follow [SCULPTOR-IMPORT.md](SCULPTOR-IMPORT.md) for conversion.
 
+**Sculptor import checklist** (lessons from large imports):
+1. Pre-sanitize the plan file: strip or convert `### Task N:` group headers to bold text — they corrupt `bd create -f` parsing
+2. Run `validate-plan` and note the reported issue count
+3. Run `bd create -f` and compare its created count against validate-plan's count — if they differ, stop and investigate
+4. Run `tf.py dedup --dry-run` to check for duplicates before proceeding
+5. Always use `bd list --limit 500 --json` when calling `bd` directly
+6. Import deps only after verifying the full bead count matches
+
 ### From Goal/PRD
 
 Follow beadflow's planning process: analyze goal, write plan file, `bd create -f`, add deps, validate.
@@ -481,6 +489,7 @@ The registry is file-based and survives compression — trust it over any summar
 - Dispatching integration before `tf.py phase-gate` returns `pass: true`
 - Validating `bd_path` with `Path.exists()` or `shutil.which()` — macOS sandbox blocks `stat()` on agent subprocess paths even when `execve` works. Trust the stored path.
 - Skipping the pre-dispatch smoke test (`tf.py bd-path`) — catch infrastructure bugs before workers hit them
+- Using bare `bd list --json` without `--limit 500` — bd defaults to 50 results, silently truncating large graphs. `tf.py` handles this internally; only matters when calling `bd` directly.
 
 ---
 

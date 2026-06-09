@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REGISTRY_FILE = "registry.json"
+BD_LIST_LIMIT = "500"
 
 # Common locations where bd might be installed
 _BD_SEARCH_PATHS = [
@@ -628,7 +629,7 @@ def cmd_notify(args: argparse.Namespace) -> None:
     if result["bead_status"] == "closed" and isinstance(bead, dict):
         parent_id = bead.get("parent", "")
         if parent_id:
-            r_children = _run(f"{bd} list --parent {parent_id} --json")
+            r_children = _run(f"{bd} list --parent {parent_id} --limit {BD_LIST_LIMIT} --json")
             try:
                 children = json.loads(r_children.stdout)
                 if isinstance(children, dict):
@@ -695,10 +696,10 @@ def cmd_phase_gate(args: argparse.Namespace) -> None:
     blocking = []
 
     # Get all child beads of the epic
-    r = _run(f"{bd} list --parent {args.epic_id} --json")
+    r = _run(f"{bd} list --parent {args.epic_id} --limit {BD_LIST_LIMIT} --json")
     if r.returncode != 0:
         # Fallback: list all open
-        r = _run(f"{bd} list --json")
+        r = _run(f"{bd} list --limit {BD_LIST_LIMIT} --json")
 
     stdout = r.stdout.strip()
     if not stdout:
@@ -972,7 +973,7 @@ def cmd_import_deps(args: argparse.Namespace) -> None:
     # Build title→ID mapping via bd list
     rp = _registry_path()
     bd = _bd(rp)
-    r = _run(f"{bd} list --json")
+    r = _run(f"{bd} list --limit {BD_LIST_LIMIT} --json")
     stdout = r.stdout.strip()
     json_start = next((i for i, ch in enumerate(stdout) if ch in ("[", "{")), -1)
     all_beads = []
@@ -1095,7 +1096,7 @@ def cmd_ready(args: argparse.Namespace) -> None:
     ready_ids = {b.get("id", "") for b in ready_beads}
 
     # Supplement: open beads with no blockers that bd ready missed
-    r2 = _run(f"{bd} list --status=open --json")
+    r2 = _run(f"{bd} list --status=open --limit {BD_LIST_LIMIT} --json")
     all_open = _parse_bd_json(r2.stdout)
     supplemented = 0
     for b in all_open:
@@ -1123,7 +1124,7 @@ def cmd_recover(args: argparse.Namespace) -> None:
     bd = _bd(rp)
 
     # Get all in-progress beads
-    r = _run(f"{bd} list --status=in_progress --json")
+    r = _run(f"{bd} list --status=in_progress --limit {BD_LIST_LIMIT} --json")
     in_progress = _parse_bd_json(r.stdout)
 
     # Build worker bead mapping
@@ -1146,6 +1147,61 @@ def cmd_recover(args: argparse.Namespace) -> None:
             orphaned.append(entry)
 
     _out({"ok": True, "orphaned": orphaned})
+
+
+def cmd_dedup(args: argparse.Namespace) -> None:
+    """Detect and optionally close duplicate bead titles."""
+    rp = _registry_path()
+    bd = _bd(rp)
+
+    r = _run(f"{bd} list --limit {BD_LIST_LIMIT} --json")
+    all_beads = _parse_bd_json(r.stdout)
+
+    groups: dict[str, list[dict]] = {}
+    for b in all_beads:
+        title = b.get("title", b.get("name", ""))
+        key = _norm(title)
+        if key:
+            groups.setdefault(key, []).append(b)
+
+    duplicates = []
+    closed = 0
+    keep = getattr(args, "keep", "newest")
+    apply_mode = getattr(args, "apply", False)
+
+    for key, beads in groups.items():
+        if len(beads) < 2:
+            continue
+        beads.sort(key=lambda b: b.get("id", ""))
+        if keep == "oldest":
+            keep_bead = beads[0]
+            close_beads = beads[1:]
+        else:
+            keep_bead = beads[-1]
+            close_beads = beads[:-1]
+
+        entry: dict = {
+            "title": beads[0].get("title", beads[0].get("name", "")),
+            "count": len(beads),
+            "keep": keep_bead.get("id", ""),
+            "close": [b.get("id", "") for b in close_beads],
+        }
+
+        if apply_mode:
+            for b in close_beads:
+                bid = b.get("id", "")
+                cr = _run(f"{bd} close {bid} --reason duplicate")
+                if cr.returncode == 0:
+                    closed += 1
+                else:
+                    entry.setdefault("errors", []).append(f"{bid}: {cr.stderr.strip()[:100]}")
+
+        duplicates.append(entry)
+
+    result: dict = {"ok": True, "duplicates": duplicates, "dry_run": not apply_mode}
+    if apply_mode:
+        result["closed"] = closed
+    _out(result)
 
 
 def cmd_ad_hoc(args: argparse.Namespace) -> None:
@@ -1207,6 +1263,25 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
                         break
                 break
 
+    # Check for unrecognized ### headers that bd may misparse as metadata
+    recognized_h3 = {
+        "type", "priority", "description", "design", "acceptance criteria",
+        "assignee", "labels", "dependencies", "soft dependencies", "files",
+    }
+    rogue_headers = []
+    for idx, iss in enumerate(issues):
+        start = iss["line"] - 1
+        end = issues[idx + 1]["line"] - 1 if idx + 1 < len(issues) else len(lines)
+        for li in range(start + 1, end):
+            stripped = lines[li].strip()
+            h3_match = re.match(r'^###\s+(.+)$', stripped)
+            if h3_match:
+                header_text = h3_match.group(1).strip().lower()
+                if header_text not in recognized_h3:
+                    rogue_headers.append(
+                        f"line {li + 1}: '{stripped}' looks like a metadata header but is not recognized by bd — remove or convert to bold text"
+                    )
+
     # Check that non-epic issues have a Files: line
     missing_files = []
     for idx, iss in enumerate(issues):
@@ -1267,6 +1342,8 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
             if roots <= 1:
                 warnings.append("Plan is fully sequential — no parallel execution possible. Consider splitting into parallel groups.")
 
+    if rogue_headers:
+        errors.extend(rogue_headers)
     if missing_files:
         for title in missing_files:
             warnings.append(f"Task '{title}' missing Files: section — required for conflict detection")
@@ -1523,7 +1600,7 @@ def cmd_phase_summary(args: argparse.Namespace) -> None:
         except (json.JSONDecodeError, IndexError):
             pass
 
-        r = _run(f"{bd} list --parent {epic_id} --json")
+        r = _run(f"{bd} list --parent {epic_id} --limit {BD_LIST_LIMIT} --json")
         children = []
         if r.returncode == 0 and r.stdout.strip():
             json_start = next((i for i, ch in enumerate(r.stdout.strip()) if ch in ("[", "{")), -1)
@@ -1559,9 +1636,9 @@ def cmd_phase_complete(args: argparse.Namespace) -> None:
 
     # 1. Phase gate check
     blocking = []
-    r = _run(f"{bd_bin} list --parent {args.epic_id} --json")
+    r = _run(f"{bd_bin} list --parent {args.epic_id} --limit {BD_LIST_LIMIT} --json")
     if r.returncode != 0:
-        r = _run(f"{bd_bin} list --json")
+        r = _run(f"{bd_bin} list --limit {BD_LIST_LIMIT} --json")
     stdout = r.stdout.strip()
     json_start = next((i for i, ch in enumerate(stdout) if ch in ("[", "{")), -1)
     beads = []
@@ -2071,7 +2148,7 @@ def cmd_status(args: argparse.Namespace) -> None:
                 stalled_workers.append(_stalled_info(wname, w))
 
     # Get bead counts
-    r = _run(f"{bd} list --json 2>/dev/null")
+    r = _run(f"{bd} list --limit {BD_LIST_LIMIT} --json 2>/dev/null")
     open_beads = blocked = closed = 0
     try:
         beads = json.loads(r.stdout)
@@ -2213,6 +2290,11 @@ def main() -> None:
     # recover (find orphaned in-progress beads)
     sub.add_parser("recover")
 
+    # dedup (detect/close duplicate bead titles)
+    s = sub.add_parser("dedup")
+    s.add_argument("--apply", action="store_true")
+    s.add_argument("--keep", choices=["newest", "oldest"], default="newest")
+
     # ad-hoc (register informal task without bead)
     s = sub.add_parser("ad-hoc")
     s.add_argument("--name", required=True)
@@ -2296,6 +2378,7 @@ def main() -> None:
         "status": cmd_status,
         "ready": cmd_ready,
         "recover": cmd_recover,
+        "dedup": cmd_dedup,
         "ad-hoc": cmd_ad_hoc,
         "dep": cmd_dep,
         "import-deps": cmd_import_deps,

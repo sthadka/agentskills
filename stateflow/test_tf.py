@@ -1496,6 +1496,33 @@ class TestValidatePlan:
         assert out["ok"] is False
         assert len(out["errors"]) == 3
 
+    def test_detects_rogue_h3_headers(self, workspace):
+        """Unrecognized ### headers inside issue bodies should produce errors."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## Setup config loader
+
+            ### Type
+            task
+
+            ### Description
+            Implement config loading.
+            ### Task 2: Database session with ATTACH
+            This line should not be here.
+
+            ## Implement database layer
+
+            ### Type
+            task
+
+            ### Description
+            Database stuff.
+        """))
+        out = tf(workspace, ["validate-plan", str(plan)])
+        assert out["ok"] is False
+        assert any("Task 2: Database session" in e for e in out.get("errors", []))
+
 
 # ── Update-Context Tests ─────────────────────────────────────
 

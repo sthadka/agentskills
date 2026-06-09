@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REGISTRY_FILE = "registry.json"
+BD_LIST_LIMIT = "500"
 
 # Common locations where bd might be installed
 _BD_SEARCH_PATHS = [
@@ -597,7 +598,7 @@ def cmd_notify(args: argparse.Namespace) -> None:
     if result["bead_status"] == "closed" and isinstance(bead, dict):
         parent_id = bead.get("parent", "")
         if parent_id:
-            r_children = _run(f"{bd} list --parent {parent_id} --json")
+            r_children = _run(f"{bd} list --parent {parent_id} --limit {BD_LIST_LIMIT} --json")
             try:
                 children = json.loads(r_children.stdout)
                 if isinstance(children, dict):
@@ -664,10 +665,10 @@ def cmd_phase_gate(args: argparse.Namespace) -> None:
     blocking = []
 
     # Get all child beads of the epic
-    r = _run(f"{bd} list --parent {args.epic_id} --json")
+    r = _run(f"{bd} list --parent {args.epic_id} --limit {BD_LIST_LIMIT} --json")
     if r.returncode != 0:
         # Fallback: list all open
-        r = _run(f"{bd} list --json")
+        r = _run(f"{bd} list --limit {BD_LIST_LIMIT} --json")
 
     stdout = r.stdout.strip()
     if not stdout:
@@ -926,6 +927,24 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
                     if type_line.lower() == "epic":
                         epics += 1
                     break
+
+    # Check for unrecognized ### headers that bd may misparse as metadata
+    recognized_h3 = {
+        "type", "priority", "description", "design", "acceptance criteria",
+        "assignee", "labels", "dependencies", "soft dependencies", "files",
+    }
+    for idx, iss in enumerate(issues):
+        start = iss["line"] - 1
+        end = issues[idx + 1]["line"] - 1 if idx + 1 < len(issues) else len(lines)
+        for li in range(start + 1, end):
+            stripped = lines[li].strip()
+            h3_match = re.match(r'^###\s+(.+)$', stripped)
+            if h3_match:
+                header_text = h3_match.group(1).strip().lower()
+                if header_text not in recognized_h3:
+                    errors.append(
+                        f"line {li + 1}: '{stripped}' looks like a metadata header but is not recognized by bd — remove or convert to bold text"
+                    )
 
     # Parallelism analysis: scan ### Dependencies sections
     warnings = []
@@ -1201,7 +1220,7 @@ def cmd_phase_summary(args: argparse.Namespace) -> None:
         except (json.JSONDecodeError, IndexError):
             pass
 
-        r = _run(f"{bd} list --parent {epic_id} --json")
+        r = _run(f"{bd} list --parent {epic_id} --limit {BD_LIST_LIMIT} --json")
         children = []
         if r.returncode == 0 and r.stdout.strip():
             json_start = next((i for i, ch in enumerate(r.stdout.strip()) if ch in ("[", "{")), -1)
@@ -1237,9 +1256,9 @@ def cmd_phase_complete(args: argparse.Namespace) -> None:
 
     # 1. Phase gate check
     blocking = []
-    r = _run(f"{bd_bin} list --parent {args.epic_id} --json")
+    r = _run(f"{bd_bin} list --parent {args.epic_id} --limit {BD_LIST_LIMIT} --json")
     if r.returncode != 0:
-        r = _run(f"{bd_bin} list --json")
+        r = _run(f"{bd_bin} list --limit {BD_LIST_LIMIT} --json")
     stdout = r.stdout.strip()
     json_start = next((i for i, ch in enumerate(stdout) if ch in ("[", "{")), -1)
     beads = []
@@ -1709,7 +1728,7 @@ def cmd_status(args: argparse.Namespace) -> None:
                 stalled_workers.append(_stalled_info(wname, w))
 
     # Get bead counts
-    r = _run(f"{bd} list --json 2>/dev/null")
+    r = _run(f"{bd} list --limit {BD_LIST_LIMIT} --json 2>/dev/null")
     open_beads = blocked = closed = 0
     try:
         beads = json.loads(r.stdout)

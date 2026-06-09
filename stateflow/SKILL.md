@@ -90,3 +90,4 @@ All output compact JSON. See [COMMANDS.md](COMMANDS.md) for full args.
 - Skipping `awty transition` at phase boundaries
 - Using `bd dep add` instead of `tf.py dep`
 - Skipping TDD verification for `[TDD]` tasks
+- Using bare `bd list --json` without `--limit 500` — bd defaults to 50 results, silently truncating large graphs

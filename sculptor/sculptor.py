@@ -1196,7 +1196,7 @@ def run_bd_parent_child(created_issues: list[dict]) -> tuple[int, int]:
 def load_issues_from_bd() -> list[dict] | None:
     """Load current open issues from bd list --json."""
     result = subprocess.run(
-        ['bd', 'list', '--json'],
+        ['bd', 'list', '--limit', '500', '--json'],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
