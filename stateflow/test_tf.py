@@ -499,6 +499,17 @@ class TestNotify:
         reg = load_registry(workspace)
         assert len(reg["workers"]["rust-1"]["summary"]) == 200
 
+    def test_auto_closes_in_progress_bead(self, workspace, bd_stub):
+        """Notify should auto-close beads still in_progress when worker completes."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+        bead_resp = json.dumps({"id": "bead-abc", "status": "in_progress"})
+        out = tf(workspace, ["notify", "rust-1", "bead-abc", "--context-pct", "55"],
+                 env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
+        assert out.get("auto_closed") is True
+        assert out["bead_status"] == "closed"
+
 
 # ── Sync Tests ──────────────────────────────────────────────────
 
@@ -1428,10 +1439,14 @@ class TestValidatePlan:
             ### Type
             task
 
+            Files: `models/user.py`
+
             ## Add login endpoint
 
             ### Type
             task
+
+            Files: `routes/auth.py`
         """))
         out = tf(workspace, ["validate-plan", str(plan)])
         assert out["ok"] is True
@@ -1494,7 +1509,8 @@ class TestValidatePlan:
         plan.write_text("## Issue\n---\n----\n-----\n## Another\n")
         out = tf(workspace, ["validate-plan", str(plan)])
         assert out["ok"] is False
-        assert len(out["errors"]) == 3
+        dash_errors = [e for e in out["errors"] if "---" in e]
+        assert len(dash_errors) == 3
 
     def test_detects_rogue_h3_headers(self, workspace):
         """Unrecognized ### headers inside issue bodies should produce errors."""
@@ -1522,6 +1538,31 @@ class TestValidatePlan:
         out = tf(workspace, ["validate-plan", str(plan)])
         assert out["ok"] is False
         assert any("Task 2: Database session" in e for e in out.get("errors", []))
+
+    def test_errors_missing_files_section(self, workspace):
+        """Tasks without a Files: line should produce an error."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## Goal: Build Auth
+
+            ### Type
+            epic
+
+            ## Create User model
+
+            ### Description
+            Create models/user.py with fields.
+
+            ## Add login endpoint
+
+            ### Description
+            Login endpoint.
+            Files: `routes/auth.py`, `routes/login.py`
+        """))
+        out = tf(workspace, ["validate-plan", str(plan)])
+        assert out["ok"] is False
+        assert any("Create User model" in e and "missing Files" in e for e in out.get("errors", []))
 
 
 # ── Update-Context Tests ─────────────────────────────────────
@@ -1809,20 +1850,28 @@ class TestValidatePlanParallelism:
 
             ## Task A
 
+            Files: `a.py`
+
             ### Dependencies
             blocks:epic
 
             ## Task B
+
+            Files: `b.py`
 
             ### Dependencies
             blocks:task-a
 
             ## Task C
 
+            Files: `c.py`
+
             ### Dependencies
             blocks:task-b
 
             ## Task D
+
+            Files: `d.py`
 
             ### Dependencies
             blocks:task-c
@@ -1843,14 +1892,22 @@ class TestValidatePlanParallelism:
 
             ## Task A
 
+            Files: `a.py`
+
             ## Task B
 
+            Files: `b.py`
+
             ## Task C
+
+            Files: `c.py`
 
             ### Dependencies
             blocks:task-a
 
             ## Task D
+
+            Files: `d.py`
 
             ### Dependencies
             blocks:task-b
@@ -1869,11 +1926,19 @@ class TestValidatePlanParallelism:
 
             ## Task A
 
+            Files: `a.py`
+
             ## Task B
+
+            Files: `b.py`
 
             ## Task C
 
+            Files: `c.py`
+
             ## Task D
+
+            Files: `d.py`
         """))
         out = tf(workspace, ["validate-plan", str(plan)])
         assert "warnings" in out
@@ -1890,20 +1955,28 @@ class TestValidatePlanParallelism:
 
             ## Task A
 
+            Files: `a.py`
+
             ### Dependencies
             blocks:epic
 
             ## Task B
+
+            Files: `b.py`
 
             ### Dependencies
             blocks:task-a
 
             ## Task C
 
+            Files: `c.py`
+
             ### Dependencies
             blocks:task-b
 
             ## Task D
+
+            Files: `d.py`
 
             ### Dependencies
             blocks:task-c
@@ -1923,7 +1996,11 @@ class TestValidatePlanParallelism:
 
             ## Task A
 
+            Files: `a.py`
+
             ## Task B
+
+            Files: `b.py`
         """))
         out = tf(workspace, ["validate-plan", str(plan)])
         assert "warnings" not in out

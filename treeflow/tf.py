@@ -625,6 +625,13 @@ def cmd_notify(args: argparse.Namespace) -> None:
     except (json.JSONDecodeError, IndexError):
         bead = {}
 
+    # Auto-close bead if worker didn't call worker-close
+    if result["bead_status"] == "in_progress":
+        cr = _run(f'{bd} close {args.bead_id} --reason "auto-closed on worker notification" --force --json')
+        if cr.returncode == 0:
+            result["bead_status"] = "closed"
+            result["auto_closed"] = True
+
     # Auto-close parent epic if all siblings are closed
     if result["bead_status"] == "closed" and isinstance(bead, dict):
         parent_id = bead.get("parent", "")
@@ -1346,7 +1353,7 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
         errors.extend(rogue_headers)
     if missing_files:
         for title in missing_files:
-            warnings.append(f"Task '{title}' missing Files: section — required for conflict detection")
+            errors.append(f"Task '{title}' missing Files: section — required for conflict detection")
     if orphan_packages:
         for title in orphan_packages:
             warnings.append(f"Task '{title}' has no consumer task — add a 'wire into' task or reference it from a downstream task")
@@ -2080,9 +2087,8 @@ def cmd_sync(args: argparse.Namespace) -> None:
             continue
 
         # Auto-retire workers idle too long — agent runtime likely ended
-        # Workers become non-addressable within 2-5 min; 4 min catches most
         idle_min = _idle_minutes(w)
-        if idle_min is not None and idle_min > 4:
+        if idle_min is not None and idle_min > 8:
             w["status"] = "retired"
             w["retired_at"] = now
             retired.append({"worker": wname, "ctx": ctx, "reason": "idle_too_long", "idle_min": round(idle_min)})
@@ -2103,10 +2109,10 @@ def cmd_sync(args: argparse.Namespace) -> None:
         _save_registry(reg, rp)
 
     idle_count = sum(len(v) for v in available.values())
-    # Only workers idle <= 3 min are likely still addressable by the runtime
+    # Only workers idle <= 6 min are likely still addressable by the runtime
     fresh_count = sum(
         1 for workers in available.values()
-        for w in workers if w.get("idle_min", 0) <= 3
+        for w in workers if w.get("idle_min", 0) <= 6
     )
     result: dict = {
         "available": available,

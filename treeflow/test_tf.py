@@ -499,6 +499,27 @@ class TestNotify:
         reg = load_registry(workspace)
         assert len(reg["workers"]["rust-1"]["summary"]) == 200
 
+    def test_auto_closes_in_progress_bead(self, workspace, bd_stub):
+        """Notify should auto-close beads still in_progress when worker completes."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+        bead_resp = json.dumps({"id": "bead-abc", "status": "in_progress"})
+        out = tf(workspace, ["notify", "rust-1", "bead-abc", "--context-pct", "55"],
+                 env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
+        assert out.get("auto_closed") is True
+        assert out["bead_status"] == "closed"
+
+    def test_no_auto_close_when_already_closed(self, workspace, bd_stub):
+        """Notify should not try to close already-closed beads."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+        bead_resp = json.dumps({"id": "bead-abc", "status": "closed"})
+        out = tf(workspace, ["notify", "rust-1", "bead-abc", "--context-pct", "55"],
+                 env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
+        assert "auto_closed" not in out
+
 
 # ── Sync Tests ──────────────────────────────────────────────────
 
@@ -1430,10 +1451,14 @@ class TestValidatePlan:
             ### Type
             task
 
+            Files: `models/user.py`
+
             ## Add login endpoint
 
             ### Type
             task
+
+            Files: `routes/auth.py`
         """))
         out = tf(workspace, ["validate-plan", str(plan)])
         assert out["ok"] is True
@@ -1496,10 +1521,11 @@ class TestValidatePlan:
         plan.write_text("## Issue\n---\n----\n-----\n## Another\n")
         out = tf(workspace, ["validate-plan", str(plan)])
         assert out["ok"] is False
-        assert len(out["errors"]) == 3
+        dash_errors = [e for e in out["errors"] if "---" in e]
+        assert len(dash_errors) == 3
 
-    def test_warns_missing_files_section(self, workspace):
-        """Tasks without a Files: line should produce a warning."""
+    def test_errors_missing_files_section(self, workspace):
+        """Tasks without a Files: line should produce an error."""
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
         plan = workspace / "plan.md"
         plan.write_text(textwrap.dedent("""\
@@ -1520,9 +1546,11 @@ class TestValidatePlan:
             Files: `routes/auth.py`, `routes/login.py`
         """))
         out = tf(workspace, ["validate-plan", str(plan)])
+        assert out["ok"] is False
         assert "missing_files" in out
         assert "Create User model" in out["missing_files"]
         assert "Add login endpoint" not in out["missing_files"]
+        assert any("Create User model" in e and "missing Files" in e for e in out.get("errors", []))
 
     def test_no_warning_when_all_have_files(self, workspace):
         """All tasks with Files: lines should produce no missing_files."""
@@ -1615,6 +1643,8 @@ class TestValidatePlan:
 
             ### Acceptance Criteria
             - Config loads from file
+
+            Files: `config.py`
         """))
         out = tf(workspace, ["validate-plan", str(plan)])
         assert not out.get("errors")
@@ -2550,18 +2580,19 @@ class TestSyncStaleReuse:
         assert out["counts"]["addressable"] == 3
 
     def test_borderline_idle_not_addressable(self, workspace):
-        """Workers idle 3.5 min are listed but not counted as addressable (fresh <= 3 min)."""
+        """Workers idle 7 min are listed but not counted as addressable (fresh <= 6 min)."""
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
         reg = load_registry(workspace)
         for i in range(3):
             reg["workers"][f"w{i}"] = {
                 "status": "idle", "skill": "code", "context_pct": 60,
-                "notification": "received", "idle_since": ts_minutes_ago(4),
+                "notification": "received", "idle_since": ts_minutes_ago(7),
             }
         save_registry(workspace, reg)
         out = tf(workspace, ["sync", "--ready-count", "2"])
-        # idle_min ~4 → auto-retired (TTL is 4 min), so 0 idle
-        assert out["counts"]["idle"] == 0
+        # idle_min ~7 → still available (TTL is 8 min), but not addressable (>6 min)
+        assert out["counts"]["idle"] == 3
+        assert out["counts"]["addressable"] == 0
         assert "reuse_enforced" not in out
 
 

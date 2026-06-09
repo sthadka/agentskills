@@ -22,7 +22,7 @@ You are a **pure orchestrator**. You NEVER read or write project source code. Yo
 5. **Layered context** — workers receive structured context layers (project > epic > feature > task), not a monolithic blob. See [CONTEXT-MANAGEMENT.md](CONTEXT-MANAGEMENT.md).
 6. **Respect file boundaries** — never spawn parallel workers that would write to the same files.
 7. **Batch-first, JSON-compact** — always use `--json | jq -c` for `bd` commands. `tf.py` output is already compact. **Prefer `tf.py close` and `tf.py dep`** over raw `bd close --json | jq` and `bd dep` — they normalize output and handle edge cases.
-8. **Workers close via `tf.py`** — workers call `python3 .beads/tf.py worker-close` which validates commits, closes the bead, and verifies. They still use `bd update` to claim and `bd create` for discovered work.
+8. **Workers close via `tf.py`** — workers call `python3 .beads/tf.py worker-close` which validates commits, closes the bead, and verifies. They still use `bd update` to claim and `bd create` for discovered work. If a worker completes without calling `worker-close`, `tf.py notify` auto-closes the bead with `--force` — the orchestrator won't get stuck, but commit validation is skipped.
 9. **Right-size dispatch** — don't spawn workers for trivial tasks. Batch small related tasks into one worker assignment. Each worker spawn has overhead.
 10. **All state through `tf.py`** — never edit `registry.json` manually. All worker state, notifications, and phase gates go through `tf.py` subcommands.
 

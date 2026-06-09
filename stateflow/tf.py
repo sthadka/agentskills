@@ -594,6 +594,13 @@ def cmd_notify(args: argparse.Namespace) -> None:
     except (json.JSONDecodeError, IndexError):
         bead = {}
 
+    # Auto-close bead if worker didn't call worker-close
+    if result["bead_status"] == "in_progress":
+        cr = _run(f'{bd} close {args.bead_id} --reason "auto-closed on worker notification" --force --json')
+        if cr.returncode == 0:
+            result["bead_status"] = "closed"
+            result["auto_closed"] = True
+
     # Auto-close parent epic if all siblings are closed
     if result["bead_status"] == "closed" and isinstance(bead, dict):
         parent_id = bead.get("parent", "")
@@ -917,16 +924,22 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
             title = stripped[3:].strip()
             issues.append({"line": i, "title": title})
 
-    # Determine types by scanning ### Type sections
-    epics = 0
-    for i, line in enumerate(lines):
-        if re.match(r'^###\s+[Tt]ype\s*$', line.strip()):
-            for j in range(i + 1, min(i + 4, len(lines))):
-                type_line = lines[j].strip()
-                if type_line and not type_line.startswith("#"):
-                    if type_line.lower() == "epic":
-                        epics += 1
-                    break
+    # Build per-issue bodies and detect epics
+    epic_indices: set[int] = set()
+    for idx, iss in enumerate(issues):
+        start = iss["line"] - 1
+        end = issues[idx + 1]["line"] - 1 if idx + 1 < len(issues) else len(lines)
+        iss["body"] = "\n".join(lines[start:end])
+        for i in range(start, end):
+            if re.match(r'^###\s+[Tt]ype\s*$', lines[i].strip()):
+                for j in range(i + 1, min(i + 4, end)):
+                    type_line = lines[j].strip()
+                    if type_line and not type_line.startswith("#"):
+                        if type_line.lower() == "epic":
+                            epic_indices.add(idx)
+                        break
+                break
+    epics = len(epic_indices)
 
     # Check for unrecognized ### headers that bd may misparse as metadata
     recognized_h3 = {
@@ -945,6 +958,18 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
                     errors.append(
                         f"line {li + 1}: '{stripped}' looks like a metadata header but is not recognized by bd — remove or convert to bold text"
                     )
+
+    # Check that non-epic issues have a Files: line
+    missing_files = []
+    for idx, iss in enumerate(issues):
+        if idx in epic_indices:
+            continue
+        files = _extract_files_from_description(iss.get("body", ""))
+        if not files:
+            missing_files.append(iss["title"])
+    if missing_files:
+        for title in missing_files:
+            errors.append(f"Task '{title}' missing Files: section — required for conflict detection")
 
     # Parallelism analysis: scan ### Dependencies sections
     warnings = []
