@@ -573,6 +573,14 @@ def cmd_notify(args: argparse.Namespace) -> None:
     reg, rp = _load_registry()
     now = _now()
 
+    # Resolve bead_id: use provided value, or look up from registry
+    if not args.bead_id:
+        w_entry = reg["workers"].get(args.worker)
+        if not w_entry or not w_entry.get("bead"):
+            _out({"ok": False, "error": f"no bead recorded for worker '{args.worker}'"})
+            sys.exit(1)
+        args.bead_id = w_entry["bead"]
+
     worker = reg["workers"].get(args.worker)
     agent_id = getattr(args, "agent_id", "") or ""
     if not worker:
@@ -2346,7 +2354,7 @@ def main() -> None:
     # notify
     s = sub.add_parser("notify")
     s.add_argument("worker")
-    s.add_argument("bead_id")
+    s.add_argument("bead_id", nargs="?", default=None)
     s.add_argument("--context-pct", type=int, default=0, dest="context_pct")
     s.add_argument("--summary", default="")
     s.add_argument("--skill", default="")

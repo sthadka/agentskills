@@ -569,6 +569,39 @@ class TestNotify:
         if summaries.exists():
             assert "BD-bead-1" not in summaries.read_text()
 
+    def test_notify_omit_bead_id_uses_registry(self, workspace, bd_stub):
+        """notify without bead_id looks up bead from registry."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "w1", "bead-1", "--skill", "code"])
+        bead_resp = json.dumps({"id": "bead-1", "status": "closed"})
+        out = tf(workspace, [
+            "notify", "w1", "--context-pct", "45", "--summary", "done",
+        ], env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
+        reg = load_registry(workspace)
+        assert reg["workers"]["w1"]["bead"] == "bead-1"
+
+    def test_notify_with_bead_id_works_as_before(self, workspace, bd_stub):
+        """notify with explicit bead_id still works."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "w1", "bead-1", "--skill", "code"])
+        bead_resp = json.dumps({"id": "bead-2", "status": "closed"})
+        out = tf(workspace, [
+            "notify", "w1", "bead-2", "--context-pct", "45", "--summary", "done",
+        ], env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
+        reg = load_registry(workspace)
+        assert reg["workers"]["w1"]["bead"] == "bead-2"
+
+    def test_notify_omit_bead_id_unknown_worker_fails(self, workspace):
+        """notify without bead_id and unknown worker should fail."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        out = tf(workspace, [
+            "notify", "unknown-worker", "--context-pct", "45", "--summary", "done",
+        ])
+        assert out["ok"] is False
+        assert "no bead recorded" in out["error"]
+
 
 # ── Sync Tests ──────────────────────────────────────────────────
 
