@@ -61,7 +61,7 @@ def bd_stub(workspace):
     return str(stub)
 
 
-def tf(workspace, args: list[str], env: dict | None = None) -> dict:
+def tf(workspace, args: list[str], env=None) -> dict:
     """Run tf.py in the workspace and return parsed JSON output."""
     cmd_env = os.environ.copy()
     cmd_env.pop("CLAUDE_AGENT_NAME", None)

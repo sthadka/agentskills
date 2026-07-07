@@ -13,6 +13,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
 REGISTRY_FILE = "registry.json"
 BD_LIST_LIMIT = "500"
@@ -37,7 +38,7 @@ def _resolve_bd() -> str:
     return "bd"
 
 
-def _bd(registry_path: Path | None = None) -> str:
+def _bd(registry_path: Optional[Path] = None) -> str:
     """Get bd binary path from registry, falling back to _resolve_bd().
 
     IMPORTANT: Do NOT validate bd_path with Path.exists() or shutil.which().
@@ -57,7 +58,7 @@ def _bd(registry_path: Path | None = None) -> str:
     return _resolve_bd()
 
 
-def _bd_cmd(subcmd: str, registry_path: Path | None = None) -> str:
+def _bd_cmd(subcmd: str, registry_path: Optional[Path] = None) -> str:
     """Build a bd command using the resolved binary path."""
     return f"{_bd(registry_path)} {subcmd}"
 
@@ -89,7 +90,7 @@ def _registry_path() -> Path:
     sys.exit('{"error":"no .beads/active-plan found. Run tf.py init <plan-name> first."}')
 
 
-def _load_registry(path: Path | None = None) -> tuple[dict, Path]:
+def _load_registry(path: Optional[Path] = None) -> tuple:
     p = path or _registry_path()
     if not p.exists():
         sys.exit(f'{{"error":"registry not found at {p}"}}')
@@ -121,7 +122,7 @@ def _out(obj: dict) -> None:
     print(json.dumps(obj, separators=(",", ":")))
 
 
-def _update_heartbeat(reg: dict, rp: Path, note: str, worker_name: str | None = None) -> None:
+def _update_heartbeat(reg: dict, rp: Path, note: str, worker_name: Optional[str] = None) -> None:
     """Update heartbeat for a worker. Called implicitly by worker commands."""
     if not worker_name:
         worker_name = os.environ.get("CLAUDE_AGENT_NAME", "")
@@ -161,7 +162,7 @@ def _is_stalled(worker: dict, threshold_mins: int = 20) -> bool:
     return elapsed > threshold_mins
 
 
-def _idle_minutes(worker: dict) -> float | None:
+def _idle_minutes(worker: dict):
     """Minutes since a worker became idle. None if not idle."""
     idle_since = worker.get("idle_since")
     if not idle_since or worker.get("status") != "idle":
@@ -1440,7 +1441,7 @@ def cmd_wire_plan(args: argparse.Namespace) -> None:
     lines = content.split("\n")
 
     issues: list[dict] = []
-    current: dict | None = None
+    current = None
 
     for line in lines:
         stripped = line.strip()
