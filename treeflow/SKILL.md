@@ -114,8 +114,8 @@ State management commands — all output compact JSON:
 ```bash
 # Orchestrator commands
 python3 .beads/tf.py init {plan-name} --bd-path "$(which bd 2>/dev/null || echo bd)" [--worker-model MODEL]  # Create context dir + registry + gitignore
-python3 .beads/tf.py dispatch {worker} {bead} --skill {domain} [--output-file path]  # Record dispatch
-python3 .beads/tf.py notify {worker} {bead} --context-pct N --summary "..." [--skill domain] [--agent-id ID]  # Record completion
+python3 .beads/tf.py dispatch {worker} {bead-id}[,bead-id2] --skill {domain} [--output-file path]  # Record dispatch
+python3 .beads/tf.py notify {worker} {bead} --context-pct N --summary "..." [--skill domain] [--agent-id ID] [--files "f1,f2"] [--gotcha "..."]  # Record completion
 python3 .beads/tf.py phase-gate {epic-id}                # Check phase complete
 python3 .beads/tf.py smoke-test --build-cmd "cmd" --beads a,b  # Build + wiring check
 python3 .beads/tf.py conflict-check --beads a,b,c                     # File-conflict analysis for parallelism safety
@@ -133,7 +133,7 @@ python3 .beads/tf.py ad-hoc --name {name} --worker {worker} [--skill domain]  # 
 python3 .beads/tf.py dep {blocker} {blocked}                           # Add dep idempotently (UNIQUE errors = success)
 python3 .beads/tf.py import-deps {file} [--validate]                   # Bulk import deps from "A" blocks "B" format
 python3 .beads/tf.py validate-plan {file}                              # Validate plan md for bd create -f
-python3 .beads/tf.py worker-prompt --beads {id}[,id2,id3] [--reuse --prior-bead {prev}]  # Assemble worker prompt
+python3 .beads/tf.py worker-prompt --beads {id}[,id2,id3] [--reuse --prior-bead {prev}] [--parallel-with bead1,bead2]  # Assemble worker prompt
 python3 .beads/tf.py update-context --bead {id} --worker {name} --summary "..." --files "..." [--gotcha "..."]  # Append to context
 python3 .beads/tf.py phase-complete --epic {id} [--build-cmd "cmd"] [--phase-num N]  # Gate + smoke test + summary
 python3 .beads/tf.py bd-path                                           # Print resolved bd binary path
@@ -213,6 +213,10 @@ After planning:
 
 Run continuously until all beads are closed or user input is needed.
 
+### Flat Task Mode
+
+When working from existing beads with no epic hierarchy, skip `phase-gate` and `phase-complete`. Use `tf.py ready` + `conflict-check` to determine parallelism waves. The loop simplifies to: ready → conflict-check → sync → dispatch → notify → loop. Phase files, epic context files, and phase-complete are not needed.
+
 ### 1. Find Ready Work
 
 ```bash
@@ -282,7 +286,9 @@ Workers that called `worker-close` are auto-retired by sync (reason: `self_close
 
 **When to batch instead of reuse:** If multiple tasks for the same domain are known upfront, batch them in one worker prompt at dispatch time — this avoids the SendMessage round-trip. Reuse is most valuable for follow-up tasks discovered *after* a worker finishes.
 
-**Target: ≤1 worker per task.** If your worker count exceeds task count, you're over-spawning. V2 achieved 0.8× (15 workers for 19 tasks) with good batching.
+**Domain mismatch = fresh worker.** Default to fresh workers when tasks are in different domains or the next task requires different file access than the completed task. Reuse is most valuable for iterative work within the same domain (implement → fix tests → address review feedback).
+
+**Target: ≥1.5 tasks/worker with good batching.** If your worker count exceeds task count, you're over-spawning. V2 achieved 0.8× (15 workers for 19 tasks) with good batching.
 
 ### 4. Construct Worker Prompt
 
@@ -339,7 +345,7 @@ When a `<task-notification>` arrives:
 1. **Extract essentials from `<result>`**: worker name, bead ID, context %, 1-line summary, and agent ID (from the task-notification metadata)
 2. **Record in registry** (handles all state transitions atomically):
    ```bash
-   python3 .beads/tf.py notify {worker-name} {bead-id} --context-pct {N} --summary "{1-line}" --agent-id {agent-id}
+   python3 .beads/tf.py notify {worker-name} {bead-id} --context-pct {N} --summary "{1-line}" --agent-id {agent-id} --files "{file1},{file2}" [--gotcha "{issue}"]
    ```
    The `--agent-id` stores the agent's runtime ID for more reliable SendMessage reuse.
 3. **Check response fields**:
@@ -348,11 +354,7 @@ When a `<task-notification>` arrives:
      - `closed` → normal flow
      - `blocked` → worker hit a question: surface to user, wait, SendMessage to resume
      - `in_progress` → abnormal: worker finished without closing. SendMessage to worker to retry close
-5. **Update context files** (only on normal flow):
-   ```bash
-   python3 .beads/tf.py update-context --bead {bead-id} --worker {worker-name} --summary "{1-line}" --files "{file1},{file2}" [--gotcha "{recurring issue}"]
-   ```
-   This appends the task summary to the epic context file and optionally adds a gotcha to `worker-context.md`.
+5. **Update context** is handled by `notify --files` above. Use `tf.py update-context` only for manual orchestrator notes outside of notification flow.
 6. **Discard the full `<result>` content** — it's now captured in registry and context files
 7. **Ignore transient LSP diagnostics** — during active worker runs, `go.sum` missing entries, `could not import` errors, build-tag exclusion warnings, and `undefined: <symbol>` in partially-written files are almost always transient. Do not act on these until the responsible worker completes.
 8. Check for newly ready beads: `python3 .beads/tf.py ready`
