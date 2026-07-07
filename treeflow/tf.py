@@ -2052,6 +2052,28 @@ Complete each in order — claim, implement, commit, close — before starting t
                        "— do not run secondary verification loops")
             break
 
+    # Append parallel worker warning if --parallel-with is provided
+    parallel_with = getattr(args, "parallel_with", "") or ""
+    if parallel_with:
+        parallel_bead_ids = [b.strip() for b in parallel_with.split(",") if b.strip()]
+        parallel_files = []
+        for pbid in parallel_bead_ids:
+            pr = _run(f"{bd_bin} show {pbid} --json")
+            try:
+                pdata = json.loads(pr.stdout)
+                pbead = pdata[0] if isinstance(pdata, list) else pdata
+            except (json.JSONDecodeError, IndexError):
+                pbead = {}
+            desc = pbead.get("description", "")
+            pfiles = _extract_files_from_description(desc)
+            for pf in pfiles:
+                parallel_files.append(f"- `{pf}` (bead {pbid})")
+        if parallel_files:
+            prompt += "\n\n## Parallel Worker Warning\n"
+            prompt += "The following files are owned by parallel workers. Do NOT modify them.\n"
+            prompt += "If you need any of these files, call `tf.py block` instead.\n\n"
+            prompt += "\n".join(parallel_files)
+
     if getattr(args, "prompt_only", False):
         print(prompt)
         return
@@ -2466,6 +2488,7 @@ def main() -> None:
     s.add_argument("--reuse", action="store_true")
     s.add_argument("--prior-bead", default="", dest="prior_bead")
     s.add_argument("--prompt-only", action="store_true", dest="prompt_only")
+    s.add_argument("--parallel-with", default="", dest="parallel_with")
 
     args = p.parse_args()
     if not args.cmd:

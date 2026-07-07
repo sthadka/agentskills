@@ -2094,6 +2094,31 @@ class TestWorkerPrompt:
         assert "ok" not in raw.split("\n")[0] if raw else True
         assert '"beads"' not in raw
 
+    def test_parallel_with_includes_warning(self, workspace, bd_stub):
+        """worker-prompt --parallel-with should add a Parallel Worker Warning section."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        bead_resp = json.dumps({
+            "id": "1", "title": "Task A",
+            "description": "Implement A.\nFiles: `src/a.py`, `src/b.py`"
+        })
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "1", "--parallel-with", "2,3",
+        ], env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
+        assert "Parallel Worker Warning" in out["prompt"]
+        assert "src/a.py" in out["prompt"]
+        assert "bead 2" in out["prompt"] or "bead 3" in out["prompt"]
+
+    def test_no_parallel_with_no_warning(self, workspace, bd_stub):
+        """worker-prompt without --parallel-with should not have warning section."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        bead_resp = json.dumps({"id": "1", "title": "Task A", "description": "desc"})
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "1",
+        ], env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
+        assert "Parallel Worker Warning" not in out["prompt"]
+
 
 # ── Validate Plan Parallelism Tests ──────────────────────────
 
