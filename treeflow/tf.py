@@ -257,11 +257,15 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
     r_ut = _run("git ls-files --others --exclude-standard")
     pre_untracked = [f for f in r_ut.stdout.strip().split("\n") if f]
 
+    # Support comma-separated bead IDs
+    bead_ids = [b.strip() for b in args.bead_id.split(",") if b.strip()]
+    bead_value = bead_ids if len(bead_ids) > 1 else bead_ids[0] if bead_ids else args.bead_id
+
     reg["workers"][args.worker] = {
         "status": "active",
         "skill": args.skill,
         "context_pct": reg.get("workers", {}).get(args.worker, {}).get("context_pct", 0),
-        "bead": args.bead_id,
+        "bead": bead_value,
         "notification": "pending",
         "dispatched_at": now,
         "dispatch_sha": _run("git rev-parse HEAD").stdout.strip(),
@@ -273,7 +277,7 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
         "spawned_session": reg.get("session_id", ""),
     }
     _save_registry(reg, rp)
-    _out({"ok": True, "worker": args.worker, "bead": args.bead_id})
+    _out({"ok": True, "worker": args.worker, "bead": bead_value})
 
 
 def cmd_worker_close(args: argparse.Namespace) -> None:

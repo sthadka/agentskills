@@ -226,6 +226,24 @@ class TestDispatch:
         assert reg["workers"]["rust-1"]["dispatch_sha"] == expected_sha
         assert len(expected_sha) == 40
 
+    def test_dispatch_comma_separated_beads(self, workspace):
+        """Dispatch with comma-separated beads stores list in registry."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        out = tf(workspace, ["dispatch", "w1", "bead-1,bead-2,bead-3", "--skill", "code"])
+        assert out["ok"] is True
+        assert out["bead"] == ["bead-1", "bead-2", "bead-3"]
+        reg = load_registry(workspace)
+        assert reg["workers"]["w1"]["bead"] == ["bead-1", "bead-2", "bead-3"]
+
+    def test_dispatch_single_bead_backward_compat(self, workspace):
+        """Dispatch with single bead stores string (backward compat)."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        out = tf(workspace, ["dispatch", "w1", "bead-1", "--skill", "code"])
+        assert out["ok"] is True
+        assert out["bead"] == "bead-1"
+        reg = load_registry(workspace)
+        assert reg["workers"]["w1"]["bead"] == "bead-1"
+
 
 # ── Heartbeat Tests ─────────────────────────────────────────────
 
