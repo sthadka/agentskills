@@ -3040,8 +3040,8 @@ class TestReady:
         assert out["ok"] is True
         assert out["ready"] == []
 
-    def test_capped_flag_when_supplemented(self, workspace, bd_stub):
-        """When bd ready misses tasks, capped flag should be set."""
+    def test_no_capped_or_capped_count_in_output(self, workspace, bd_stub):
+        """capped and capped_count fields should never appear in ready output."""
         tf(workspace, ["init", "test", "--bd-path", bd_stub])
         beads = [
             {"id": "t1", "type": "task", "title": "Task 1"},
@@ -3050,18 +3050,50 @@ class TestReady:
         out = tf(workspace, ["ready"],
                  env={"BD_STUB_RESPONSE": json.dumps(beads)})
         assert out["ok"] is True
-        # Both t1 and t2 are returned by bd ready AND bd list,
-        # so supplement finds them in ready_ids already → no capping
         assert "capped" not in out
+        assert "capped_count" not in out
 
-    def test_no_capped_when_all_returned(self, workspace, bd_stub):
-        """When bd ready returns everything, capped should not be set."""
+    def test_trimmed_output_shape(self, workspace, bd_stub):
+        """Ready beads should only contain essential fields."""
         tf(workspace, ["init", "test", "--bd-path", bd_stub])
-        beads = [{"id": "t1", "type": "task", "title": "Task 1"}]
+        beads = [
+            {
+                "id": "t1", "type": "task", "title": "Task 1",
+                "status": "open", "priority": "high", "parent": "e1",
+                "description": "Long description that should be dropped",
+                "created_at": "2026-01-01", "updated_at": "2026-01-02",
+                "labels": ["backend"], "assignee": "someone",
+            },
+        ]
         out = tf(workspace, ["ready"],
                  env={"BD_STUB_RESPONSE": json.dumps(beads)})
         assert out["ok"] is True
-        assert "capped" not in out
+        assert len(out["ready"]) == 1
+        bead = out["ready"][0]
+        # Essential fields present
+        assert bead["id"] == "t1"
+        assert bead["title"] == "Task 1"
+        assert bead["type"] == "task"
+        assert bead["priority"] == "high"
+        assert bead["parent"] == "e1"
+        assert bead["status"] == "open"
+        # Non-essential fields stripped
+        assert "description" not in bead
+        assert "created_at" not in bead
+        assert "updated_at" not in bead
+        assert "labels" not in bead
+        assert "assignee" not in bead
+
+    def test_issue_type_mapped_to_type(self, workspace, bd_stub):
+        """Beads with issue_type instead of type should have type populated."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = [
+            {"id": "t1", "issue_type": "task", "title": "Task 1"},
+        ]
+        out = tf(workspace, ["ready"],
+                 env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["ok"] is True
+        assert out["ready"][0]["type"] == "task"
 
 
 # ── Recover Tests ──────────────────────

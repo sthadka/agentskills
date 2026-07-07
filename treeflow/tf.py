@@ -1135,11 +1135,19 @@ def cmd_ready(args: argparse.Namespace) -> None:
             ready_ids.add(bid)
             supplemented += 1
 
-    result: dict = {"ok": True, "ready": ready_beads, "supplemented": supplemented}
-    if supplemented > 0:
-        result["capped"] = True
-        result["capped_count"] = supplemented
-    _out(result)
+    # Trim each bead to essential fields only (token efficiency)
+    _READY_KEYS = ("id", "title", "type", "priority", "parent", "status")
+    trimmed: list[dict] = []
+    for b in ready_beads:
+        t: dict = {}
+        for k in _READY_KEYS:
+            if k == "type":
+                t[k] = b.get("type") or b.get("issue_type", "")
+            elif k in b:
+                t[k] = b[k]
+        trimmed.append(t)
+
+    _out({"ok": True, "ready": trimmed, "supplemented": supplemented})
 
 
 def cmd_recover(args: argparse.Namespace) -> None:
