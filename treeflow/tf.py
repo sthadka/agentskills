@@ -800,17 +800,32 @@ def cmd_smoke_test(args: argparse.Namespace) -> None:
     _out(result)
 
 
+_FILES_HEADER_RE = re.compile(
+    r"^(?:\*\*)?"
+    r"(?:"
+    r"(?:Modified|Changed|Target)\s+files"          # "Modified files:", etc.
+    r"|Files(?:\s+to\s+\S+(?:/\S+)?)?"              # "Files:", "Files to create/modify:", etc.
+    r")"
+    r"(?:\s*\(([^)]*)\))?"                           # optional "(new)" / "(modifies)" — group 1
+    r":?\*?\*?\s*",                                  # trailing colon/bold
+    re.IGNORECASE,
+)
+
+
 def _extract_files_from_description(desc: str) -> list[str]:
     """Extract file paths from a bead description's Files: line.
 
-    Also recognizes 'Files (new):' and 'Files (modifies):' variants.
+    Also recognizes 'Files (new):' and 'Files (modifies):' variants,
+    'Files to create/modify:' patterns, and synonym headers like
+    'Modified files:', 'Changed files:', 'Target files:'.
     Returns a flat list of all file paths regardless of category.
     """
     files: list[str] = []
     for line in desc.split("\n"):
         stripped = line.strip()
-        if re.match(r"^(?:\*\*)?Files(?:\s*\([^)]*\))?:?\*?\*?\s*", stripped, re.IGNORECASE):
-            after = re.sub(r"^(?:\*\*)?Files(?:\s*\([^)]*\))?:?\*?\*?\s*", "", stripped, flags=re.IGNORECASE)
+        m = _FILES_HEADER_RE.match(stripped)
+        if m:
+            after = stripped[m.end():]
             files.extend(f.strip().strip("`") for f in after.split(",") if f.strip().strip("`"))
     return files
 
@@ -820,11 +835,13 @@ def _extract_files_detailed(desc: str) -> dict[str, list[str]]:
 
     Returns {"new": [...], "modifies": [...], "all": [...]}.
     Plain 'Files:' entries go into 'all'.
+    Also recognizes synonym headers (Modified/Changed/Target files)
+    and 'Files to <verb>:' patterns.
     """
     result: dict[str, list[str]] = {"new": [], "modifies": [], "all": []}
     for line in desc.split("\n"):
         stripped = line.strip()
-        m = re.match(r"^(?:\*\*)?Files(?:\s*\(([^)]*)\))?:?\*?\*?\s*", stripped, re.IGNORECASE)
+        m = _FILES_HEADER_RE.match(stripped)
         if not m:
             continue
         category = (m.group(1) or "").strip().lower()

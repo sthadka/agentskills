@@ -1275,6 +1275,37 @@ class TestConflictCheckHelpers:
         desc = "No files listed here."
         assert self.tf_mod._extract_files_from_description(desc) == []
 
+    def test_files_to_create_modify(self):
+        desc = "Task.\nFiles to create/modify: src/a.rs, src/b.rs"
+        assert self.tf_mod._extract_files_from_description(desc) == ["src/a.rs", "src/b.rs"]
+
+    def test_files_to_change(self):
+        desc = "Task.\nFiles to change: src/c.rs"
+        assert self.tf_mod._extract_files_from_description(desc) == ["src/c.rs"]
+
+    def test_modified_files(self):
+        desc = "Task.\nModified files: src/d.rs"
+        assert self.tf_mod._extract_files_from_description(desc) == ["src/d.rs"]
+
+    def test_target_files(self):
+        desc = "Task.\nTarget files: src/e.rs"
+        assert self.tf_mod._extract_files_from_description(desc) == ["src/e.rs"]
+
+    def test_changed_files(self):
+        desc = "Task.\nChanged files: src/f.rs"
+        assert self.tf_mod._extract_files_from_description(desc) == ["src/f.rs"]
+
+    def test_detailed_files_to_create_modify(self):
+        """_extract_files_detailed also handles synonym headers."""
+        desc = "Task.\nFiles to create/modify: src/a.rs, src/b.rs"
+        result = self.tf_mod._extract_files_detailed(desc)
+        assert result["all"] == ["src/a.rs", "src/b.rs"]
+
+    def test_detailed_modified_files(self):
+        desc = "Task.\nModified files: src/d.rs"
+        result = self.tf_mod._extract_files_detailed(desc)
+        assert result["all"] == ["src/d.rs"]
+
 
 # ── Notify Bead Status Tests ─────────────────────────────────
 
