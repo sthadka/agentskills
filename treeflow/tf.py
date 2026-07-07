@@ -329,7 +329,7 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
             errors.append(f"uncommitted: {','.join(modified[:5])}")
 
     if errors:
-        _out({"ok": False, "errors": errors, "hint": "commit your changes first"})
+        _out({"ok": False, "errors": errors})
         return
 
     # Scan for dead-code markers (warnings only — does not block close)
@@ -349,7 +349,7 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
     r = _run("git log -1 --pretty=%s")
     msg = r.stdout.strip()
     if msg and re.search(r'\bTask\s+\d+', msg, re.IGNORECASE):
-        _out({"ok": False, "errors": [f"commit message contains task number: '{msg}'. Amend to remove 'Task N:' prefix"], "hint": "git commit --amend -m 'feat: <description without task number>'"})
+        _out({"ok": False, "errors": [f"commit message contains task number: '{msg}'. Amend to remove 'Task N:' prefix"]})
         return
 
     # Support --beads for batch close (multiple bead IDs)
@@ -598,7 +598,7 @@ def cmd_notify(args: argparse.Namespace) -> None:
             entry["agent_id"] = agent_id
         reg["workers"][args.worker] = entry
         _save_registry(reg, rp)
-        _out({"ok": True, "late": False, "worker": args.worker})
+        _out({"ok": True, "worker": args.worker})
         return
 
     late = worker.get("notification") == "received"
@@ -619,7 +619,9 @@ def cmd_notify(args: argparse.Namespace) -> None:
         worker["summary"] = args.summary[:200]
 
     _save_registry(reg, rp)
-    result = {"ok": True, "late": late, "worker": args.worker, "ctx": args.context_pct}
+    result: dict = {"ok": True, "worker": args.worker, "ctx": args.context_pct}
+    if late:
+        result["late"] = True
     if auto_retired:
         result["auto_retired"] = True
 
@@ -1017,9 +1019,8 @@ def cmd_conflict_check(args: argparse.Namespace) -> None:
     safe = [bid for bid in bead_ids if bid not in conflicting_beads and bid in bead_files]
 
     result: dict = {
-        "bead_files": bead_files,
         "conflicts": conflicts,
-        "safe_parallel": safe,
+        "safe": safe,
     }
     if modify_conflicts:
         result["modify_conflicts"] = modify_conflicts
@@ -1031,14 +1032,14 @@ def cmd_conflict_check(args: argparse.Namespace) -> None:
         result["unparseable"] = unparseable
     if conflicts:
         # Build serial groups: sets of beads that share files
-        serial: list[list[str]] = []
+        serial_groups: list[list[str]] = []
         seen: set[str] = set()
         for bids in conflicts.values():
             group = sorted(set(bids) - seen)
             if group:
-                serial.append(sorted(set(bids)))
+                serial_groups.append(sorted(set(bids)))
                 seen.update(bids)
-        result["serial_groups"] = serial
+        result["serial"] = serial_groups
     _out(result)
 
 
@@ -1395,7 +1396,7 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
                 header_text = h3_match.group(1).strip().lower()
                 if header_text not in recognized_h3:
                     rogue_headers.append(
-                        f"line {li + 1}: '{stripped}' looks like a metadata header but is not recognized by bd — remove or convert to bold text"
+                        f"line {li + 1}: unrecognized H3: '{stripped}'"
                     )
 
     # Check that non-epic issues have a Files: line
@@ -1456,13 +1457,13 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
         elif has_blocks > 0 and has_blocks >= tasks_count - 1:
             roots = tasks_count - has_blocks
             if roots <= 1:
-                warnings.append("Plan is fully sequential — no parallel execution possible. Consider splitting into parallel groups.")
+                warnings.append("fully sequential — no parallelism")
 
     if rogue_headers:
         errors.extend(rogue_headers)
     if missing_files:
         for title in missing_files:
-            errors.append(f"Task '{title}' missing Files: section — required for conflict detection")
+            errors.append(f"'{title}' missing Files:")
     if orphan_packages:
         for title in orphan_packages:
             warnings.append(f"Task '{title}' has no consumer task — add a 'wire into' task or reference it from a downstream task")
@@ -1480,14 +1481,8 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
         result["errors"] = errors
     if warnings:
         result["warnings"] = warnings
-    if missing_files:
-        result["missing_files"] = missing_files
-    if orphan_packages:
-        result["orphan_packages"] = orphan_packages
     if has_depends_on:
         result["soft_deps"] = has_depends_on
-    if issues:
-        result["dry_run"] = [{"title": iss["title"]} for iss in issues]
     _out(result)
 
 
@@ -2169,7 +2164,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
         if ctx >= 90 or ctx < 40:
             w["status"] = "retired"
             w["retired_at"] = now
-            retired.append({"worker": wname, "ctx": ctx, "reason": "high_ctx" if ctx >= 90 else "low_ctx"})
+            retired.append(wname)
             continue
 
         # Auto-retire cross-session workers — they're not addressable
@@ -2177,7 +2172,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
         if current_session and w.get("spawned_session") and w["spawned_session"] != current_session:
             w["status"] = "retired"
             w["retired_at"] = now
-            retired.append({"worker": wname, "ctx": ctx, "reason": "cross_session"})
+            retired.append(wname)
             continue
 
         # Skip workers that never called back — they're likely session-ended
@@ -2185,14 +2180,14 @@ def cmd_sync(args: argparse.Namespace) -> None:
         if notif == "pending":
             w["status"] = "retired"
             w["retired_at"] = now
-            retired.append({"worker": wname, "ctx": ctx, "reason": "never_notified"})
+            retired.append(wname)
             continue
 
         # Skip workers that called worker-close — they've terminated
         if w.get("closed_self"):
             w["status"] = "retired"
             w["retired_at"] = now
-            retired.append({"worker": wname, "ctx": ctx, "reason": "self_closed"})
+            retired.append(wname)
             continue
 
         # Auto-retire workers idle too long — agent runtime likely ended
@@ -2200,7 +2195,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
         if idle_min is not None and idle_min > 8:
             w["status"] = "retired"
             w["retired_at"] = now
-            retired.append({"worker": wname, "ctx": ctx, "reason": "idle_too_long", "idle_min": round(idle_min)})
+            retired.append(wname)
             continue
 
         # Available for reuse
@@ -2226,7 +2221,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
     result: dict = {
         "available": available,
         "retired_now": retired,
-        "counts": {"total": total_spawned, "active": total_active, "idle": idle_count, "addressable": fresh_count, "retired": len(retired)},
+        "counts": {"total": total_spawned, "active": total_active, "idle": idle_count, "retired": len(retired)},
     }
     if stalled:
         result["stalled"] = stalled
@@ -2243,7 +2238,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     workers = reg.get("workers", {})
 
     threshold = reg.get("settings", {}).get("stall_threshold_mins", 20)
-    counts = {"active": 0, "idle": 0, "retired": 0, "failed": 0}
+    counts: dict = {"active": 0, "idle": 0, "retired": 0, "failed": 0}
     pending_from = []
     active_workers = []
     stalled_workers = []
@@ -2280,15 +2275,16 @@ def cmd_status(args: argparse.Namespace) -> None:
     except (json.JSONDecodeError, TypeError):
         pass
 
+    # Remove zero counts for non-essential statuses
+    w_counts = {k: v for k, v in counts.items() if v > 0 or k in ("active", "idle")}
     result: dict = {
-        "w": counts,
+        "w": w_counts,
         "beads": {"open": open_beads, "blocked": blocked, "closed": closed},
     }
     if active_workers:
         result["active"] = active_workers
     if stalled_workers:
         result["stalled"] = stalled_workers
-        result["stalled_action"] = "SendMessage to check status, or retire + reopen bead if unresponsive"
     if pending_from:
         result["pending_notif"] = pending_from
     _out(result)

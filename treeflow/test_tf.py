@@ -451,7 +451,7 @@ class TestNotify:
         tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
         out = tf(workspace, ["notify", "rust-1", "bead-abc", "--context-pct", "55", "--summary", "done"])
         assert out["ok"] is True
-        assert out["late"] is False
+        assert "late" not in out  # late omitted when false
         assert out["ctx"] == 55
 
         reg = load_registry(workspace)
@@ -627,7 +627,7 @@ class TestSync:
 
         out = tf(workspace, ["sync"])
         assert len(out["retired_now"]) == 1
-        assert out["retired_now"][0]["reason"] == "high_ctx"
+        assert out["retired_now"][0] == "rust-1"
 
     def test_auto_retire_low_context(self, workspace):
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
@@ -636,7 +636,7 @@ class TestSync:
 
         out = tf(workspace, ["sync"])
         assert len(out["retired_now"]) == 1
-        assert out["retired_now"][0]["reason"] == "low_ctx"
+        assert out["retired_now"][0] == "rust-1"
 
     def test_available_workers_grouped_by_skill(self, workspace):
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
@@ -662,9 +662,7 @@ class TestSync:
 
         out = tf(workspace, ["sync"])
         assert "rust" not in out.get("available", {})
-        retired = [r for r in out["retired_now"] if r["worker"] == "rust-1"]
-        assert len(retired) == 1
-        assert retired[0]["reason"] == "idle_too_long"
+        assert "rust-1" in out["retired_now"]
 
     def test_fresh_idle_worker_not_stale(self, workspace):
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
@@ -1298,7 +1296,7 @@ class TestSmokeTest:
 
 class TestConflictCheck:
     def test_no_conflicts(self, workspace, bd_stub):
-        """Beads with disjoint file lists should all be safe_parallel."""
+        """Beads with disjoint file lists should all be safe."""
         tf(workspace, ["init", "test", "--bd-path", bd_stub])
 
         # Stub returns different descriptions per bead
@@ -1311,7 +1309,7 @@ class TestConflictCheck:
         assert "conflicts" in out
 
     def test_detects_conflicts(self, workspace, bd_stub):
-        """Beads sharing files should appear in conflicts and serial_groups."""
+        """Beads sharing files should appear in conflicts and serial."""
         tf(workspace, ["init", "test", "--bd-path", bd_stub])
 
         out = tf(workspace, ["conflict-check", "--beads", "bead-1,bead-2"],
@@ -1319,15 +1317,15 @@ class TestConflictCheck:
                      "description": "Implement feature.\nFiles: `src/shared.rs`, `src/other.rs`"
                  }])})
         assert len(out["conflicts"]) > 0
-        assert "serial_groups" in out
-        assert out["safe_parallel"] == []
+        assert "serial" in out
+        assert out["safe"] == []
 
     def test_empty_beads(self, workspace, bd_stub):
         """No beads should return empty results."""
         tf(workspace, ["init", "test", "--bd-path", bd_stub])
         out = tf(workspace, ["conflict-check", "--beads", ""],
                  env={"BD_STUB_RESPONSE": json.dumps([{"description": ""}])})
-        assert out["safe_parallel"] == []
+        assert out["safe"] == []
         assert out["conflicts"] == {}
 
 
@@ -1613,14 +1611,13 @@ class TestValidatePlan:
         assert out["epics"] == 1
         assert out["tasks"] == 3
 
-    def test_dry_run_titles(self, workspace):
+    def test_issue_count(self, workspace):
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
         plan = workspace / "plan.md"
         plan.write_text("## First issue\n\n## Second issue\n")
         out = tf(workspace, ["validate-plan", str(plan)])
-        titles = [d["title"] for d in out["dry_run"]]
-        assert "First issue" in titles
-        assert "Second issue" in titles
+        assert out["issues"] == 2
+        assert "dry_run" not in out
 
     def test_nonexistent_file(self, workspace):
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
@@ -1660,9 +1657,7 @@ class TestValidatePlan:
         """))
         out = tf(workspace, ["validate-plan", str(plan)])
         assert out["ok"] is False
-        assert "missing_files" in out
-        assert "Create User model" in out["missing_files"]
-        assert "Add login endpoint" not in out["missing_files"]
+        assert "missing_files" not in out  # removed from output
         assert any("Create User model" in e and "missing Files" in e for e in out.get("errors", []))
 
     def test_no_warning_when_all_have_files(self, workspace):
@@ -2302,7 +2297,7 @@ class TestSessionTracking:
         save_registry(workspace, reg)
         out = tf(workspace, ["sync"])
         # Worker should be retired as cross_session
-        assert any(r["reason"] == "cross_session" for r in out["retired_now"])
+        assert "w1" in out["retired_now"]
         assert out["counts"]["idle"] == 0
 
     def test_sync_keeps_same_session_worker(self, workspace):
@@ -2499,8 +2494,7 @@ class TestSyncNeverNotified:
         save_registry(workspace, reg)
         out = tf(workspace, ["sync"])
         assert out["counts"]["idle"] == 0
-        retired_reasons = [r["reason"] for r in out["retired_now"]]
-        assert "never_notified" in retired_reasons
+        assert "w1" in out["retired_now"]
 
     def test_idle_received_worker_kept(self, workspace):
         """Workers with notification=received should remain available."""
@@ -2676,7 +2670,6 @@ class TestSyncStaleReuse:
         save_registry(workspace, reg)
         out = tf(workspace, ["sync", "--ready-count", "2"])
         assert "reuse_enforced" not in out
-        assert out["counts"]["addressable"] == 0
 
     def test_fresh_workers_trigger_reuse(self, workspace):
         """Non-stale idle workers should count toward reuse_enforced."""
@@ -2690,7 +2683,6 @@ class TestSyncStaleReuse:
         save_registry(workspace, reg)
         out = tf(workspace, ["sync", "--ready-count", "2"])
         assert out.get("reuse_enforced") is True
-        assert out["counts"]["addressable"] == 3
 
     def test_borderline_idle_not_addressable(self, workspace):
         """Workers idle 7 min are listed but not counted as addressable (fresh <= 6 min)."""
@@ -2705,7 +2697,6 @@ class TestSyncStaleReuse:
         out = tf(workspace, ["sync", "--ready-count", "2"])
         # idle_min ~7 → still available (TTL is 8 min), but not addressable (>6 min)
         assert out["counts"]["idle"] == 3
-        assert out["counts"]["addressable"] == 0
         assert "reuse_enforced" not in out
 
 
@@ -2743,7 +2734,7 @@ class TestConflictCheckUnparseable:
         assert "unparseable" not in out
         assert "inferred" in out
         assert "bead-1" in out["inferred"]
-        assert "pkg/scanner/scanner.go" in out["bead_files"]["bead-1"]
+        assert "bead-1" in out["safe"]
 
     def test_files_new_and_modifies_detected(self, workspace, bd_stub):
         """Beads with Files (new): and Files (modifies): should both be parsed."""
@@ -2752,8 +2743,7 @@ class TestConflictCheckUnparseable:
         out = tf(workspace, ["conflict-check", "--beads", "bead-1"],
                  env={"BD_STUB_RESPONSE": json.dumps(bead)})
         assert "unparseable" not in out
-        assert "pkg/auth.go" in out["bead_files"]["bead-1"]
-        assert "cmd/main.go" in out["bead_files"]["bead-1"]
+        assert "bead-1" in out["safe"]
 
     def test_modify_conflicts_flagged(self, workspace, bd_stub):
         """Two beads both modifying the same file should produce modify_conflicts."""
@@ -2868,7 +2858,7 @@ class TestSyncSelfClosed:
 
         out = tf(workspace, ["sync"])
         assert len(out["retired_now"]) == 1
-        assert out["retired_now"][0]["reason"] == "self_closed"
+        assert out["retired_now"][0] == "rust-1"
         assert "rust" not in out.get("available", {})
 
     def test_sync_keeps_idle_worker_without_closed_self(self, workspace):
@@ -2903,9 +2893,9 @@ class TestSyncSelfClosed:
 
 
 class TestStatusStalledAction:
-    """Status should include stalled_action hint when workers are stalled."""
+    """Status should include stalled workers when workers are stalled."""
 
-    def test_stalled_includes_action_hint(self, workspace):
+    def test_stalled_includes_stalled_list(self, workspace):
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
         tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
 
@@ -2915,12 +2905,13 @@ class TestStatusStalledAction:
 
         out = tf(workspace, ["status"])
         assert "stalled" in out
-        assert "stalled_action" in out
+        assert "stalled_action" not in out  # removed
 
-    def test_no_stalled_action_when_no_stalls(self, workspace):
+    def test_no_stalled_when_no_stalls(self, workspace):
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
         out = tf(workspace, ["status"])
         assert "stalled_action" not in out
+        assert "stalled" not in out
 
     def test_stalled_info_includes_silent_mins(self, workspace):
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
