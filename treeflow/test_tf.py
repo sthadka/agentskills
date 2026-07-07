@@ -520,6 +520,55 @@ class TestNotify:
         assert out["ok"] is True
         assert "auto_closed" not in out
 
+    def test_notify_with_files_triggers_context_update(self, workspace, bd_stub):
+        """notify --files should write to task-summaries.md context file."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "w1", "bead-1", "--skill", "code"])
+        bead_resp = json.dumps({"id": "bead-1", "title": "Add auth", "status": "closed"})
+        out = tf(workspace, [
+            "notify", "w1", "bead-1", "--context-pct", "50",
+            "--summary", "Added auth module", "--files", "auth.py,routes.py",
+        ], env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
+        ctx = workspace / ".beads" / "context-test"
+        summaries = ctx / "task-summaries.md"
+        assert summaries.exists()
+        content = summaries.read_text()
+        assert "BD-bead-1" in content
+        assert "auth.py,routes.py" in content
+
+    def test_notify_with_files_and_gotcha(self, workspace, bd_stub):
+        """notify --files --gotcha should write both context and gotcha."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "w1", "bead-1", "--skill", "code"])
+        bead_resp = json.dumps({"id": "bead-1", "title": "Fix bug", "status": "closed"})
+        out = tf(workspace, [
+            "notify", "w1", "bead-1", "--context-pct", "50",
+            "--summary", "Fixed the bug", "--files", "fix.py",
+            "--gotcha", "Watch for race conditions",
+        ], env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
+        ctx = workspace / ".beads" / "context-test"
+        wc = ctx / "worker-context.md"
+        assert wc.exists()
+        assert "Watch for race conditions" in wc.read_text()
+
+    def test_notify_without_files_no_context_update(self, workspace, bd_stub):
+        """notify without --files should NOT write context files."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "w1", "bead-1", "--skill", "code"])
+        bead_resp = json.dumps({"id": "bead-1", "title": "Task", "status": "closed"})
+        out = tf(workspace, [
+            "notify", "w1", "bead-1", "--context-pct", "50",
+            "--summary", "Done",
+        ], env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
+        ctx = workspace / ".beads" / "context-test"
+        summaries = ctx / "task-summaries.md"
+        # task-summaries may exist from init but should not have BD-bead-1
+        if summaries.exists():
+            assert "BD-bead-1" not in summaries.read_text()
+
 
 # ── Sync Tests ──────────────────────────────────────────────────
 

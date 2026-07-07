@@ -649,6 +649,41 @@ def cmd_notify(args: argparse.Namespace) -> None:
             except (json.JSONDecodeError, IndexError):
                 pass
 
+    # Inline context update when --files provided
+    files_str = getattr(args, "files", "") or ""
+    gotcha_str = getattr(args, "gotcha", "") or ""
+    if files_str:
+        ctx = _context_dir()
+        title = args.bead_id
+        epic_slug = ""
+        try:
+            data_ctx = json.loads(r.stdout) if r.returncode == 0 else {}
+            bead_ctx = data_ctx[0] if isinstance(data_ctx, list) else data_ctx
+            title = bead_ctx.get("title", bead_ctx.get("name", args.bead_id))
+            parent_id_ctx = bead_ctx.get("parent", "")
+            if parent_id_ctx:
+                r2 = _run(f"{bd} show {parent_id_ctx} --json")
+                try:
+                    pdata = json.loads(r2.stdout)
+                    parent = pdata[0] if isinstance(pdata, list) else pdata
+                    epic_slug = _slugify(parent.get("title", parent.get("name", parent_id_ctx)))
+                except (json.JSONDecodeError, IndexError):
+                    epic_slug = _slugify(parent_id_ctx)
+        except (json.JSONDecodeError, IndexError):
+            pass
+
+        summary_text = (args.summary or "")[:200]
+        summary_block = f"### BD-{args.bead_id}: {title}\n**Worker**: {args.worker} | **Files**: {files_str}\n{summary_text}"
+        if epic_slug:
+            epic_file = ctx / f"epic-{epic_slug}.md"
+            _append_to_section(epic_file, "## Completed Tasks", summary_block)
+        summaries_file = ctx / "task-summaries.md"
+        _append_to_section(summaries_file, "## Completed Tasks", summary_block)
+
+        if gotcha_str:
+            wc = ctx / "worker-context.md"
+            _append_to_section(wc, "## Known Gotchas", f"- {gotcha_str}")
+
     _out(result)
 
 
@@ -694,6 +729,46 @@ def cmd_batch_notify(args: argparse.Namespace) -> None:
         results.append(entry)
 
     _save_registry(reg, rp)
+
+    # Inline context update for last bead when --files provided
+    files_str = getattr(args, "files", "") or ""
+    gotcha_str = getattr(args, "gotcha", "") or ""
+    if files_str and pairs:
+        last_pair = pairs[-1]
+        if ":" in last_pair:
+            last_worker, last_bead = last_pair.split(":", 1)
+            ctx = _context_dir()
+            title = last_bead
+            epic_slug = ""
+            r = _run(f"{bd_bin} show {last_bead} --json")
+            try:
+                data = json.loads(r.stdout)
+                bead_obj = data[0] if isinstance(data, list) else data
+                title = bead_obj.get("title", bead_obj.get("name", last_bead))
+                parent_id = bead_obj.get("parent", "")
+                if parent_id:
+                    r2 = _run(f"{bd_bin} show {parent_id} --json")
+                    try:
+                        pdata = json.loads(r2.stdout)
+                        parent = pdata[0] if isinstance(pdata, list) else pdata
+                        epic_slug = _slugify(parent.get("title", parent.get("name", parent_id)))
+                    except (json.JSONDecodeError, IndexError):
+                        epic_slug = _slugify(parent_id)
+            except (json.JSONDecodeError, IndexError):
+                pass
+
+            summary_text = getattr(args, "summary", "") or ""
+            summary_block = f"### BD-{last_bead}: {title}\n**Worker**: {last_worker} | **Files**: {files_str}\n{summary_text}"
+            if epic_slug:
+                epic_file = ctx / f"epic-{epic_slug}.md"
+                _append_to_section(epic_file, "## Completed Tasks", summary_block)
+            summaries_file = ctx / "task-summaries.md"
+            _append_to_section(summaries_file, "## Completed Tasks", summary_block)
+
+            if gotcha_str:
+                wc = ctx / "worker-context.md"
+                _append_to_section(wc, "## Known Gotchas", f"- {gotcha_str}")
+
     _out({"ok": True, "results": results})
 
 
@@ -2276,11 +2351,16 @@ def main() -> None:
     s.add_argument("--summary", default="")
     s.add_argument("--skill", default="")
     s.add_argument("--agent-id", default="", dest="agent_id")
+    s.add_argument("--files", default="")
+    s.add_argument("--gotcha", default="")
 
     # batch-notify
     s = sub.add_parser("batch-notify")
     s.add_argument("--pairs", required=True)
     s.add_argument("--context-pct", type=int, default=0, dest="context_pct")
+    s.add_argument("--summary", default="")
+    s.add_argument("--files", default="")
+    s.add_argument("--gotcha", default="")
 
     # phase-gate
     s = sub.add_parser("phase-gate")
