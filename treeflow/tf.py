@@ -162,7 +162,7 @@ def _is_stalled(worker: dict, threshold_mins: int = 20) -> bool:
     return elapsed > threshold_mins
 
 
-def _idle_minutes(worker: dict):
+def _idle_minutes(worker: dict) -> Optional[float]:
     """Minutes since a worker became idle. None if not idle."""
     idle_since = worker.get("idle_since")
     if not idle_since or worker.get("status") != "idle":
