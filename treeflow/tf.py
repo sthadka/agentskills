@@ -401,7 +401,7 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
         reason = f"SUMMARY: {summary}. FILES: {files_str}. CONTEXT: {args.context_pct}%"
 
         # 5. Close bead
-        r = _run(f'{bd} close {bid} --reason "{reason}" --json')
+        r = _run(f'{bd} close {bid} --reason {shlex.quote(reason)} --json')
         if r.returncode != 0:
             close_errors.append(f"{bid}: bd close failed: {r.stderr.strip()[:100]}")
             continue
@@ -415,7 +415,7 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
             bead = {}
 
         if bead.get("status") != "closed":
-            _run(f'{bd} close {bid} --reason "{reason}" --json')
+            _run(f'{bd} close {bid} --reason {shlex.quote(reason)} --json')
             r = _run(f"{bd} show {bid} --json")
             try:
                 data = json.loads(r.stdout)
@@ -492,9 +492,9 @@ def cmd_block(args: argparse.Namespace) -> None:
         return
 
     # Create question task
-    question = args.question.replace('"', '\\"')
-    context = args.context.replace('"', '\\"') if args.context else question
-    r = _run(f'{bd} create "Question: {question}" -t task -p 1 --deps "{args.bead_id}" -d "{context}" --json')
+    q_title = shlex.quote(f"Question: {args.question}")
+    q_context = shlex.quote(args.context if args.context else args.question)
+    r = _run(f'{bd} create {q_title} -t task -p 1 --deps {shlex.quote(args.bead_id)} -d {q_context} --json')
     if r.returncode != 0:
         _out({"ok": False, "error": f"bd create failed: {r.stderr.strip()[:100]}", "bead_blocked": True})
         return
@@ -518,9 +518,9 @@ def cmd_discover(args: argparse.Namespace) -> None:
     """Worker creates a discovered-work bead."""
     rp = _registry_path()
     bd = _bd(rp)
-    title = args.title.replace('"', '\\"')
-    desc = args.description.replace('"', '\\"') if args.description else title
-    r = _run(f'{bd} create "Found: {title}" -t task -p 2 --deps "discovered-from:{args.bead_id}" -d "{desc}" --json')
+    d_title = shlex.quote(f"Found: {args.title}")
+    d_desc = shlex.quote(args.description if args.description else args.title)
+    r = _run(f'{bd} create {d_title} -t task -p 2 --deps {shlex.quote(f"discovered-from:{args.bead_id}")} -d {d_desc} --json')
     if r.returncode != 0:
         _out({"ok": False, "error": f"bd create failed: {r.stderr.strip()[:100]}"})
         return
@@ -1373,8 +1373,7 @@ def cmd_close(args: argparse.Namespace) -> None:
     rp = _registry_path()
     bd = _bd(rp)
     reason = args.reason or "completed"
-    reason_escaped = reason.replace('"', '\\"')
-    r = _run(f'{bd} close {args.bead_id} --reason "{reason_escaped}" --json')
+    r = _run(f'{bd} close {args.bead_id} --reason {shlex.quote(reason)} --json')
     if r.returncode != 0:
         _out({"ok": False, "error": f"bd close failed: {r.stderr.strip()[:200]}"})
         return
