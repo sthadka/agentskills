@@ -18,6 +18,20 @@ from typing import Optional
 REGISTRY_FILE = "registry.json"
 BD_LIST_LIMIT = "500"
 
+# Worker status constants
+STATUS_ACTIVE = "active"
+STATUS_IDLE = "idle"
+STATUS_RETIRED = "retired"
+
+# Notification status constants
+NOTIF_PENDING = "pending"
+NOTIF_RECEIVED = "received"
+NOTIF_RECONCILED = "reconciled"
+
+# Context threshold constants
+CTX_HIGH = 90
+CTX_LOW = 40
+
 # Common locations where bd might be installed
 _BD_SEARCH_PATHS = [
     Path.home() / ".local" / "bin" / "bd",
@@ -53,8 +67,8 @@ def _bd(registry_path: Optional[Path] = None) -> str:
             bd_path = reg.get("bd_path", "")
             if bd_path:
                 return bd_path
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as e:
+            sys.stderr.write(f"tf.py warning: reading bd_path from registry: {e}\n")
     return _resolve_bd()
 
 
@@ -179,7 +193,7 @@ def _update_heartbeat(reg: dict, rp: Path, note: str, worker_name: Optional[str]
 
 def _is_stalled(worker: dict, threshold_mins: int = 20) -> bool:
     """Check if an active worker has gone silent beyond the threshold."""
-    if worker.get("status") != "active":
+    if worker.get("status") != STATUS_ACTIVE:
         return False
     last_hb = worker.get("last_heartbeat") or worker.get("dispatched_at")
     if not last_hb:
@@ -202,7 +216,7 @@ def _is_stalled(worker: dict, threshold_mins: int = 20) -> bool:
 def _idle_minutes(worker: dict) -> Optional[float]:
     """Minutes since a worker became idle. None if not idle."""
     idle_since = worker.get("idle_since")
-    if not idle_since or worker.get("status") != "idle":
+    if not idle_since or worker.get("status") != STATUS_IDLE:
         return None
     return (datetime.now(timezone.utc) - _parse_ts(idle_since)).total_seconds() / 60
 
@@ -306,7 +320,7 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
         "skill": args.skill,
         "context_pct": reg.get("workers", {}).get(args.worker, {}).get("context_pct", 0),
         "bead": bead_value,
-        "notification": "pending",
+        "notification": NOTIF_PENDING,
         "dispatched_at": now,
         "dispatch_sha": _run("git rev-parse HEAD").stdout.strip(),
         "dispatch_untracked": pre_untracked,
@@ -613,11 +627,11 @@ def cmd_notify(args: argparse.Namespace) -> None:
     if not worker:
         # Worker not in registry — add it
         entry: dict = {
-            "status": "idle",
+            "status": STATUS_IDLE,
             "skill": args.skill or "unknown",
             "context_pct": args.context_pct,
             "bead": args.bead_id,
-            "notification": "received",
+            "notification": NOTIF_RECEIVED,
             "idle_since": now,
             "summary": (args.summary or "")[:200],
         }
@@ -628,13 +642,13 @@ def cmd_notify(args: argparse.Namespace) -> None:
         _out({"ok": True, "worker": args.worker})
         return
 
-    late = worker.get("notification") == "received"
+    late = worker.get("notification") == NOTIF_RECEIVED
 
     # Auto-retire workers at 90%+ context — they can never be meaningfully reused
-    auto_retired = args.context_pct >= 90
-    worker["status"] = "retired" if auto_retired else "idle"
+    auto_retired = args.context_pct >= CTX_HIGH
+    worker["status"] = STATUS_RETIRED if auto_retired else STATUS_IDLE
     worker["context_pct"] = args.context_pct
-    worker["notification"] = "reconciled" if late else "received"
+    worker["notification"] = NOTIF_RECONCILED if late else NOTIF_RECEIVED
     if auto_retired:
         worker["retired_at"] = now
     else:
@@ -686,8 +700,8 @@ def cmd_notify(args: argparse.Namespace) -> None:
                 if all_closed:
                     _run(f'{bd} close {parent_id} --reason "all children closed" --json')
                     result["parent_auto_closed"] = parent_id
-            except (json.JSONDecodeError, IndexError):
-                pass
+            except (json.JSONDecodeError, IndexError) as e:
+                sys.stderr.write(f"tf.py warning: auto-close parent epic: {e}\n")
 
     # Inline context update when --files provided
     files_str = getattr(args, "files", "") or ""
@@ -715,20 +729,20 @@ def cmd_batch_notify(args: argparse.Namespace) -> None:
         worker = reg["workers"].get(worker_name)
         if not worker:
             reg["workers"][worker_name] = {
-                "status": "idle",
+                "status": STATUS_IDLE,
                 "skill": "unknown",
                 "context_pct": ctx_pct,
                 "bead": bead_id,
-                "notification": "received",
+                "notification": NOTIF_RECEIVED,
                 "idle_since": now,
             }
             results.append({"worker": worker_name, "bead": bead_id, "ok": True})
             continue
 
-        auto_retired = ctx_pct >= 90
-        worker["status"] = "retired" if auto_retired else "idle"
+        auto_retired = ctx_pct >= CTX_HIGH
+        worker["status"] = STATUS_RETIRED if auto_retired else STATUS_IDLE
         worker["context_pct"] = ctx_pct
-        worker["notification"] = "received"
+        worker["notification"] = NOTIF_RECEIVED
         if auto_retired:
             worker["retired_at"] = now
         else:
@@ -798,7 +812,7 @@ def cmd_phase_gate(args: argparse.Namespace) -> None:
     phase_bead_ids = {b.get("id", "") for b in beads}
     for wname, w in reg["workers"].items():
         notif = w.get("notification", "")
-        if notif == "pending" and w.get("bead", "") in phase_bead_ids:
+        if notif == NOTIF_PENDING and w.get("bead", "") in phase_bead_ids:
             blocking.append({"worker": wname, "bead": w.get("bead", "?"), "reason": "notification pending"})
 
     if blocking:
@@ -1103,7 +1117,7 @@ def cmd_wave_plan(args: argparse.Namespace) -> None:
     # Collect files owned by active workers
     active_files: dict[str, str] = {}  # file → worker_name
     for wname, w in reg.get("workers", {}).items():
-        if w.get("status") != "active":
+        if w.get("status") != STATUS_ACTIVE:
             continue
         wbead = w.get("bead", "")
         if not wbead:
@@ -1246,8 +1260,8 @@ def cmd_import_deps(args: argparse.Namespace) -> None:
     if json_start >= 0:
         try:
             all_beads = json.loads(stdout[json_start:])
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as e:
+            sys.stderr.write(f"tf.py warning: parsing bd list JSON in import-deps: {e}\n")
     if isinstance(all_beads, dict):
         all_beads = all_beads.get("issues", [])
 
@@ -1446,7 +1460,7 @@ def cmd_recover(args: argparse.Namespace) -> None:
     worker_history: dict[str, str] = {}  # bead_id -> last worker name
     for wname, w in reg.get("workers", {}).items():
         bead = w.get("bead", "")
-        if w.get("status") == "active":
+        if w.get("status") == STATUS_ACTIVE:
             active_beads.add(bead)
         if bead:
             worker_history[bead] = wname
@@ -1528,7 +1542,7 @@ def cmd_ad_hoc(args: argparse.Namespace) -> None:
         "skill": args.skill or "general",
         "context_pct": 0,
         "bead": f"ad-hoc:{args.name}",
-        "notification": "pending",
+        "notification": NOTIF_PENDING,
         "dispatched_at": now,
         "last_heartbeat": now,
         "last_heartbeat_note": f"ad-hoc task: {args.name}",
@@ -1909,8 +1923,8 @@ def cmd_phase_summary(args: argparse.Namespace) -> None:
                     children = json.loads(r.stdout.strip()[json_start:])
                     if isinstance(children, dict):
                         children = children.get("issues", [])
-                except json.JSONDecodeError:
-                    pass
+                except json.JSONDecodeError as e:
+                    sys.stderr.write(f"tf.py warning: parsing bd list children in phase-summary: {e}\n")
 
         closed = sum(1 for c in children if c.get("status") == "closed")
         total = len(children)
@@ -1945,8 +1959,8 @@ def cmd_phase_complete(args: argparse.Namespace) -> None:
     if json_start >= 0:
         try:
             beads = json.loads(stdout[json_start:])
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as e:
+            sys.stderr.write(f"tf.py warning: parsing bd list JSON in phase-complete: {e}\n")
     if isinstance(beads, dict):
         beads = beads.get("issues", [])
 
@@ -1980,7 +1994,7 @@ def cmd_phase_complete(args: argparse.Namespace) -> None:
 
     phase_bead_ids = {b.get("id", "") for b in beads}
     for wname, w in reg.get("workers", {}).items():
-        if w.get("notification") == "pending" and w.get("bead", "") in phase_bead_ids:
+        if w.get("notification") == NOTIF_PENDING and w.get("bead", "") in phase_bead_ids:
             bead_title = next((b.get("title", "") for b in beads if b.get("id") == w.get("bead")), "")
             blocking.append({"worker": wname, "bead": w.get("bead", "?"), "bead_title": bead_title, "reason": "notification pending"})
 
@@ -2027,8 +2041,8 @@ def cmd_phase_complete(args: argparse.Namespace) -> None:
                 t1 = _parse_ts(idle_since)
                 if t1 > t0:
                     intervals.append((t0, t1))
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                sys.stderr.write(f"tf.py warning: parsing timestamp in sync: {e}\n")
 
     parallelism: dict = {"total_beads": len(closed_bead_ids)}
     if len(intervals) >= 2:
@@ -2292,8 +2306,8 @@ def cmd_registry(args: argparse.Namespace) -> None:
             "bead": v.get("bead", ""),
             "skill": v.get("skill", ""),
         }
-        if v.get("notification") == "pending":
-            out[k]["notif"] = "pending"
+        if v.get("notification") == NOTIF_PENDING:
+            out[k]["notif"] = NOTIF_PENDING
         if v.get("last_heartbeat"):
             out[k]["hb"] = v["last_heartbeat"]
         if v.get("last_heartbeat_note"):
@@ -2311,7 +2325,7 @@ def cmd_retire(args: argparse.Namespace) -> None:
     if not w:
         _out({"ok": False, "error": f"worker '{args.worker}' not found"})
         return
-    w["status"] = "retired"
+    w["status"] = STATUS_RETIRED
     w["retired_at"] = _now()
     _save_registry(reg, rp)
     _out({"ok": True, "worker": args.worker})
@@ -2362,14 +2376,14 @@ def cmd_sync(args: argparse.Namespace) -> None:
                 stalled.append(_stalled_info(wname, w))
             continue
 
-        if s != "idle":
+        if s != STATUS_IDLE:
             continue
 
         ctx = w.get("context_pct", 0)
 
         # Auto-retire: too high or too low context
-        if ctx >= 90 or ctx < 40:
-            w["status"] = "retired"
+        if ctx >= CTX_HIGH or ctx < CTX_LOW:
+            w["status"] = STATUS_RETIRED
             w["retired_at"] = now
             retired.append(wname)
             continue
@@ -2377,22 +2391,22 @@ def cmd_sync(args: argparse.Namespace) -> None:
         # Auto-retire cross-session workers — they're not addressable
         current_session = reg.get("session_id", "")
         if current_session and w.get("spawned_session") and w["spawned_session"] != current_session:
-            w["status"] = "retired"
+            w["status"] = STATUS_RETIRED
             w["retired_at"] = now
             retired.append(wname)
             continue
 
         # Skip workers that never called back — they're likely session-ended
         notif = w.get("notification", "")
-        if notif == "pending":
-            w["status"] = "retired"
+        if notif == NOTIF_PENDING:
+            w["status"] = STATUS_RETIRED
             w["retired_at"] = now
             retired.append(wname)
             continue
 
         # Skip workers that called worker-close — they've terminated
         if w.get("closed_self"):
-            w["status"] = "retired"
+            w["status"] = STATUS_RETIRED
             w["retired_at"] = now
             retired.append(wname)
             continue
@@ -2401,7 +2415,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
         idle_min = _idle_minutes(w)
         idle_timeout = reg.get("settings", {}).get("idle_timeout_mins", 8)
         if idle_min is not None and idle_min > idle_timeout:
-            w["status"] = "retired"
+            w["status"] = STATUS_RETIRED
             w["retired_at"] = now
             retired.append(wname)
             continue
@@ -2480,8 +2494,8 @@ def cmd_status(args: argparse.Namespace) -> None:
                 blocked += 1
             else:
                 open_beads += 1
-    except (json.JSONDecodeError, TypeError):
-        pass
+    except (json.JSONDecodeError, TypeError) as e:
+        sys.stderr.write(f"tf.py warning: parsing bd list JSON in status: {e}\n")
 
     # Remove zero counts for non-essential statuses
     w_counts = {k: v for k, v in counts.items() if v > 0 or k in ("active", "idle")}
