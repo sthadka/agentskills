@@ -135,6 +135,30 @@ def _fetch_bead(bd: str, bid: str) -> Optional[dict]:
         return None
 
 
+def _write_context_update(bd: str, ctx: Path, bead: Optional[dict], bead_id: str, worker: str, files: str, summary: str, gotcha: str = "") -> None:
+    """Write task completion context to epic file, task-summaries.md, and optionally gotcha to worker-context.md."""
+    title = bead.get("title", bead.get("name", bead_id)) if bead else bead_id
+    epic_slug = ""
+    parent_id = bead.get("parent", "") if bead else ""
+    if parent_id:
+        parent = _fetch_bead(bd, parent_id)
+        if parent:
+            epic_slug = _slugify(parent.get("title", parent.get("name", parent_id)))
+        else:
+            epic_slug = _slugify(parent_id)
+
+    summary_block = f"### BD-{bead_id}: {title}\n**Worker**: {worker} | **Files**: {files}\n{summary}"
+    if epic_slug:
+        epic_file = ctx / f"epic-{epic_slug}.md"
+        _append_to_section(epic_file, "## Completed Tasks", summary_block)
+    summaries_file = ctx / "task-summaries.md"
+    _append_to_section(summaries_file, "## Completed Tasks", summary_block)
+
+    if gotcha:
+        wc = ctx / "worker-context.md"
+        _append_to_section(wc, "## Known Gotchas", f"- {gotcha}")
+
+
 def _update_heartbeat(reg: dict, rp: Path, note: str, worker_name: Optional[str] = None) -> None:
     """Update heartbeat for a worker. Called implicitly by worker commands."""
     if not worker_name:
@@ -278,7 +302,7 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
     bead_value = bead_ids if len(bead_ids) > 1 else bead_ids[0] if bead_ids else args.bead_id
 
     reg["workers"][args.worker] = {
-        "status": "active",
+        "status": STATUS_ACTIVE,
         "skill": args.skill,
         "context_pct": reg.get("workers", {}).get(args.worker, {}).get("context_pct", 0),
         "bead": bead_value,
@@ -669,28 +693,7 @@ def cmd_notify(args: argparse.Namespace) -> None:
     files_str = getattr(args, "files", "") or ""
     gotcha_str = getattr(args, "gotcha", "") or ""
     if files_str:
-        ctx = _context_dir()
-        title = bead.get("title", bead.get("name", args.bead_id)) if bead else args.bead_id
-        epic_slug = ""
-        parent_id_ctx = bead.get("parent", "") if bead else ""
-        if parent_id_ctx:
-            parent = _fetch_bead(bd, parent_id_ctx)
-            if parent:
-                epic_slug = _slugify(parent.get("title", parent.get("name", parent_id_ctx)))
-            else:
-                epic_slug = _slugify(parent_id_ctx)
-
-        summary_text = (args.summary or "")[:200]
-        summary_block = f"### BD-{args.bead_id}: {title}\n**Worker**: {args.worker} | **Files**: {files_str}\n{summary_text}"
-        if epic_slug:
-            epic_file = ctx / f"epic-{epic_slug}.md"
-            _append_to_section(epic_file, "## Completed Tasks", summary_block)
-        summaries_file = ctx / "task-summaries.md"
-        _append_to_section(summaries_file, "## Completed Tasks", summary_block)
-
-        if gotcha_str:
-            wc = ctx / "worker-context.md"
-            _append_to_section(wc, "## Known Gotchas", f"- {gotcha_str}")
+        _write_context_update(bd, _context_dir(), bead, args.bead_id, args.worker, files_str, (args.summary or "")[:200], gotcha_str)
 
     _out(result)
 
@@ -745,31 +748,9 @@ def cmd_batch_notify(args: argparse.Namespace) -> None:
         last_pair = pairs[-1]
         if ":" in last_pair:
             last_worker, last_bead = last_pair.split(":", 1)
-            ctx = _context_dir()
-            title = last_bead
-            epic_slug = ""
             bead_obj = _fetch_bead(bd_bin, last_bead)
-            if bead_obj:
-                title = bead_obj.get("title", bead_obj.get("name", last_bead))
-                parent_id = bead_obj.get("parent", "")
-                if parent_id:
-                    parent = _fetch_bead(bd_bin, parent_id)
-                    if parent:
-                        epic_slug = _slugify(parent.get("title", parent.get("name", parent_id)))
-                    else:
-                        epic_slug = _slugify(parent_id)
-
             summary_text = getattr(args, "summary", "") or ""
-            summary_block = f"### BD-{last_bead}: {title}\n**Worker**: {last_worker} | **Files**: {files_str}\n{summary_text}"
-            if epic_slug:
-                epic_file = ctx / f"epic-{epic_slug}.md"
-                _append_to_section(epic_file, "## Completed Tasks", summary_block)
-            summaries_file = ctx / "task-summaries.md"
-            _append_to_section(summaries_file, "## Completed Tasks", summary_block)
-
-            if gotcha_str:
-                wc = ctx / "worker-context.md"
-                _append_to_section(wc, "## Known Gotchas", f"- {gotcha_str}")
+            _write_context_update(bd_bin, _context_dir(), bead_obj, last_bead, last_worker, files_str, summary_text, gotcha_str)
 
     _out({"ok": True, "results": results})
 
@@ -1543,7 +1524,7 @@ def cmd_ad_hoc(args: argparse.Namespace) -> None:
     now = _now()
     worker = args.worker
     reg["workers"][worker] = {
-        "status": "active",
+        "status": STATUS_ACTIVE,
         "skill": args.skill or "general",
         "context_pct": 0,
         "bead": f"ad-hoc:{args.name}",
@@ -2375,7 +2356,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
         total_spawned += 1
         s = w.get("status", "")
 
-        if s == "active":
+        if s == STATUS_ACTIVE:
             total_active += 1
             if _is_stalled(w, threshold):
                 stalled.append(_stalled_info(wname, w))
@@ -2474,7 +2455,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         counts[s] = counts.get(s, 0) + 1
         if w.get("notification") == "pending":
             pending_from.append({"worker": wname, "bead": w.get("bead", "?")})
-        if s == "active":
+        if s == STATUS_ACTIVE:
             active_workers.append({
                 "name": wname,
                 "bead": w.get("bead", "?"),
