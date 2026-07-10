@@ -2443,7 +2443,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
     result: dict = {
         "available": available,
         "retired_now": retired,
-        "counts": {"total": total_spawned, "active": total_active, "idle": idle_count, "retired": len(retired)},
+        "counts": {"total": total_spawned, STATUS_ACTIVE: total_active, STATUS_IDLE: idle_count, STATUS_RETIRED: len(retired)},
     }
     if stalled:
         result["stalled"] = stalled
@@ -2460,14 +2460,14 @@ def cmd_status(args: argparse.Namespace) -> None:
     workers = reg.get("workers", {})
 
     threshold = reg.get("settings", {}).get("stall_threshold_mins", 20)
-    counts: dict = {"active": 0, "idle": 0, "retired": 0, "failed": 0}
+    counts: dict = {STATUS_ACTIVE: 0, STATUS_IDLE: 0, STATUS_RETIRED: 0, "failed": 0}
     pending_from = []
     active_workers = []
     stalled_workers = []
     for wname, w in workers.items():
         s = w.get("status", "")
         counts[s] = counts.get(s, 0) + 1
-        if w.get("notification") == "pending":
+        if w.get("notification") == NOTIF_PENDING:
             pending_from.append({"worker": wname, "bead": w.get("bead", "?")})
         if s == STATUS_ACTIVE:
             active_workers.append({
@@ -2498,7 +2498,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         sys.stderr.write(f"tf.py warning: parsing bd list JSON in status: {e}\n")
 
     # Remove zero counts for non-essential statuses
-    w_counts = {k: v for k, v in counts.items() if v > 0 or k in ("active", "idle")}
+    w_counts = {k: v for k, v in counts.items() if v > 0 or k in (STATUS_ACTIVE, STATUS_IDLE)}
     result: dict = {
         "w": w_counts,
         "beads": {"open": open_beads, "blocked": blocked, "closed": closed},
