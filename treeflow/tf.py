@@ -212,7 +212,10 @@ def cmd_init(args: argparse.Namespace) -> None:
         "bd_path": bd_path,
         "worker_model": worker_model,
         "session_id": _now(),
-        "settings": {"stall_threshold_mins": 20},
+        "settings": {
+            "stall_threshold_mins": 20,
+            "idle_timeout_mins": getattr(args, "idle_timeout", 0) or 8,
+        },
         "workers": {},
         "routing": {},
         "phases": {},
@@ -910,6 +913,23 @@ _FILES_HEADER_RE = re.compile(
 )
 
 
+_SECTION_RE = re.compile(r"\[([^\]]+)\]")
+
+
+def _parse_file_entry(entry: str) -> tuple[str, str]:
+    """Parse a file entry like 'src/config.rs [StorageConfig]' into (path, section).
+
+    Returns (path, section) where section is empty if no [section] annotation.
+    """
+    entry = entry.strip().strip("`")
+    m = _SECTION_RE.search(entry)
+    if m:
+        section = m.group(1).strip()
+        path = entry[:m.start()].strip().strip("`")
+        return path, section
+    return entry, ""
+
+
 def _extract_files_from_description(desc: str) -> list[str]:
     """Extract file paths from a bead description's Files: line.
 
@@ -924,8 +944,30 @@ def _extract_files_from_description(desc: str) -> list[str]:
         m = _FILES_HEADER_RE.match(stripped)
         if m:
             after = stripped[m.end():]
-            files.extend(f.strip().strip("`") for f in after.split(",") if f.strip().strip("`"))
+            for f in after.split(","):
+                path, _ = _parse_file_entry(f)
+                if path:
+                    files.append(path)
     return files
+
+
+def _extract_files_with_sections(desc: str) -> list[tuple[str, str]]:
+    """Extract file paths with section annotations from a bead description.
+
+    Returns list of (path, section) tuples. Section is "" if not annotated.
+    E.g., 'Files (modifies): src/config.rs [StorageConfig]' → [("src/config.rs", "StorageConfig")]
+    """
+    result: list[tuple[str, str]] = []
+    for line in desc.split("\n"):
+        stripped = line.strip()
+        m = _FILES_HEADER_RE.match(stripped)
+        if m:
+            after = stripped[m.end():]
+            for f in after.split(","):
+                path, section = _parse_file_entry(f)
+                if path:
+                    result.append((path, section))
+    return result
 
 
 def _extract_files_detailed(desc: str) -> dict[str, list[str]]:
@@ -983,6 +1025,7 @@ def cmd_conflict_check(args: argparse.Namespace) -> None:
     # Fetch descriptions and extract file lists + soft deps
     bead_files: dict[str, list[str]] = {}
     bead_modifies: dict[str, list[str]] = {}
+    bead_sections: dict[str, dict[str, set[str]]] = {}  # bid → {file → {sections}}
     bead_soft_deps: dict[str, list[str]] = {}
     inferred: list[str] = []
     unparseable: list[str] = []
@@ -1002,6 +1045,14 @@ def cmd_conflict_check(args: argparse.Namespace) -> None:
             detailed = _extract_files_detailed(desc)
             if detailed["modifies"]:
                 bead_modifies[bid] = detailed["modifies"]
+            # Extract section annotations
+            file_secs = _extract_files_with_sections(desc)
+            sec_map: dict[str, set[str]] = {}
+            for path, section in file_secs:
+                if section:
+                    sec_map.setdefault(path, set()).add(section)
+            if sec_map:
+                bead_sections[bid] = sec_map
         else:
             files = _infer_files_from_description(desc)
             if files:
@@ -1021,25 +1072,54 @@ def cmd_conflict_check(args: argparse.Namespace) -> None:
             file_map.setdefault(f, []).append(bid)
 
     # Identify conflicts (file touched by 2+ beads)
-    conflicts = {f: bids for f, bids in file_map.items() if len(bids) > 1}
+    all_conflicts = {f: bids for f, bids in file_map.items() if len(bids) > 1}
+
+    # Separate low_risk (same file, different sections) from hard conflicts
+    hard_conflicts: dict[str, list[str]] = {}
+    low_risk: dict[str, dict] = {}
+    for f, bids in all_conflicts.items():
+        # Check if ALL beads touching this file have section annotations with no overlap
+        sections_per_bead = []
+        all_have_sections = True
+        for bid in bids:
+            secs = bead_sections.get(bid, {}).get(f, set())
+            if not secs:
+                all_have_sections = False
+                break
+            sections_per_bead.append((bid, secs))
+
+        if all_have_sections and len(sections_per_bead) >= 2:
+            # Check for section overlap between any pair
+            all_sections = [s for _, secs in sections_per_bead for s in secs]
+            has_overlap = len(all_sections) != len(set(all_sections))
+            if not has_overlap:
+                low_risk[f] = {
+                    "beads": bids,
+                    "sections": {bid: sorted(secs) for bid, secs in sections_per_bead},
+                }
+                continue
+        hard_conflicts[f] = bids
 
     # Flag modify-modify conflicts (higher severity)
     modify_conflicts: dict[str, list[str]] = {}
-    for f, bids in conflicts.items():
+    for f, bids in hard_conflicts.items():
         modifiers = [bid for bid in bids if f in bead_modifies.get(bid, [])]
         if len(modifiers) > 1:
             modify_conflicts[f] = modifiers
 
-    # Compute parallel groups: beads with no file overlap can run together
+    # Compute parallel groups: beads with no HARD file overlap can run together
+    # low_risk conflicts are safe for parallel dispatch
     conflicting_beads = set()
-    for bids in conflicts.values():
+    for bids in hard_conflicts.values():
         conflicting_beads.update(bids)
     safe = [bid for bid in bead_ids if bid not in conflicting_beads and bid in bead_files]
 
     result: dict = {
-        "conflicts": conflicts,
+        "conflicts": hard_conflicts,
         "safe": safe,
     }
+    if low_risk:
+        result["low_risk"] = low_risk
     if modify_conflicts:
         result["modify_conflicts"] = modify_conflicts
     if bead_soft_deps:
@@ -1048,16 +1128,132 @@ def cmd_conflict_check(args: argparse.Namespace) -> None:
         result["inferred"] = inferred
     if unparseable:
         result["unparseable"] = unparseable
-    if conflicts:
-        # Build serial groups: sets of beads that share files
+    if hard_conflicts:
         serial_groups: list[list[str]] = []
         seen: set[str] = set()
-        for bids in conflicts.values():
+        for bids in hard_conflicts.values():
             group = sorted(set(bids) - seen)
             if group:
                 serial_groups.append(sorted(set(bids)))
                 seen.update(bids)
         result["serial"] = serial_groups
+    _out(result)
+
+
+def cmd_wave_plan(args: argparse.Namespace) -> None:
+    """Compute dispatch waves from ready beads using file conflicts and active workers.
+
+    Groups beads into waves where all beads in a wave can run in parallel.
+    Considers file conflicts between beads AND files currently owned by active workers.
+    """
+    rp = _registry_path()
+    bd = _bd(rp)
+    reg, _ = _load_registry(rp)
+    bead_ids = [b.strip() for b in args.beads.split(",") if b.strip()]
+
+    # Collect files owned by active workers
+    active_files: dict[str, str] = {}  # file → worker_name
+    for wname, w in reg.get("workers", {}).items():
+        if w.get("status") != "active":
+            continue
+        wbead = w.get("bead", "")
+        if not wbead:
+            continue
+        r = _run(f"{bd} show {wbead} --json")
+        try:
+            data = json.loads(r.stdout)
+            bead = data[0] if isinstance(data, list) else data
+        except (json.JSONDecodeError, IndexError):
+            continue
+        desc = bead.get("description", "")
+        for f in _extract_files_from_description(desc) or _infer_files_from_description(desc):
+            active_files[f] = wname
+
+    # Fetch file lists for each bead (reuse conflict-check helpers)
+    bead_files: dict[str, list[str]] = {}
+    bead_sections: dict[str, dict[str, set[str]]] = {}
+    for bid in bead_ids:
+        r = _run(f"{bd} show {bid} --json")
+        try:
+            data = json.loads(r.stdout)
+            bead = data[0] if isinstance(data, list) else data
+        except (json.JSONDecodeError, IndexError):
+            continue
+        desc = bead.get("description", "")
+        files = _extract_files_from_description(desc) or _infer_files_from_description(desc)
+        if files:
+            bead_files[bid] = files
+        file_secs = _extract_files_with_sections(desc)
+        sec_map: dict[str, set[str]] = {}
+        for path, section in file_secs:
+            if section:
+                sec_map.setdefault(path, set()).add(section)
+        if sec_map:
+            bead_sections[bid] = sec_map
+
+    def _has_hard_conflict(bid_a: str, bid_b: str) -> bool:
+        """Check if two beads have a hard file conflict (same file, overlapping sections)."""
+        files_a = set(bead_files.get(bid_a, []))
+        files_b = set(bead_files.get(bid_b, []))
+        shared = files_a & files_b
+        for f in shared:
+            secs_a = bead_sections.get(bid_a, {}).get(f, set())
+            secs_b = bead_sections.get(bid_b, {}).get(f, set())
+            if not secs_a or not secs_b or secs_a & secs_b:
+                return True
+        return False
+
+    # Graph coloring: assign each bead to the earliest wave where it has no conflicts
+    waves: list[list[str]] = []
+    assigned: dict[str, int] = {}  # bid → wave index
+    blocked_by_active: list[dict] = []
+
+    for bid in bead_ids:
+        if bid not in bead_files:
+            continue
+
+        # Check conflict with active workers
+        bid_files = set(bead_files[bid])
+        active_conflict = None
+        for f in bid_files:
+            if f in active_files:
+                # Check section-level — if both have sections and no overlap, it's safe
+                bid_secs = bead_sections.get(bid, {}).get(f, set())
+                if not bid_secs:
+                    active_conflict = active_files[f]
+                    break
+        if active_conflict:
+            blocked_by_active.append({"bead": bid, "blocked_by_worker": active_conflict})
+            continue
+
+        # Find earliest wave with no conflicts
+        placed = False
+        for wi, wave in enumerate(waves):
+            has_conflict = False
+            for existing_bid in wave:
+                if _has_hard_conflict(bid, existing_bid):
+                    has_conflict = True
+                    break
+            if not has_conflict:
+                wave.append(bid)
+                assigned[bid] = wi
+                placed = True
+                break
+        if not placed:
+            waves.append([bid])
+            assigned[bid] = len(waves) - 1
+
+    result: dict = {
+        "ok": True,
+        "waves": [{"group": i + 1, "beads": w} for i, w in enumerate(waves)],
+        "total_waves": len(waves),
+        "total_beads": len(assigned),
+    }
+    if blocked_by_active:
+        result["blocked_by_active"] = blocked_by_active
+    unplanned = [bid for bid in bead_ids if bid not in assigned and bid not in [b["bead"] for b in blocked_by_active]]
+    if unplanned:
+        result["unparseable"] = unplanned
     _out(result)
 
 
@@ -1946,11 +2142,13 @@ def cmd_worker_prompt(args: argparse.Namespace) -> None:
     ctx = _context_dir()
     bead_ids = [b.strip() for b in args.beads.split(",") if b.strip()]
 
-    # Read context layers
-    project_context = ""
+    # Build context reference instead of embedding full worker-context.md
     wc_path = ctx / "worker-context.md"
+    wc_relative = f".beads/context-{ctx.name.removeprefix('context-')}/worker-context.md"
     if wc_path.exists():
-        project_context = wc_path.read_text()
+        project_context = f"**Read `{wc_relative}` for project conventions, tech stack, and known gotchas before starting work.**"
+    else:
+        project_context = ""
 
     # Include latest phase file, capped to avoid bloating worker context
     phase_files = sorted(ctx.glob("phase-*.md"))
@@ -2290,7 +2488,8 @@ def cmd_sync(args: argparse.Namespace) -> None:
 
         # Auto-retire workers idle too long — agent runtime likely ended
         idle_min = _idle_minutes(w)
-        if idle_min is not None and idle_min > 8:
+        idle_timeout = reg.get("settings", {}).get("idle_timeout_mins", 8)
+        if idle_min is not None and idle_min > idle_timeout:
             w["status"] = "retired"
             w["retired_at"] = now
             retired.append(wname)
@@ -2400,6 +2599,7 @@ def main() -> None:
     s.add_argument("plan_name")
     s.add_argument("--bd-path", default="", dest="bd_path")
     s.add_argument("--worker-model", default="", dest="worker_model")
+    s.add_argument("--idle-timeout", type=int, default=0, dest="idle_timeout")
 
     # dispatch
     s = sub.add_parser("dispatch")
@@ -2489,6 +2689,10 @@ def main() -> None:
 
     # conflict-check
     s = sub.add_parser("conflict-check")
+    s.add_argument("--beads", required=True)
+
+    # wave-plan
+    s = sub.add_parser("wave-plan")
     s.add_argument("--beads", required=True)
 
     # sync
@@ -2592,6 +2796,7 @@ def main() -> None:
         "phase-gate": cmd_phase_gate,
         "smoke-test": cmd_smoke_test,
         "conflict-check": cmd_conflict_check,
+        "wave-plan": cmd_wave_plan,
         "registry": cmd_registry,
         "retire": cmd_retire,
         "routing": cmd_routing,

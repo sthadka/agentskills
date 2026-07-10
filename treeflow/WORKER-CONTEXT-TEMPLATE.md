@@ -49,6 +49,14 @@
 
 {Add project-specific gotchas here}
 
+### Cross-Platform Build Failures
+
+If the build command fails due to platform-specific dependencies (e.g., macOS frameworks on Linux, Windows-only APIs), use the most specific verification available:
+- Per-package check: `cargo check -p <pkg>`, `go build ./pkg/...`
+- Format check: `cargo fmt --check`, `gofmt -l .`
+- Lint: `cargo clippy -- -D warnings` (per-crate), `golangci-lint run ./pkg/...`
+- Note the limitation in your worker-close summary
+
 ### Transient LSP Diagnostics During Active Workers
 
 The following LSP diagnostics are expected during worker runs and should be ignored until the worker completes:

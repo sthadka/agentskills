@@ -130,13 +130,14 @@ State management commands — all output compact JSON:
 
 ```bash
 # Orchestrator commands
-python3 .beads/tf.py init {plan-name} --bd-path "$(which bd 2>/dev/null || echo bd)" [--worker-model MODEL]  # Create context dir + registry + gitignore
+python3 .beads/tf.py init {plan-name} --bd-path "$(which bd 2>/dev/null || echo bd)" [--worker-model MODEL] [--idle-timeout N]  # Create context dir + registry + gitignore (idle-timeout: minutes before auto-retire, default 8)
 python3 .beads/tf.py dispatch {worker} {bead-id}[,bead-id2] --skill {domain} [--output-file path]  # Record dispatch
 python3 .beads/tf.py notify {worker} {bead} --context-pct N [--summary "..."] [--skill domain] [--agent-id ID] [--files "f1,f2"] [--gotcha "..."]  # Record completion (summary auto-generated from bead title if omitted)
 python3 .beads/tf.py batch-notify --pairs "w1:bead1,w2:bead2" --context-pct N [--summary "..."] [--files "f1,f2"] [--gotcha "..."]  # Batch completion for multiple worker:bead pairs
 python3 .beads/tf.py phase-gate {epic-id}                # Check phase complete
 python3 .beads/tf.py smoke-test --build-cmd "cmd" --beads a,b  # Build + wiring check
-python3 .beads/tf.py conflict-check --beads a,b,c                     # File-conflict analysis for parallelism safety
+python3 .beads/tf.py conflict-check --beads a,b,c                     # File-conflict analysis (section-aware: [section] annotations → low_risk)
+python3 .beads/tf.py wave-plan --beads a,b,c                          # Compute dispatch waves from ready beads (uses conflict-check + active worker files)
 python3 .beads/tf.py sync [--ready-count N]                           # Pre-dispatch: retire stale, flag stalled, return reusable workers
 python3 .beads/tf.py stalled [--threshold-mins N]              # List stalled active workers (default 20 min)
 python3 .beads/tf.py registry [--status idle] [--skill domain]  # Query workers
@@ -235,7 +236,16 @@ Run continuously until all beads are closed or user input is needed.
 
 ### Flat Task Mode
 
-When working from existing beads with no epic hierarchy, skip `phase-gate` and `phase-complete`. Use `tf.py ready` + `conflict-check` to determine parallelism waves. The loop simplifies to: ready → conflict-check → sync → dispatch → notify → loop. Phase files, epic context files, and phase-complete are not needed.
+When working from existing beads with no epic hierarchy, skip `phase-gate` and `phase-complete`. Phase files, epic context files, and phase-complete are not needed.
+
+**Wave-based orchestration pattern:**
+1. `tf.py ready` → get all dispatchable beads
+2. `tf.py wave-plan --beads id1,id2,...` → compute parallel dispatch groups
+3. Dispatch wave 1 (all beads in group 1 can run in parallel), batch by domain
+4. As workers complete: `tf.py notify` → `tf.py ready` → `tf.py wave-plan` with newly ready beads
+5. Dispatch next wave. Loop until all beads closed.
+
+`wave-plan` handles file conflict analysis and active worker awareness automatically. Use section annotations (`Files (modifies): src/config.rs [StorageConfig]`) to enable fine-grained parallelism — beads modifying different sections of the same file are classified as `low_risk` and grouped into the same wave.
 
 ### 1. Find Ready Work
 
@@ -252,16 +262,19 @@ Use `tf.py ready` instead of `bd ready` directly — it filters epics and supple
 
 ### 2. Assess Parallelism
 
-Run file-conflict analysis on ready beads:
+Run file-conflict analysis on ready beads (or use `wave-plan` for automated wave grouping):
 ```bash
 python3 .beads/tf.py conflict-check --beads bead1,bead2,bead3
+# Or: automatically compute dispatch waves
+python3 .beads/tf.py wave-plan --beads bead1,bead2,bead3
 ```
 
-This extracts `Files:` / `Files (new):` / `Files (modifies):` lists from bead descriptions (with fallback path inference) and returns:
-- `safe_parallel` — beads with no file overlap, safe to dispatch concurrently
-- `conflicts` — files touched by multiple beads
+`conflict-check` extracts `Files:` / `Files (new):` / `Files (modifies):` lists from bead descriptions (with fallback path inference) and returns:
+- `safe` — beads with no file overlap, safe to dispatch concurrently
+- `conflicts` — files touched by multiple beads (hard conflicts only)
+- `low_risk` — same file, different `[section]` annotations (safe to parallelize). Use `Files (modifies): src/config.rs [StorageConfig]` to annotate sections.
 - `modify_conflicts` — files both modified by 2+ beads (higher severity than create+modify)
-- `serial_groups` — sets of beads that must be serialized due to shared files
+- `serial` — sets of beads that must be serialized due to hard file conflicts
 - `soft_deps` — `depends_on:` relationships (serialization constraints without blocking readiness)
 - `inferred` — beads where files were inferred from description text (no explicit `Files:` line)
 
@@ -275,40 +288,32 @@ Additional rules:
 
 ### 3. Select or Reuse Workers
 
-**Recommended before first dispatch and after anomalies** (stalled workers, SendMessage failures, post-compaction). During normal flow (completion → dispatch next), the `notify` response already provides worker state — sync is optional. However, when starting a session or recovering from errors, sync prevents worker bloat.
+**Default: spawn fresh workers.** Batching multiple tasks into one fresh worker (via `worker-prompt --beads id1,id2`) is almost always better than reusing a completed worker via SendMessage. Reuse is only valuable for follow-up tasks discovered *after* a worker finishes in the same domain.
 
+**Run sync before first dispatch** to retire stale workers from prior sessions:
 ```bash
 python3 .beads/tf.py sync --ready-count {N}
 ```
 
-Pass `--ready-count` with the number of ready tasks from step 1. This single command handles all housekeeping:
-- Auto-retires workers at ≥90% context (can't reuse meaningfully)
-- Auto-retires workers at <40% context (not worth reuse overhead)
-- Auto-retires idle workers that never sent a notification (session-ended, not addressable)
-- Auto-retires workers idle >4 min (workers become non-addressable within 2-5 min)
-- Flags active workers as `stalled` if no heartbeat for >20 min
-- Returns `available` workers grouped by skill domain, with `agent_id` if stored
-- `addressable` count only includes workers idle ≤3 min (truly fresh)
-- Sets `reuse_enforced: true` when fresh (≤3 min idle) workers exceed `ready_tasks × 0.5`
+During the normal completion→dispatch flow, sync is optional — the `notify` response already provides worker state. Run sync again after anomalies (stalled workers, SendMessage failures, post-compaction).
+
+**Target: ≥1.5 tasks/worker with good batching.** If your worker count exceeds task count, you're over-spawning.
+
+<details>
+<summary><strong>Advanced: Worker Reuse via SendMessage</strong></summary>
+
+Sync handles all reuse housekeeping: auto-retires workers at ≥90% or <40% context, retires workers beyond the idle timeout (default 8 min, configurable via `--idle-timeout` on init), flags stalled workers, and returns `available` workers by skill domain.
 
 **Decision rule** based on sync output:
 1. If `reuse_enforced: true` → **prefer reuse** of the freshest idle worker (lowest `idle_min`) via SendMessage
-2. `available` has a worker in the same skill domain with `idle_min` ≤ 3 → **reuse** via SendMessage (use `agent_id` if available, fall back to worker name)
-3. Workers with `idle_min` > 3 are listed but may not be addressable — prefer spawning fresh over attempting reuse
+2. `available` has a worker in the same skill domain with `idle_min` ≤ 6 → **reuse** via SendMessage
+3. Workers with `idle_min` > 6 may not be addressable — prefer spawning fresh
 4. `available` is empty or no domain match → spawn fresh
-5. **If SendMessage is unavailable** (detected in Entry Protocol) → always spawn fresh
+5. **If SendMessage is unavailable** → always spawn fresh
 
-Workers that called `worker-close` are auto-retired by sync (reason: `self_closed`), so `available` only contains genuinely addressable workers. If SendMessage fails, immediately retire the worker and spawn fresh — do not retry.
+Workers become non-addressable within a few minutes of stopping. If `SendMessage` fails, retire the worker and spawn fresh — do not retry.
 
-**How reuse works:** `SendMessage` to a stopped agent auto-resumes it with full conversation context. No orientation overhead.
-
-**Known limitation:** Workers become non-addressable within 2-5 minutes of completing their last task. Sync mitigates this by auto-retiring workers idle >4 min and only counting workers idle ≤3 min as addressable. If `SendMessage` fails, always fall back to spawning fresh — don't retry.
-
-**When to batch instead of reuse:** If multiple tasks for the same domain are known upfront, batch them in one worker prompt at dispatch time — this avoids the SendMessage round-trip. Reuse is most valuable for follow-up tasks discovered *after* a worker finishes.
-
-**Domain mismatch = fresh worker.** Default to fresh workers when tasks are in different domains or the next task requires different file access than the completed task. Reuse is most valuable for iterative work within the same domain (implement → fix tests → address review feedback).
-
-**Target: ≥1.5 tasks/worker with good batching.** If your worker count exceeds task count, you're over-spawning. V2 achieved 0.8× (15 workers for 19 tasks) with good batching.
+</details>
 
 ### 4. Construct Worker Prompt
 
@@ -417,7 +422,7 @@ Or use `tf.py sync` / `tf.py status` — both include stalled workers in their o
 2. If no response after ~5 min, or SendMessage is unavailable: retire the worker, reopen the bead, spawn fresh
 3. If the task has stalled twice, surface to user — do NOT auto-retry indefinitely
 
-**Cross-session idle workers:** `tf.py sync` auto-retires cross-session workers and workers idle >4 min. Only workers idle ≤3 min are counted as addressable. Do not attempt SendMessage on workers with `idle_min` > 3.
+**Cross-session idle workers:** `tf.py sync` auto-retires cross-session workers and workers beyond the idle timeout. Only workers idle ≤6 min are counted as addressable. Do not attempt SendMessage on workers with `idle_min` > 6.
 
 **Post-SendMessage claim check (mandatory for all reuse dispatches):**
 After any SendMessage reuse, verify the bead transitions from `open` to `in_progress` within ~5 min:
