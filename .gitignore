@@ -4,3 +4,6 @@ __pycache__/
 .dolt/
 *.db
 .beads-credential-key
+
+# TreeFlow context (auto-added)
+.beads/
