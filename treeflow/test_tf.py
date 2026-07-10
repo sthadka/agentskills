@@ -1282,11 +1282,8 @@ class TestWorkerClose:
 class TestBdPath:
     def test_bd_path_from_registry(self, workspace):
         tf(workspace, ["init", "test", "--bd-path", "/custom/path/bd"])
-        r = subprocess.run(
-            ["python3", str(workspace / ".beads" / "tf.py"), "bd-path"],
-            cwd=workspace, capture_output=True, text=True,
-        )
-        assert r.stdout.strip() == "/custom/path/bd"
+        out = tf(workspace, ["bd-path"])
+        assert out["bd_path"] == "/custom/path/bd"
 
 
 # ── Smoke Test Tests ───────────────────────────────────────────
@@ -3675,3 +3672,195 @@ class TestConfigurableIdleTimeout:
         out = tf(workspace, ["sync", "--ready-count", "1"])
         # Worker should NOT be retired (10 < 15)
         assert "test-1" not in out.get("retired", [])
+
+
+# ── Shell Injection Edge-Case Tests ──────────────────────────────
+# Verify that shlex.quote() prevents shell metacharacter interpretation
+# in user-facing string inputs passed to bd via _run(shell=True).
+
+SHELL_DANGEROUS_STRINGS = [
+    '$(whoami)',           # command substitution
+    '`id`',               # backtick command substitution
+    '; rm -rf /',          # command chaining
+    '"quoted"',            # embedded quotes
+    '$HOME',               # variable expansion
+    '| cat /etc/passwd',   # pipe injection
+]
+
+
+@pytest.fixture
+def bd_stub_logging(workspace):
+    """Create a bd stub that logs all arguments to a file and returns configurable JSON.
+
+    Reads BD_STUB_RESPONSE for stdout, BD_STUB_EXIT for exit code.
+    Appends each invocation's arguments (one JSON array per line) to .beads/bd-args.log.
+    """
+    stub = workspace / ".beads" / "bd-stub"
+    # Use a Python stub to avoid any shell interpretation issues in the stub itself
+    stub.write_text(textwrap.dedent("""\
+        #!/usr/bin/env python3
+        import json, os, sys
+        log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bd-args.log")
+        with open(log_path, "a") as f:
+            f.write(json.dumps(sys.argv[1:]) + "\\n")
+        resp = os.environ.get("BD_STUB_RESPONSE", "{}")
+        print(resp)
+        stderr_msg = os.environ.get("BD_STUB_STDERR", "")
+        if stderr_msg:
+            print(stderr_msg, file=sys.stderr)
+        sys.exit(int(os.environ.get("BD_STUB_EXIT", "0")))
+    """))
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    return str(stub)
+
+
+def read_bd_args_log(workspace) -> list[list[str]]:
+    """Read the bd-args.log file and return a list of argument lists."""
+    log_path = workspace / ".beads" / "bd-args.log"
+    if not log_path.exists():
+        return []
+    lines = log_path.read_text().strip().split("\n")
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+class TestShellInjectionWorkerClose:
+    """Verify worker-close passes shell metacharacters safely via shlex.quote()."""
+
+    def _setup_for_close(self, workspace, bd_stub_logging):
+        """Common setup: init, dispatch, commit so worker-close git checks pass."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub_logging])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+
+        subprocess.run(["git", "add", ".gitignore"], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: add gitignore", "-q"], cwd=workspace, check=True)
+
+        (workspace / "src.rs").write_text("fn main() {}")
+        subprocess.run(["git", "add", "src.rs"], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: add main"], cwd=workspace, check=True)
+
+        # Clear any args logged during init/dispatch
+        log_path = workspace / ".beads" / "bd-args.log"
+        if log_path.exists():
+            log_path.unlink()
+
+    @pytest.mark.parametrize("dangerous", SHELL_DANGEROUS_STRINGS, ids=[
+        "cmd_subst", "backtick", "semicolon", "quotes", "var_expand", "pipe"
+    ])
+    def test_summary_with_shell_metacharacters(self, workspace, bd_stub_logging, dangerous):
+        """worker-close --summary containing shell metacharacters must not be interpreted."""
+        self._setup_for_close(workspace, bd_stub_logging)
+
+        out = tf(workspace, [
+            "worker-close", "bead-abc", "--context-pct", "50",
+            "--files", "src.rs", "--summary", dangerous,
+        ], env={
+            "BD_STUB_RESPONSE": json.dumps([{"status": "in_progress"}]),
+            "CLAUDE_AGENT_NAME": "rust-1",
+        })
+        # The command should not crash from shell interpretation
+        assert "_returncode" not in out or out.get("_returncode", 0) == 0
+
+        # The dangerous string must appear literally in the args passed to bd
+        all_calls = read_bd_args_log(workspace)
+        # Find the bd close call (contains "close" and "--reason")
+        close_calls = [c for c in all_calls if "close" in c and "--reason" in c]
+        assert len(close_calls) >= 1, f"Expected bd close call, got: {all_calls}"
+        # The reason arg should contain the dangerous string literally
+        reason_args = " ".join(close_calls[0])
+        assert dangerous in reason_args, (
+            f"Dangerous string {dangerous!r} not found literally in bd args: {reason_args}"
+        )
+
+
+class TestShellInjectionBlock:
+    """Verify block passes shell metacharacters safely via shlex.quote()."""
+
+    @pytest.mark.parametrize("dangerous", SHELL_DANGEROUS_STRINGS, ids=[
+        "cmd_subst", "backtick", "semicolon", "quotes", "var_expand", "pipe"
+    ])
+    def test_question_with_shell_metacharacters(self, workspace, bd_stub_logging, dangerous):
+        """block --question containing shell metacharacters must not be interpreted."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub_logging])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+
+        # Clear args log
+        log_path = workspace / ".beads" / "bd-args.log"
+        if log_path.exists():
+            log_path.unlink()
+
+        out = tf(workspace, [
+            "block", "bead-abc", "--question", dangerous,
+        ], env={"CLAUDE_AGENT_NAME": "rust-1"})
+
+        # Should succeed (ok: True) — bd stub returns {} which is fine
+        assert out.get("ok") is True, f"block failed: {out}"
+
+        # Verify the dangerous string appears literally in bd create args
+        all_calls = read_bd_args_log(workspace)
+        create_calls = [c for c in all_calls if "create" in c]
+        assert len(create_calls) >= 1, f"Expected bd create call, got: {all_calls}"
+        create_args = " ".join(create_calls[0])
+        assert dangerous in create_args, (
+            f"Dangerous string {dangerous!r} not found literally in bd args: {create_args}"
+        )
+
+
+class TestShellInjectionDiscover:
+    """Verify discover passes shell metacharacters safely via shlex.quote()."""
+
+    @pytest.mark.parametrize("dangerous", SHELL_DANGEROUS_STRINGS, ids=[
+        "cmd_subst", "backtick", "semicolon", "quotes", "var_expand", "pipe"
+    ])
+    def test_title_with_shell_metacharacters(self, workspace, bd_stub_logging, dangerous):
+        """discover --title containing shell metacharacters must not be interpreted."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub_logging])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+
+        # Clear args log
+        log_path = workspace / ".beads" / "bd-args.log"
+        if log_path.exists():
+            log_path.unlink()
+
+        out = tf(workspace, [
+            "discover", "bead-abc", "--title", dangerous,
+        ], env={"CLAUDE_AGENT_NAME": "rust-1"})
+
+        assert out.get("ok") is True, f"discover failed: {out}"
+
+        # Verify the dangerous string appears literally in bd create args
+        all_calls = read_bd_args_log(workspace)
+        create_calls = [c for c in all_calls if "create" in c]
+        assert len(create_calls) >= 1, f"Expected bd create call, got: {all_calls}"
+        create_args = " ".join(create_calls[0])
+        assert dangerous in create_args, (
+            f"Dangerous string {dangerous!r} not found literally in bd args: {create_args}"
+        )
+
+
+class TestShellInjectionClose:
+    """Verify close passes shell metacharacters safely via shlex.quote()."""
+
+    @pytest.mark.parametrize("dangerous", SHELL_DANGEROUS_STRINGS, ids=[
+        "cmd_subst", "backtick", "semicolon", "quotes", "var_expand", "pipe"
+    ])
+    def test_reason_with_shell_metacharacters(self, workspace, bd_stub_logging, dangerous):
+        """close --reason containing shell metacharacters must not be interpreted."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub_logging])
+
+        # Clear args log
+        log_path = workspace / ".beads" / "bd-args.log"
+        if log_path.exists():
+            log_path.unlink()
+
+        out = tf(workspace, [
+            "close", "bead-abc", "--reason", dangerous,
+        ])
+
+        # Verify the dangerous string appears literally in bd close args
+        all_calls = read_bd_args_log(workspace)
+        close_calls = [c for c in all_calls if "close" in c and "--reason" in c]
+        assert len(close_calls) >= 1, f"Expected bd close call, got: {all_calls}"
+        reason_args = " ".join(close_calls[0])
+        assert dangerous in reason_args, (
+            f"Dangerous string {dangerous!r} not found literally in bd args: {reason_args}"
+        )
