@@ -122,6 +122,19 @@ def _out(obj: dict) -> None:
     print(json.dumps(obj, separators=(",", ":")))
 
 
+def _fetch_bead(bd: str, bid: str) -> Optional[dict]:
+    """Run `bd show {bid} --json`, parse JSON, unwrap list-vs-dict. Return bead dict or None."""
+    r = _run(f"{bd} show {bid} --json")
+    if r.returncode != 0:
+        return None
+    try:
+        data = json.loads(r.stdout)
+        bead = data[0] if isinstance(data, list) else data
+        return bead if isinstance(bead, dict) else None
+    except (json.JSONDecodeError, IndexError):
+        return None
+
+
 def _update_heartbeat(reg: dict, rp: Path, note: str, worker_name: Optional[str] = None) -> None:
     """Update heartbeat for a worker. Called implicitly by worker commands."""
     if not worker_name:
@@ -183,8 +196,8 @@ def _stalled_info(wname: str, w: dict) -> dict:
         try:
             elapsed = (datetime.now(timezone.utc) - _parse_ts(last_hb)).total_seconds() / 60
             info["silent_mins"] = round(elapsed)
-        except Exception:
-            pass
+        except (ValueError, TypeError, KeyError) as e:
+            sys.stderr.write(f"tf.py warning: stalled_info timestamp parse: {e}\n")
     return info
 
 
@@ -300,8 +313,8 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
             w_entry = reg["workers"][worker_name]
             dispatch_sha = w_entry.get("dispatch_sha", "")
             pre_untracked = set(w_entry.get("dispatch_untracked", []))
-    except Exception:
-        pass
+    except (OSError, json.JSONDecodeError, KeyError) as e:
+        sys.stderr.write(f"tf.py warning: registry read in worker-close: {e}\n")
 
     files = [f.strip() for f in args.files.split(",")] if args.files else []
 
@@ -375,16 +388,9 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
     close_errors = []
     for bid in bead_ids:
         # 3. Check bead is in_progress
-        r = _run(f"{bd} show {bid} --json")
-        if r.returncode != 0:
-            close_errors.append(f"{bid}: bd show failed: {r.stderr.strip()[:100]}")
-            continue
-
-        try:
-            data = json.loads(r.stdout)
-            bead = data[0] if isinstance(data, list) else data
-        except (json.JSONDecodeError, IndexError):
-            close_errors.append(f"{bid}: bd show returned invalid JSON")
+        bead = _fetch_bead(bd, bid)
+        if bead is None:
+            close_errors.append(f"{bid}: bd show failed or returned invalid JSON")
             continue
 
         status = bead.get("status", "")
@@ -407,21 +413,11 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
             continue
 
         # 6. Verify close
-        r = _run(f"{bd} show {bid} --json")
-        try:
-            data = json.loads(r.stdout)
-            bead = data[0] if isinstance(data, list) else data
-        except (json.JSONDecodeError, IndexError):
-            bead = {}
+        bead = _fetch_bead(bd, bid) or {}
 
         if bead.get("status") != "closed":
             _run(f'{bd} close {bid} --reason {shlex.quote(reason)} --json')
-            r = _run(f"{bd} show {bid} --json")
-            try:
-                data = json.loads(r.stdout)
-                bead = data[0] if isinstance(data, list) else data
-            except (json.JSONDecodeError, IndexError):
-                bead = {}
+            bead = _fetch_bead(bd, bid) or {}
             if bead.get("status") != "closed":
                 close_errors.append(f"{bid}: still not closed after retry")
                 continue
@@ -434,8 +430,8 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
         if worker_name and worker_name in reg.get("workers", {}):
             reg["workers"][worker_name]["closed_self"] = True
             _save_registry(reg, reg_path)
-    except Exception:
-        pass
+    except (OSError, json.JSONDecodeError, KeyError) as e:
+        sys.stderr.write(f"tf.py warning: registry update in worker-close: {e}\n")
 
     if close_errors and not closed_beads:
         _out({"ok": False, "errors": close_errors})
@@ -474,8 +470,8 @@ def cmd_claim(args: argparse.Namespace) -> None:
                 deadline = datetime.now(timezone.utc) + timedelta(minutes=expected_mins)
                 reg["workers"][worker_name]["expected_completion_at"] = deadline.strftime("%Y-%m-%dT%H:%M:%SZ")
             _update_heartbeat(reg, reg_path, f"claimed {args.bead_id}", worker_name)
-    except Exception:
-        pass  # Best-effort — claim still succeeded
+    except (OSError, json.JSONDecodeError, KeyError) as e:
+        sys.stderr.write(f"tf.py warning: registry update in claim: {e}\n")
 
     _out({"ok": True, "bead": args.bead_id, "status": "in_progress"})
 
@@ -508,8 +504,8 @@ def cmd_block(args: argparse.Namespace) -> None:
     try:
         reg, reg_path = _load_registry(rp)
         _update_heartbeat(reg, reg_path, f"blocked — {args.question[:50]}")
-    except Exception:
-        pass
+    except (OSError, json.JSONDecodeError, KeyError) as e:
+        sys.stderr.write(f"tf.py warning: registry update in block: {e}\n")
 
     _out({"ok": True, "bead": args.bead_id, "status": "blocked", "question_bead": q_id})
 
@@ -533,8 +529,8 @@ def cmd_discover(args: argparse.Namespace) -> None:
     try:
         reg, reg_path = _load_registry(rp)
         _update_heartbeat(reg, reg_path, "discovered follow-up")
-    except Exception:
-        pass
+    except (OSError, json.JSONDecodeError, KeyError) as e:
+        sys.stderr.write(f"tf.py warning: registry update in discover: {e}\n")
 
     _out({"ok": True, "bead": new_id, "source": args.bead_id})
 
@@ -572,7 +568,7 @@ def cmd_stalled(args: argparse.Namespace) -> None:
 def cmd_bd_path(args: argparse.Namespace) -> None:
     """Print resolved bd binary path for diagnostics."""
     rp = _registry_path()
-    print(_bd(rp))
+    _out({"bd_path": _bd(rp)})
 
 
 def cmd_notify(args: argparse.Namespace) -> None:
@@ -585,7 +581,7 @@ def cmd_notify(args: argparse.Namespace) -> None:
         w_entry = reg["workers"].get(args.worker)
         if not w_entry or not w_entry.get("bead"):
             _out({"ok": False, "error": f"no bead recorded for worker '{args.worker}'"})
-            sys.exit(1)
+            return
         args.bead_id = w_entry["bead"]
 
     worker = reg["workers"].get(args.worker)
@@ -635,13 +631,8 @@ def cmd_notify(args: argparse.Namespace) -> None:
     # Include bead status so orchestrator doesn't need a separate bd show call
     result["bead_status"] = "unknown"
     bd = _bd(rp)
-    r = _run(f"{bd} show {args.bead_id} --json")
-    try:
-        data = json.loads(r.stdout)
-        bead = data[0] if isinstance(data, list) else data
-        result["bead_status"] = bead.get("status", "unknown")
-    except (json.JSONDecodeError, IndexError):
-        bead = {}
+    bead = _fetch_bead(bd, args.bead_id) or {}
+    result["bead_status"] = bead.get("status", "unknown")
 
     # Auto-generate summary from bead title if --summary was omitted
     if not args.summary and isinstance(bead, dict):
@@ -679,23 +670,15 @@ def cmd_notify(args: argparse.Namespace) -> None:
     gotcha_str = getattr(args, "gotcha", "") or ""
     if files_str:
         ctx = _context_dir()
-        title = args.bead_id
+        title = bead.get("title", bead.get("name", args.bead_id)) if bead else args.bead_id
         epic_slug = ""
-        try:
-            data_ctx = json.loads(r.stdout) if r.returncode == 0 else {}
-            bead_ctx = data_ctx[0] if isinstance(data_ctx, list) else data_ctx
-            title = bead_ctx.get("title", bead_ctx.get("name", args.bead_id))
-            parent_id_ctx = bead_ctx.get("parent", "")
-            if parent_id_ctx:
-                r2 = _run(f"{bd} show {parent_id_ctx} --json")
-                try:
-                    pdata = json.loads(r2.stdout)
-                    parent = pdata[0] if isinstance(pdata, list) else pdata
-                    epic_slug = _slugify(parent.get("title", parent.get("name", parent_id_ctx)))
-                except (json.JSONDecodeError, IndexError):
-                    epic_slug = _slugify(parent_id_ctx)
-        except (json.JSONDecodeError, IndexError):
-            pass
+        parent_id_ctx = bead.get("parent", "") if bead else ""
+        if parent_id_ctx:
+            parent = _fetch_bead(bd, parent_id_ctx)
+            if parent:
+                epic_slug = _slugify(parent.get("title", parent.get("name", parent_id_ctx)))
+            else:
+                epic_slug = _slugify(parent_id_ctx)
 
         summary_text = (args.summary or "")[:200]
         summary_block = f"### BD-{args.bead_id}: {title}\n**Worker**: {args.worker} | **Files**: {files_str}\n{summary_text}"
@@ -765,22 +748,16 @@ def cmd_batch_notify(args: argparse.Namespace) -> None:
             ctx = _context_dir()
             title = last_bead
             epic_slug = ""
-            r = _run(f"{bd_bin} show {last_bead} --json")
-            try:
-                data = json.loads(r.stdout)
-                bead_obj = data[0] if isinstance(data, list) else data
+            bead_obj = _fetch_bead(bd_bin, last_bead)
+            if bead_obj:
                 title = bead_obj.get("title", bead_obj.get("name", last_bead))
                 parent_id = bead_obj.get("parent", "")
                 if parent_id:
-                    r2 = _run(f"{bd_bin} show {parent_id} --json")
-                    try:
-                        pdata = json.loads(r2.stdout)
-                        parent = pdata[0] if isinstance(pdata, list) else pdata
+                    parent = _fetch_bead(bd_bin, parent_id)
+                    if parent:
                         epic_slug = _slugify(parent.get("title", parent.get("name", parent_id)))
-                    except (json.JSONDecodeError, IndexError):
+                    else:
                         epic_slug = _slugify(parent_id)
-            except (json.JSONDecodeError, IndexError):
-                pass
 
             summary_text = getattr(args, "summary", "") or ""
             summary_block = f"### BD-{last_bead}: {title}\n**Worker**: {last_worker} | **Files**: {files_str}\n{summary_text}"
@@ -868,13 +845,9 @@ def cmd_smoke_test(args: argparse.Namespace) -> None:
     if args.beads:
         bead_ids = [b.strip() for b in args.beads.split(",")]
         for bid in bead_ids:
-            r = _run(f"{bd} show {bid} --json")
-            if r.returncode != 0:
+            bead = _fetch_bead(bd, bid)
+            if bead is None:
                 result["wiring"].append({"bead": bid, "error": "cannot read bead"})
-                continue
-            try:
-                bead = json.loads(r.stdout)
-            except json.JSONDecodeError:
                 continue
 
             desc = bead.get("description", "")
@@ -1030,13 +1003,8 @@ def cmd_conflict_check(args: argparse.Namespace) -> None:
     inferred: list[str] = []
     unparseable: list[str] = []
     for bid in bead_ids:
-        r = _run(f"{bd} show {bid} --json")
-        if r.returncode != 0:
-            continue
-        try:
-            data = json.loads(r.stdout)
-            bead = data[0] if isinstance(data, list) else data
-        except (json.JSONDecodeError, IndexError):
+        bead = _fetch_bead(bd, bid)
+        if bead is None:
             continue
         desc = bead.get("description", "")
         files = _extract_files_from_description(desc)
@@ -1159,11 +1127,8 @@ def cmd_wave_plan(args: argparse.Namespace) -> None:
         wbead = w.get("bead", "")
         if not wbead:
             continue
-        r = _run(f"{bd} show {wbead} --json")
-        try:
-            data = json.loads(r.stdout)
-            bead = data[0] if isinstance(data, list) else data
-        except (json.JSONDecodeError, IndexError):
+        bead = _fetch_bead(bd, wbead)
+        if bead is None:
             continue
         desc = bead.get("description", "")
         for f in _extract_files_from_description(desc) or _infer_files_from_description(desc):
@@ -1173,11 +1138,8 @@ def cmd_wave_plan(args: argparse.Namespace) -> None:
     bead_files: dict[str, list[str]] = {}
     bead_sections: dict[str, dict[str, set[str]]] = {}
     for bid in bead_ids:
-        r = _run(f"{bd} show {bid} --json")
-        try:
-            data = json.loads(r.stdout)
-            bead = data[0] if isinstance(data, list) else data
-        except (json.JSONDecodeError, IndexError):
+        bead = _fetch_bead(bd, bid)
+        if bead is None:
             continue
         desc = bead.get("description", "")
         files = _extract_files_from_description(desc) or _infer_files_from_description(desc)
@@ -1378,14 +1340,8 @@ def cmd_close(args: argparse.Namespace) -> None:
         _out({"ok": False, "error": f"bd close failed: {r.stderr.strip()[:200]}"})
         return
     # Verify via bd show
-    r2 = _run(f"{bd} show {args.bead_id} --json")
-    status = "unknown"
-    try:
-        data = json.loads(r2.stdout)
-        bead = data[0] if isinstance(data, list) else data
-        status = bead.get("status", "unknown") if isinstance(bead, dict) else "unknown"
-    except (json.JSONDecodeError, IndexError):
-        pass
+    bead = _fetch_bead(bd, args.bead_id)
+    status = bead.get("status", "unknown") if bead else "unknown"
     _out({"ok": True, "id": args.bead_id, "status": status})
 
 
@@ -1913,22 +1869,16 @@ def cmd_update_context(args: argparse.Namespace) -> None:
     # Get bead info for title and parent
     title = args.bead_id
     epic_slug = ""
-    r = _run(f"{bd_bin} show {args.bead_id} --json")
-    try:
-        data = json.loads(r.stdout)
-        bead = data[0] if isinstance(data, list) else data
+    bead = _fetch_bead(bd_bin, args.bead_id)
+    if bead:
         title = bead.get("title", bead.get("name", args.bead_id))
         parent_id = bead.get("parent", "")
         if parent_id:
-            r2 = _run(f"{bd_bin} show {parent_id} --json")
-            try:
-                pdata = json.loads(r2.stdout)
-                parent = pdata[0] if isinstance(pdata, list) else pdata
+            parent = _fetch_bead(bd_bin, parent_id)
+            if parent:
                 epic_slug = _slugify(parent.get("title", parent.get("name", parent_id)))
-            except (json.JSONDecodeError, IndexError):
+            else:
                 epic_slug = _slugify(parent_id)
-    except (json.JSONDecodeError, IndexError):
-        pass
 
     # Format summary block
     files_str = args.files or ""
@@ -1964,14 +1914,10 @@ def cmd_phase_summary(args: argparse.Namespace) -> None:
 
     phases: list[dict] = []
     for epic_id in epic_ids:
-        r = _run(f"{bd} show {epic_id} --json")
         epic_title = epic_id
-        try:
-            data = json.loads(r.stdout)
-            epic = data[0] if isinstance(data, list) else data
+        epic = _fetch_bead(bd, epic_id)
+        if epic:
             epic_title = epic.get("title", epic.get("name", epic_id))
-        except (json.JSONDecodeError, IndexError):
-            pass
 
         r = _run(f"{bd} list --parent {epic_id} --limit {BD_LIST_LIMIT} --json")
         children = []
@@ -2162,12 +2108,7 @@ def cmd_worker_prompt(args: argparse.Namespace) -> None:
     # Fetch bead data
     bead_data = []
     for bid in bead_ids:
-        r = _run(f"{bd_bin} show {bid} --json")
-        try:
-            data = json.loads(r.stdout)
-            bead = data[0] if isinstance(data, list) else data
-        except (json.JSONDecodeError, IndexError):
-            bead = {"id": bid, "title": bid, "description": ""}
+        bead = _fetch_bead(bd_bin, bid) or {"id": bid, "title": bid, "description": ""}
         bead.setdefault("id", bid)
         bead.setdefault("title", bead.get("name", bid))
         bead.setdefault("description", "")
@@ -2180,13 +2121,8 @@ def cmd_worker_prompt(args: argparse.Namespace) -> None:
     if bead_data:
         parent_id = bead_data[0].get("parent", "")
         if parent_id:
-            r = _run(f"{bd_bin} show {parent_id} --json")
-            try:
-                pdata = json.loads(r.stdout)
-                parent = pdata[0] if isinstance(pdata, list) else pdata
-                slug = _slugify(parent.get("title", parent.get("name", parent_id)))
-            except (json.JSONDecodeError, IndexError):
-                slug = _slugify(parent_id)
+            parent = _fetch_bead(bd_bin, parent_id)
+            slug = _slugify(parent.get("title", parent.get("name", parent_id))) if parent else _slugify(parent_id)
             epic_file = ctx / f"epic-{slug}.md"
             if epic_file.exists():
                 epic_context = epic_file.read_text()
@@ -2322,12 +2258,7 @@ Complete each in order — claim, implement, commit, close — before starting t
         parallel_bead_ids = [b.strip() for b in parallel_with.split(",") if b.strip()]
         parallel_files = []
         for pbid in parallel_bead_ids:
-            pr = _run(f"{bd_bin} show {pbid} --json")
-            try:
-                pdata = json.loads(pr.stdout)
-                pbead = pdata[0] if isinstance(pdata, list) else pdata
-            except (json.JSONDecodeError, IndexError):
-                pbead = {}
+            pbead = _fetch_bead(bd_bin, pbid) or {}
             desc = pbead.get("description", "")
             pfiles = _extract_files_from_description(desc)
             for pf in pfiles:
