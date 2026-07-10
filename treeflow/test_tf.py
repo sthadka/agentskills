@@ -3362,3 +3362,185 @@ class TestPhaseCompleteSummaries:
         out = tf(workspace, ["phase-complete", "--epic", "epic-1", "--phase-num", "2"],
                  env={"BD_STUB_RESPONSE": json.dumps(phase_beads)})
         assert out["pass"] is True
+
+
+# ── Notify Auto-Summary Tests ─────────────────────────────────
+
+
+class TestNotifyAutoSummary:
+    def test_auto_generates_summary_from_bead_title(self, workspace, bd_stub):
+        """notify should auto-generate summary from bead title when --summary omitted."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+
+        bead_data = [{"status": "closed", "title": "Fix auth bug"}]
+        out = tf(workspace, ["notify", "rust-1", "bead-abc",
+                              "--context-pct", "50"],
+                 env={"BD_STUB_RESPONSE": json.dumps(bead_data)})
+        assert out["ok"] is True
+        reg = load_registry(workspace)
+        assert reg["workers"]["rust-1"]["summary"] == "Completed: Fix auth bug"
+
+    def test_explicit_summary_takes_precedence(self, workspace, bd_stub):
+        """notify with explicit --summary should use that, not auto-generate."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+
+        bead_data = [{"status": "closed", "title": "Fix auth bug"}]
+        out = tf(workspace, ["notify", "rust-1", "bead-abc",
+                              "--context-pct", "50", "--summary", "Custom summary"],
+                 env={"BD_STUB_RESPONSE": json.dumps(bead_data)})
+        assert out["ok"] is True
+        reg = load_registry(workspace)
+        assert reg["workers"]["rust-1"]["summary"] == "Custom summary"
+
+
+# ── Validate Plan --no-files-check Tests ──────────────────────
+
+
+class TestValidatePlanNoFilesCheck:
+    def test_no_files_check_skips_missing_files_warning(self, workspace):
+        """validate-plan --no-files-check should not warn about missing Files: lines."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## Port feature X from anarlog
+
+            Backlog task — study commit abc123 and apply to sruti.
+
+            ## Port feature Y from anarlog
+
+            Backlog task — study commit def456 and apply to sruti.
+        """))
+        out = tf(workspace, ["validate-plan", str(plan), "--no-files-check"])
+        assert out["ok"] is True
+        assert "errors" not in out or not any("missing Files" in e for e in out.get("errors", []))
+
+    def test_without_flag_warns_about_missing_files(self, workspace):
+        """validate-plan without --no-files-check should warn about missing Files: lines."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## Port feature X from anarlog
+
+            Backlog task — study commit abc123 and apply to sruti.
+        """))
+        out = tf(workspace, ["validate-plan", str(plan)])
+        assert out["ok"] is False
+        assert any("missing Files" in e for e in out.get("errors", []))
+
+
+# ── Worker Prompt --write-file Tests ──────────────────────────
+
+
+class TestWorkerPromptWriteFile:
+    def test_write_file_creates_temp_file(self, workspace, bd_stub):
+        """worker-prompt --write-file should write prompt to a temp file."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+
+        bead_data = [{"id": "bead-1", "title": "Fix bug", "description": "Fix the auth bug\n\nFiles: `src/auth.py`"}]
+        out = tf(workspace, ["worker-prompt", "--beads", "bead-1", "--write-file"],
+                 env={"BD_STUB_RESPONSE": json.dumps(bead_data)})
+        assert out["ok"] is True
+        assert "prompt_file" in out
+        assert "prompt" not in out
+        assert out["beads"] == ["bead-1"]
+
+        # Verify file exists and has content
+        prompt_file = Path(out["prompt_file"])
+        assert prompt_file.exists()
+        content = prompt_file.read_text()
+        assert "Fix bug" in content
+        prompt_file.unlink()
+
+    def test_normal_mode_returns_inline_prompt(self, workspace, bd_stub):
+        """worker-prompt without --write-file should return prompt inline."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+
+        bead_data = [{"id": "bead-1", "title": "Fix bug", "description": "Fix the auth bug\n\nFiles: `src/auth.py`"}]
+        out = tf(workspace, ["worker-prompt", "--beads", "bead-1"],
+                 env={"BD_STUB_RESPONSE": json.dumps(bead_data)})
+        assert out["ok"] is True
+        assert "prompt" in out
+        assert "prompt_file" not in out
+
+
+# ── Infer Files Improved Tests ────────────────────────────────
+
+
+class TestInferFilesImproved:
+    def test_infers_in_filename_references(self, workspace):
+        """_infer_files_from_description should match 'in listen.rs' patterns."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+
+        # Test via conflict-check since it uses _infer_files_from_description
+        from treeflow.tf import _infer_files_from_description
+        desc = "Update the handler in listen.rs to add timeout support"
+        result = _infer_files_from_description(desc)
+        assert "listen.rs" in result
+
+    def test_infers_backtick_paths(self, workspace):
+        """_infer_files_from_description should match backtick-wrapped paths."""
+        from treeflow.tf import _infer_files_from_description
+        desc = "Modify `src/commands/daemon.rs` to add the new flag"
+        result = _infer_files_from_description(desc)
+        assert "src/commands/daemon.rs" in result
+
+    def test_infers_in_path_with_slash(self, workspace):
+        """_infer_files_from_description should match 'in store/mod.rs' patterns."""
+        from treeflow.tf import _infer_files_from_description
+        desc = "Add the new method in store/mod.rs"
+        result = _infer_files_from_description(desc)
+        assert "store/mod.rs" in result
+
+
+# ── Create Wrapper Tests ──────────────────────────────────────
+
+
+class TestCreate:
+    def test_create_parses_bd_output(self, workspace, bd_stub):
+        """tf.py create should parse bd create -f output and return clean JSON."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        plan = workspace / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## Task one
+
+            Description for task one
+
+            ## Task two
+
+            Description for task two
+        """))
+
+        created = [{"id": "bead-1", "title": "Task one"}, {"id": "bead-2", "title": "Task two"}]
+        out = tf(workspace, ["create", str(plan)],
+                 env={"BD_STUB_RESPONSE": json.dumps(created)})
+        assert out["ok"] is True
+        assert out["created"] == 2
+        assert out["expected"] == 2
+        assert "bead-1" in out["ids"]
+        assert "bead-2" in out["ids"]
+
+    def test_create_fallback_on_bad_json(self, workspace, bd_stub):
+        """tf.py create should fall back to bd list when bd create JSON is unparseable."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        plan = workspace / "plan.md"
+        plan.write_text(textwrap.dedent("""\
+            ## Task one
+
+            Description
+        """))
+
+        # Simulate bd create returning garbage, then bd list returning valid JSON
+        # The stub returns the same response for all calls, so we use a valid list
+        listed = [{"id": "bead-x", "status": "open"}]
+        out = tf(workspace, ["create", str(plan)],
+                 env={"BD_STUB_RESPONSE": json.dumps(listed)})
+        assert out["ok"] is True
+
+    def test_create_file_not_found(self, workspace, bd_stub):
+        """tf.py create should fail gracefully for missing files."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["create", "/nonexistent/plan.md"])
+        assert out["ok"] is False
+        assert "not found" in out["error"]

@@ -36,6 +36,23 @@ Your context window is the most precious resource. Minimize what stays in contex
 - **Context files are your external memory** — write important decisions to `.beads/context-{plan-name}/` files, then forget the details. You can re-read if needed.
 - If you need details about a completed worker, query `tf.py registry` or `bd show` rather than keeping full histories in context.
 
+## Quick Paths
+
+### Create tasks from a list
+1. Write plan file (`## Title` per task, description body)
+2. `python3 ~/.claude/skills/treeflow/tf.py validate-plan plan.md` (use `--no-files-check` for backlog plans without target files)
+3. `python3 ~/.claude/skills/treeflow/tf.py create plan.md`
+
+### Triage existing beads
+1. `bd list --json --limit 100 | jq -c`
+2. `bd update <id> --claim` / `bd close <id>` / `bd update <id> --priority 0`
+
+### Full orchestration
+Skip to [Entry Protocol](#entry-protocol) below → [Orchestration Loop](#orchestration-loop).
+
+### Scope Detection
+If the user's request is purely about creating, listing, updating, or closing beads — and does NOT mention implementing, building, or dispatching work — use the Quick Paths above. Do not initialize `tf.py`, worker context, or the full orchestration loop. Use `bd` commands directly.
+
 ## Entry Protocol
 
 ### Check Worker Reuse Support
@@ -115,7 +132,8 @@ State management commands — all output compact JSON:
 # Orchestrator commands
 python3 .beads/tf.py init {plan-name} --bd-path "$(which bd 2>/dev/null || echo bd)" [--worker-model MODEL]  # Create context dir + registry + gitignore
 python3 .beads/tf.py dispatch {worker} {bead-id}[,bead-id2] --skill {domain} [--output-file path]  # Record dispatch
-python3 .beads/tf.py notify {worker} {bead} --context-pct N --summary "..." [--skill domain] [--agent-id ID] [--files "f1,f2"] [--gotcha "..."]  # Record completion
+python3 .beads/tf.py notify {worker} {bead} --context-pct N [--summary "..."] [--skill domain] [--agent-id ID] [--files "f1,f2"] [--gotcha "..."]  # Record completion (summary auto-generated from bead title if omitted)
+python3 .beads/tf.py batch-notify --pairs "w1:bead1,w2:bead2" --context-pct N [--summary "..."] [--files "f1,f2"] [--gotcha "..."]  # Batch completion for multiple worker:bead pairs
 python3 .beads/tf.py phase-gate {epic-id}                # Check phase complete
 python3 .beads/tf.py smoke-test --build-cmd "cmd" --beads a,b  # Build + wiring check
 python3 .beads/tf.py conflict-check --beads a,b,c                     # File-conflict analysis for parallelism safety
@@ -132,8 +150,10 @@ python3 .beads/tf.py recover                                           # Find or
 python3 .beads/tf.py ad-hoc --name {name} --worker {worker} [--skill domain]  # Register informal task for stall detection
 python3 .beads/tf.py dep {blocker} {blocked}                           # Add dep idempotently (UNIQUE errors = success)
 python3 .beads/tf.py import-deps {file} [--validate]                   # Bulk import deps from "A" blocks "B" format
-python3 .beads/tf.py validate-plan {file}                              # Validate plan md for bd create -f
-python3 .beads/tf.py worker-prompt --beads {id}[,id2,id3] [--reuse --prior-bead {prev}] [--parallel-with bead1,bead2]  # Assemble worker prompt
+python3 .beads/tf.py validate-plan {file} [--no-files-check]             # Validate plan md for bd create -f (--no-files-check: skip missing Files: warning for backlog-style plans)
+python3 .beads/tf.py create {file}                                       # Wrapper for bd create -f with clean JSON output
+python3 .beads/tf.py worker-prompt --beads {id}[,id2,id3] [--reuse --prior-bead {prev}] [--parallel-with bead1,bead2] [--prompt-only] [--write-file]  # Assemble worker prompt
+# --prompt-only: print raw prompt to stdout (no JSON). --write-file: write prompt to temp file, return {"prompt_file": path} instead of inline prompt
 python3 .beads/tf.py update-context --bead {id} --worker {name} --summary "..." --files "..." [--gotcha "..."]  # Append to context
 python3 .beads/tf.py phase-complete --epic {id} [--build-cmd "cmd"] [--phase-num N]  # Gate + smoke test + summary
 python3 .beads/tf.py bd-path                                           # Print resolved bd binary path
@@ -206,7 +226,7 @@ After planning:
    ```
    The `--bd-path` flag stores the absolute path in `registry.json` so workers can find `bd` without needing the orchestrator's shell PATH.
 3. Write `worker-context.md` from [WORKER-CONTEXT-TEMPLATE.md](WORKER-CONTEXT-TEMPLATE.md) — fill in all sections, skip anything in CLAUDE.md. The **Conventions** and **Security** sections are mandatory — these are the cross-cutting behaviors that silently diverge when left to worker discretion (logging standard, test requirements, input validation rules).
-4. Add skill routing: `python3 .beads/tf.py routing --add "pattern:domain:prefix"` for each file-domain mapping
+4. *(Optional)* Add skill routing if you have >10 beads across many domains: `python3 .beads/tf.py routing --add "pattern:domain:prefix"`. For smaller workloads, manual `--skill` on dispatch is simpler.
 5. Copy `## Cross-worker Invariants` from `plan.md` into `worker-context.md` and `CLAUDE.md`. If the plan has no invariants section, prompt the user: "Are there cross-cutting contracts that every worker must know? (e.g., 'all DB writes must update the FTS index', 'all file writes must be atomic')"
 
 ## Orchestration Loop
@@ -255,7 +275,7 @@ Additional rules:
 
 ### 3. Select or Reuse Workers
 
-**This step is MANDATORY before every spawn.** Do NOT proceed to step 5 (Dispatch) without running sync first. Skipping this is the #1 cause of worker bloat.
+**Recommended before first dispatch and after anomalies** (stalled workers, SendMessage failures, post-compaction). During normal flow (completion → dispatch next), the `notify` response already provides worker state — sync is optional. However, when starting a session or recovering from errors, sync prevents worker bloat.
 
 ```bash
 python3 .beads/tf.py sync --ready-count {N}
@@ -307,6 +327,13 @@ python3 .beads/tf.py worker-prompt --beads {bead-id} --reuse --prior-bead {prev-
 
 Returns `{"ok": true, "prompt": "...", "model": "sonnet"|"", "beads": ["id1"]}`. Use `prompt` as the worker prompt and `model` (if non-empty) as the Agent tool `model:` parameter.
 
+**Reduce orchestrator context usage** — call `worker-prompt` once per worker. Use `--write-file` to keep the full prompt text (~2-4k tokens) out of orchestrator context:
+```bash
+python3 .beads/tf.py worker-prompt --beads {id} --write-file
+# Returns {"ok": true, "prompt_file": "/tmp/tf-prompt-xxx.md", "model": "", "beads": ["id"]}
+# Read the file only when passing to Agent tool
+```
+
 **Only model aliases work:** `"sonnet"`, `"opus"`, `"haiku"`. Full model IDs (e.g., `"claude-sonnet-4-6"`) are rejected by the Agent tool.
 
 ### 5. Dispatch Workers
@@ -349,11 +376,15 @@ When a `<task-notification>` arrives:
    ```
    The `--agent-id` stores the agent's runtime ID for more reliable SendMessage reuse.
 3. **Check response fields**:
-   - `late: true` → late notification for an already-processed bead — no further action needed
+   - `late: true` → duplicate/late notification for an already-processed bead — skip, no action needed. `<task-notification>` fires multiple times per agent (on compaction, re-render, etc.) — this is normal, not an error.
    - `bead_status` → included automatically, no separate `bd show` needed:
      - `closed` → normal flow
      - `blocked` → worker hit a question: surface to user, wait, SendMessage to resume
      - `in_progress` → abnormal: worker finished without closing. SendMessage to worker to retry close
+4. **For batched workers** (2-3 beads per worker), use `batch-notify` instead of separate `notify` calls:
+   ```bash
+   python3 .beads/tf.py batch-notify --pairs "{worker}:{bead1},{worker}:{bead2}" --context-pct {N} --files "{files}" --summary "{summary}"
+   ```
 5. **Update context** is handled by `notify --files` above. Use `tf.py update-context` only for manual orchestrator notes outside of notification flow.
 6. **Discard the full `<result>` content** — it's now captured in registry and context files
 7. **Ignore transient LSP diagnostics** — during active worker runs, `go.sum` missing entries, `could not import` errors, build-tag exclusion warnings, and `undefined: <symbol>` in partially-written files are almost always transient. Do not act on these until the responsible worker completes.
@@ -430,6 +461,8 @@ git remote -v | grep -q push && git push || echo "No remote configured, skipping
 
 Also ensure all context files are saved. (`bd sync` is deprecated — do not use.)
 
+**If workers were dispatched**, run the project's build/test command (e.g., `make check`, `cargo test`, `npm test`) to verify combined changes compile and pass. If it fails, dispatch a fix-up worker before pushing.
+
 ## Context Compression Recovery (Reorientation Protocol)
 
 After the system compresses your context, your in-memory state is lost. Run these steps in order before resuming orchestration:
@@ -475,7 +508,7 @@ The registry is file-based and survives compression — trust it over any summar
 - Spawning workers without `name` parameter (can't reuse unnamed workers)
 - Spawning more workers than independent ready tasks
 - Killing workers — let them complete or self-report
-- **Spawning fresh workers without running `tf.py sync` first** — sync auto-retires stale workers and shows available reuse candidates
+- **Spawning fresh workers without running `tf.py sync` at session start** — sync auto-retires stale workers and shows available reuse candidates. Required before first dispatch and after anomalies; optional during normal completion→dispatch flow
 - Reusing workers when remaining context is too small (sync handles this automatically)
 - Spawning N workers for N near-identical small tasks (batch into one worker)
 

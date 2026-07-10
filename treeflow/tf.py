@@ -640,6 +640,14 @@ def cmd_notify(args: argparse.Namespace) -> None:
     except (json.JSONDecodeError, IndexError):
         bead = {}
 
+    # Auto-generate summary from bead title if --summary was omitted
+    if not args.summary and isinstance(bead, dict):
+        title = bead.get("title", bead.get("name", ""))
+        if title:
+            args.summary = f"Completed: {title}"
+            worker["summary"] = args.summary[:200]
+            _save_registry(reg, rp)
+
     # Auto-close bead if worker didn't call worker-close
     if result["bead_status"] == "in_progress":
         cr = _run(f'{bd} close {args.bead_id} --reason "auto-closed on worker notification" --force --json')
@@ -948,12 +956,18 @@ def _extract_files_detailed(desc: str) -> dict[str, list[str]]:
 
 def _infer_files_from_description(desc: str) -> list[str]:
     """Fallback: infer file paths from description text when no Files: line exists."""
-    # Match backtick-wrapped paths and bare paths with extensions
     paths: list[str] = []
+    # Match backtick-wrapped paths with extensions (e.g., `src/foo/bar.rs`)
     for m in re.finditer(r"`([a-zA-Z0-9_./-]+\.[a-zA-Z0-9]+)`", desc):
         p = m.group(1)
         if "/" in p and not p.startswith("http"):
             paths.append(p)
+    # Match "in <filename>" references (e.g., "in listen.rs", "in store/mod.rs")
+    for m in re.finditer(r"\bin\s+`?([a-zA-Z0-9_/-]+\.[a-zA-Z]{1,10})`?", desc):
+        p = m.group(1)
+        if not p.startswith("http"):
+            paths.append(p)
+    # Match bare paths with slashes and extensions
     if not paths:
         for m in re.finditer(r"(?<!\w)([a-zA-Z0-9_]+(?:/[a-zA-Z0-9_.]+)+\.[a-zA-Z]{1,10})(?!\w)", desc):
             paths.append(m.group(1))
@@ -1178,6 +1192,53 @@ def cmd_close(args: argparse.Namespace) -> None:
     except (json.JSONDecodeError, IndexError):
         pass
     _out({"ok": True, "id": args.bead_id, "status": status})
+
+
+def cmd_create(args: argparse.Namespace) -> None:
+    """Wrapper for bd create -f with clean JSON output.
+
+    Handles the common issue where bd create --json output is truncated or
+    contains non-JSON prefixes that break jq parsing. Falls back to bd list
+    to verify creation count if JSON parsing fails.
+    """
+    plan_path = Path(args.file)
+    if not plan_path.exists():
+        _out({"ok": False, "error": f"file not found: {args.file}"})
+        return
+
+    rp = _registry_path()
+    bd = _bd(rp)
+
+    # Count expected issues from plan file (## headers)
+    content = plan_path.read_text()
+    expected = len(re.findall(r"^## .+", content, re.MULTILINE))
+
+    # Run bd create -f
+    file_escaped = shlex.quote(str(plan_path))
+    r = _run(f"{bd} create -f {file_escaped} --json")
+    if r.returncode != 0:
+        _out({"ok": False, "error": f"bd create failed: {r.stderr.strip()[:300]}"})
+        return
+
+    # Try to parse the JSON output
+    created = _parse_bd_json(r.stdout)
+    if created:
+        ids = [c.get("id", c.get("name", "")) for c in created if isinstance(c, dict)]
+        _out({"ok": True, "created": len(ids), "expected": expected, "ids": ids})
+        return
+
+    # Fallback: bd create JSON was unparseable — verify via bd list
+    r2 = _run(f"{bd} list --status=open --limit {BD_LIST_LIMIT} --json")
+    fallback = _parse_bd_json(r2.stdout)
+    count = len(fallback) if fallback else 0
+    _out({
+        "ok": True,
+        "created": count,
+        "expected": expected,
+        "ids": [b.get("id", "") for b in fallback if isinstance(b, dict)],
+        "fallback": True,
+        "note": "bd create JSON was unparseable — count from bd list"
+    })
 
 
 def _parse_bd_json(stdout: str) -> list:
@@ -1405,12 +1466,14 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
 
     # Check that non-epic issues have a Files: line
     missing_files = []
-    for idx, iss in enumerate(issues):
-        if idx in epic_indices:
-            continue
-        files = _extract_files_from_description(iss.get("body", ""))
-        if not files:
-            missing_files.append(iss["title"])
+    no_files_check = getattr(args, "no_files_check", False)
+    if not no_files_check:
+        for idx, iss in enumerate(issues):
+            if idx in epic_indices:
+                continue
+            files = _extract_files_from_description(iss.get("body", ""))
+            if not files:
+                missing_files.append(iss["title"])
 
     # Check that producer tasks name their consumer
     orphan_packages = []
@@ -2083,6 +2146,15 @@ Complete each in order — claim, implement, commit, close — before starting t
         return
 
     model = reg.get("worker_model", "")
+
+    if getattr(args, "write_file", False):
+        import tempfile
+        fd, path = tempfile.mkstemp(prefix="tf-prompt-", suffix=".md")
+        with os.fdopen(fd, "w") as f:
+            f.write(prompt)
+        _out({"ok": True, "prompt_file": path, "model": model, "beads": bead_ids})
+        return
+
     _out({"ok": True, "prompt": prompt, "model": model, "beads": bead_ids})
 
 
@@ -2458,10 +2530,15 @@ def main() -> None:
     s.add_argument("bead_id")
     s.add_argument("--reason", default="completed")
 
+    # create (bd create -f wrapper with clean JSON)
+    s = sub.add_parser("create")
+    s.add_argument("file")
+
     # validate-plan
     s = sub.add_parser("validate-plan")
     s.add_argument("file")
     s.add_argument("--check-parallelism", action="store_true", dest="check_parallelism")
+    s.add_argument("--no-files-check", action="store_true", dest="no_files_check")
 
     # wire-plan
     s = sub.add_parser("wire-plan")
@@ -2492,6 +2569,7 @@ def main() -> None:
     s.add_argument("--reuse", action="store_true")
     s.add_argument("--prior-bead", default="", dest="prior_bead")
     s.add_argument("--prompt-only", action="store_true", dest="prompt_only")
+    s.add_argument("--write-file", action="store_true", dest="write_file")
     s.add_argument("--parallel-with", default="", dest="parallel_with")
 
     args = p.parse_args()
@@ -2526,6 +2604,7 @@ def main() -> None:
         "dep": cmd_dep,
         "import-deps": cmd_import_deps,
         "close": cmd_close,
+        "create": cmd_create,
         "validate-plan": cmd_validate_plan,
         "wire-plan": cmd_wire_plan,
         "update-context": cmd_update_context,
