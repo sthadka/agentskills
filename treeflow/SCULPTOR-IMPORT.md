@@ -106,6 +106,9 @@ bd create -f .beads/plan.md --json
 
 Then wire dependencies. **Preferred: inline deps in plan.md** — add a `### Dependencies` section per task with references like `blocks: 2.1, 2.2`. Then use `tf.py wire-plan` to resolve and apply all deps from the plan structure:
 ```bash
+# If tf.py create was used, --ids is auto-resolved from created.json:
+python3 .beads/tf.py wire-plan .beads/plan.md
+# Or specify explicitly:
 python3 .beads/tf.py wire-plan .beads/plan.md --ids created.json
 ```
 

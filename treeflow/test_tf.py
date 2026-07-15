@@ -517,16 +517,28 @@ class TestNotify:
         reg = load_registry(workspace)
         assert len(reg["workers"]["rust-1"]["summary"]) == 200
 
-    def test_auto_closes_in_progress_bead(self, workspace, bd_stub):
-        """Notify should auto-close beads still in_progress when worker completes."""
+    def test_no_auto_close_without_closed_self(self, workspace, bd_stub):
+        """Notify should not auto-close in_progress beads when worker didn't call worker-close."""
         tf(workspace, ["init", "test", "--bd-path", bd_stub])
         tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
         bead_resp = json.dumps({"id": "bead-abc", "status": "in_progress"})
         out = tf(workspace, ["notify", "rust-1", "bead-abc", "--context-pct", "55"],
                  env={"BD_STUB_RESPONSE": bead_resp})
         assert out["ok"] is True
-        assert out.get("auto_closed") is True
-        assert out["bead_status"] == "closed"
+        assert out.get("auto_closed") is False
+        assert "action_needed" in out
+
+    def test_auto_closes_with_closed_self(self, workspace, bd_stub):
+        """Notify should auto-close in_progress beads when worker called worker-close."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+        reg = load_registry(workspace)
+        reg["workers"]["rust-1"]["closed_self"] = True
+        save_registry(workspace, reg)
+        bead_resp = json.dumps({"id": "bead-abc", "status": "in_progress"})
+        out = tf(workspace, ["notify", "rust-1", "bead-abc", "--context-pct", "55"],
+                 env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
 
     def test_no_auto_close_when_already_closed(self, workspace, bd_stub):
         """Notify should not try to close already-closed beads."""
@@ -3864,3 +3876,267 @@ class TestShellInjectionClose:
         assert dangerous in reason_args, (
             f"Dangerous string {dangerous!r} not found literally in bd args: {reason_args}"
         )
+
+
+# ── Ready Supplement Filtering Tests ────────────────────────────
+
+
+class TestReadySupplementFiltering:
+    """Verify that cmd_ready supplement excludes beads with open blocking deps."""
+
+    def _make_routing_stub(self, workspace, ready_resp, list_resp, show_resps=None):
+        """Create a bd stub that returns different responses based on subcommand."""
+        show_resps = show_resps or {}
+        stub = workspace / ".beads" / "bd-routing-stub"
+        show_json = json.dumps(show_resps)
+        stub.write_text(textwrap.dedent(f"""\
+            #!/usr/bin/env python3
+            import json, sys, os
+            args = sys.argv[1:]
+            if "ready" in args:
+                print('''{json.dumps(ready_resp)}''')
+            elif "list" in args:
+                print('''{json.dumps(list_resp)}''')
+            elif "show" in args:
+                show_map = json.loads('''{show_json}''')
+                bead_id = [a for a in args if not a.startswith("-") and a != "show"]
+                if bead_id and bead_id[0] in show_map:
+                    print(json.dumps(show_map[bead_id[0]]))
+                else:
+                    print('{{}}')
+            else:
+                print('{{}}')
+        """))
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        return str(stub)
+
+    def test_excludes_blocked_beads_from_supplement(self, workspace):
+        """Beads with open blocking deps should not appear in ready output."""
+        ready_beads = []
+        list_beads = [
+            {"id": "t1", "type": "task", "title": "Task 1"},
+            {"id": "t2", "type": "task", "title": "Task 2"},
+        ]
+        show_resps = {
+            "t1": [{"id": "t1", "type": "task", "status": "open", "dependencies": [
+                {"dependency_type": "blocks", "status": "open", "depends_on": "t0"}
+            ]}],
+            "t2": [{"id": "t2", "type": "task", "status": "open", "dependencies": []}],
+        }
+        stub = self._make_routing_stub(workspace, ready_beads, list_beads, show_resps)
+        tf(workspace, ["init", "test", "--bd-path", stub])
+
+        out = tf(workspace, ["ready"])
+        assert out["ok"] is True
+        ids = [b["id"] for b in out["ready"]]
+        assert "t1" not in ids, "Blocked bead t1 should be excluded"
+        assert "t2" in ids, "Unblocked bead t2 should be included"
+        assert out["supplemented"] == 1
+
+    def test_includes_beads_with_closed_blockers(self, workspace):
+        """Beads whose blocking deps are all closed should appear in ready output."""
+        ready_beads = []
+        list_beads = [
+            {"id": "t1", "type": "task", "title": "Task 1"},
+        ]
+        show_resps = {
+            "t1": [{"id": "t1", "type": "task", "status": "open", "dependencies": [
+                {"dependency_type": "blocks", "status": "closed", "depends_on": "t0"}
+            ]}],
+        }
+        stub = self._make_routing_stub(workspace, ready_beads, list_beads, show_resps)
+        tf(workspace, ["init", "test", "--bd-path", stub])
+
+        out = tf(workspace, ["ready"])
+        assert out["ok"] is True
+        ids = [b["id"] for b in out["ready"]]
+        assert "t1" in ids
+
+    def test_skips_beads_already_in_ready(self, workspace):
+        """Beads already in bd ready output should not be re-checked or duplicated."""
+        ready_beads = [
+            {"id": "t1", "type": "task", "title": "Task 1"},
+        ]
+        list_beads = [
+            {"id": "t1", "type": "task", "title": "Task 1"},
+        ]
+        stub = self._make_routing_stub(workspace, ready_beads, list_beads)
+        tf(workspace, ["init", "test", "--bd-path", stub])
+
+        out = tf(workspace, ["ready"])
+        assert out["ok"] is True
+        ids = [b["id"] for b in out["ready"]]
+        assert ids.count("t1") == 1
+        assert out["supplemented"] == 0
+
+
+# ── Notify Auto-Close Tests ────────────────────────────────────
+
+
+class TestNotifyAutoClose:
+    """Verify notify only auto-closes beads when worker called worker-close."""
+
+    def test_auto_closes_when_closed_self(self, workspace, bd_stub):
+        """When worker called worker-close (closed_self=True), notify should auto-close."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+
+        reg = load_registry(workspace)
+        reg["workers"]["rust-1"]["closed_self"] = True
+        save_registry(workspace, reg)
+
+        bead_resp = [{"id": "bead-abc", "status": "in_progress", "title": "Test"}]
+        out = tf(workspace, ["notify", "rust-1", "bead-abc", "--context-pct", "50"],
+                 env={"BD_STUB_RESPONSE": json.dumps(bead_resp)})
+        assert out["ok"] is True
+
+    def test_no_auto_close_without_closed_self(self, workspace, bd_stub):
+        """When worker did NOT call worker-close, notify should not auto-close."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+
+        bead_resp = [{"id": "bead-abc", "status": "in_progress", "title": "Test"}]
+        out = tf(workspace, ["notify", "rust-1", "bead-abc", "--context-pct", "50"],
+                 env={"BD_STUB_RESPONSE": json.dumps(bead_resp)})
+        assert out["ok"] is True
+        assert out.get("auto_closed") is False
+        assert "action_needed" in out
+
+
+# ── Stall Detection with Expected Mins ──────────────────────────
+
+
+class TestStallExpectedMins:
+    """Verify stall detection with expected_completion_at before deadline."""
+
+    def test_stalled_before_deadline_with_long_silence(self, workspace):
+        """Worker silent for 2x threshold should be stalled even before expected deadline."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+
+        reg = load_registry(workspace)
+        reg["workers"]["rust-1"]["last_heartbeat"] = ts_minutes_ago(45)
+        reg["workers"]["rust-1"]["expected_completion_at"] = ts_minutes_from_now(30)
+        save_registry(workspace, reg)
+
+        out = tf(workspace, ["stalled", "--threshold-mins", "20"])
+        assert len(out["stalled"]) == 1, "Worker silent 45min with 20min threshold (2x=40) should be stalled"
+
+    def test_not_stalled_before_deadline_with_short_silence(self, workspace):
+        """Worker silent for less than 2x threshold should not be stalled before deadline."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+
+        reg = load_registry(workspace)
+        reg["workers"]["rust-1"]["last_heartbeat"] = ts_minutes_ago(30)
+        reg["workers"]["rust-1"]["expected_completion_at"] = ts_minutes_from_now(30)
+        save_registry(workspace, reg)
+
+        out = tf(workspace, ["stalled", "--threshold-mins", "20"])
+        assert len(out["stalled"]) == 0, "Worker silent 30min with 20min threshold (2x=40) should not be stalled"
+
+
+# ── Validate-Plan Init Warning Tests ────────────────────────────
+
+
+class TestValidatePlanInitWarning:
+    """Verify validate-plan warns when tf.py init hasn't been run."""
+
+    def test_warns_when_no_active_plan(self, workspace):
+        """validate-plan should warn if .beads/active-plan doesn't exist."""
+        plan = workspace / ".beads" / "plan.md"
+        plan.write_text("## Task 1\n\n### Type\ntask\n\n### Description\nDo something\nFiles: foo.py\n")
+
+        out = tf(workspace, ["validate-plan", str(plan)])
+        assert out["ok"] is True
+        assert any("init has not been run" in w for w in out.get("warnings", [])), \
+            f"Expected init warning, got: {out.get('warnings', [])}"
+
+    def test_no_warning_after_init(self, workspace):
+        """validate-plan should not warn about init after tf.py init has been run."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        plan = workspace / ".beads" / "plan.md"
+        plan.write_text("## Task 1\n\n### Type\ntask\n\n### Description\nDo something\nFiles: foo.py\n")
+
+        out = tf(workspace, ["validate-plan", str(plan)])
+        assert out["ok"] is True
+        for w in out.get("warnings", []):
+            assert "init has not been run" not in w
+
+
+# ── Worker-Close File Validation Tests ──────────────────────────
+
+
+class TestWorkerCloseFileValidation:
+    """Verify worker-close warns when target files were not modified."""
+
+    def _make_stateful_stub(self, workspace):
+        """Create a bd stub that returns in_progress on first show, closed on subsequent."""
+        stub = workspace / ".beads" / "bd-stateful-stub"
+        stub.write_text(textwrap.dedent("""\
+            #!/usr/bin/env python3
+            import json, sys, os
+            args = sys.argv[1:]
+            state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bd-state.json")
+            state = {}
+            if os.path.exists(state_file):
+                with open(state_file) as f:
+                    state = json.load(f)
+            if "close" in args:
+                state["closed"] = True
+                with open(state_file, "w") as f:
+                    json.dump(state, f)
+                print(json.dumps([{"id": "bead-abc", "status": "closed"}]))
+            elif "show" in args:
+                if state.get("closed"):
+                    print(json.dumps([{"id": "bead-abc", "status": "closed", "title": "Test"}]))
+                else:
+                    print(json.dumps([{"id": "bead-abc", "status": "in_progress", "title": "Test"}]))
+            elif "update" in args:
+                print(json.dumps({"ok": True}))
+            else:
+                print("{}")
+        """))
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        return str(stub)
+
+    def _setup(self, workspace):
+        stub = self._make_stateful_stub(workspace)
+        tf(workspace, ["init", "test", "--bd-path", stub])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: init", "-q"], cwd=workspace, check=True)
+        (workspace / "dummy.txt").write_text("dummy")
+        subprocess.run(["git", "add", "dummy.txt"], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: add dummy"], cwd=workspace, check=True)
+
+    def test_warns_when_no_target_files_modified(self, workspace):
+        """worker-close should warn when none of the declared target files were changed."""
+        self._setup(workspace)
+
+        out = tf(workspace, [
+            "worker-close", "bead-abc",
+            "--context-pct", "50",
+            "--files", "src/foo.py,src/bar.py",
+            "--summary", "Did nothing. AC: n/a",
+        ], env={"CLAUDE_AGENT_NAME": "rust-1"})
+        assert out["ok"] is True, f"worker-close failed: {out}"
+        warnings = out.get("warnings", [])
+        assert any("no target files were modified" in w for w in warnings), \
+            f"Expected file modification warning, got: {warnings}"
+
+    def test_no_warning_with_force(self, workspace):
+        """worker-close --force should skip the file modification check."""
+        self._setup(workspace)
+
+        out = tf(workspace, [
+            "worker-close", "bead-abc",
+            "--context-pct", "50",
+            "--files", "src/foo.py",
+            "--summary", "Intentionally no changes. AC: verified",
+            "--force",
+        ], env={"CLAUDE_AGENT_NAME": "rust-1"})
+        assert out["ok"] is True, f"worker-close --force failed: {out}"
+        warnings = out.get("warnings", [])
+        assert not any("no target files were modified" in w for w in warnings), \
+            f"No file modification warning expected with --force, got: {warnings}"

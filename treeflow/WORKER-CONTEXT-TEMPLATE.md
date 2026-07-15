@@ -49,22 +49,13 @@
 
 {Add project-specific gotchas here}
 
-### Cross-Platform Build Failures
+### Build Failures
 
-If the build command fails due to platform-specific dependencies (e.g., macOS frameworks on Linux, Windows-only APIs), use the most specific verification available:
-- Per-package check: `cargo check -p <pkg>`, `go build ./pkg/...`
-- Format check: `cargo fmt --check`, `gofmt -l .`
-- Lint: `cargo clippy -- -D warnings` (per-crate), `golangci-lint run ./pkg/...`
-- Note the limitation in your worker-close summary
+If the build command fails due to platform-specific issues, use the most targeted verification command available for your language/framework, and note the limitation in your worker-close summary.
 
-### Transient LSP Diagnostics During Active Workers
+### Transient Diagnostics
 
-The following LSP diagnostics are expected during worker runs and should be ignored until the worker completes:
-- `go.sum` missing entries — self-resolves after `go get`
-- `could not import` errors — self-resolves after dependency fetch
-- Build tag exclusion warnings (`No packages found for open file`) — expected with `//go:build` tags
-- `undefined: <symbol>` in partially-written files — self-resolves when worker finishes writing
-- Cross-package import errors in monorepos — build is ground truth, not LSP
+LSP diagnostics during active worker runs (unresolved imports, undefined symbols in partially-written files) are almost always transient. Use the build tool as ground truth, not LSP. Do not act on these until the responsible worker completes.
 
 - Workers never call `bd` directly — all bead operations go through `tf.py` subcommands (`claim`, `block`, `discover`, `worker-close`)
 - **Never run `git stash -u` or `git stash --include-untracked`** — this stashes `.beads/context-*/` files and breaks orchestration state. Use `git stash` (tracked files only) or `git stash push <specific-files>` instead.

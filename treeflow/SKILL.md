@@ -164,7 +164,7 @@ python3 .beads/tf.py claim {bead_id} [--expected-mins N] # Claim task (with opti
 python3 .beads/tf.py block {bead_id} --question "..." [--context "..."]  # Mark blocked + create question
 python3 .beads/tf.py discover {bead_id} --title "..." [--description "..."]  # Create discovered work
 python3 .beads/tf.py heartbeat {bead_id} [--note "..."]  # Explicit heartbeat for long-running ops
-python3 .beads/tf.py worker-close {bead_id} --context-pct N --files f1,f2 --summary "..."  # Validate + close
+python3 .beads/tf.py worker-close {bead_id} --context-pct N --files f1,f2 --summary "..." [--force]  # Validate + close (--force skips target file modification check)
 ```
 
 ## Markdown File Format
@@ -285,6 +285,7 @@ Additional rules:
 4. Batch trivial related tasks into one worker assignment
 5. **Default to batching** when 3+ ready tasks share a skill domain and are small. One worker with sequential sub-tasks is almost always better than N separate spawns. Only split if total estimated context would exceed ~60%.
 6. **Package-level conflicts:** `conflict-check` detects file-level overlaps but not same-package naming collisions (e.g., two workers creating `categoryLabel()` in different files of the same Go package). When parallelizing within the same package, specify shared helper names in each bead description, or serialize the tasks.
+7. **Accumulator files** (CLI entry points, routing tables, config registries) that multiple features write to are serialization bottlenecks even when the logical changes don't overlap. When two beads both add commands/routes/config to the same file, serialize them.
 
 ### 3. Select or Reuse Workers
 
@@ -370,6 +371,12 @@ Dispatch multiple independent workers in a **single message** for parallelism.
 python3 .beads/tf.py dispatch {worker-name} {bead-id} --skill {domain} [--output-file {path}]
 ```
 
+### Waiting for Workers
+
+After dispatching, DO NOT poll `git log`, `git status`, or `wc -l` in a loop. You will receive `<task-notification>` events automatically when workers complete. Only run `tf.py stalled --threshold-mins 20` every 5-10 minutes as a safety net. Between dispatches, use the idle time to prepare prompts for the next wave.
+
+When `late: true` appears in a `tf.py notify` response, skip entirely — no action, no logging, no context update.
+
 ### 6. Process Completions
 
 When a `<task-notification>` arrives:
@@ -385,7 +392,7 @@ When a `<task-notification>` arrives:
    - `bead_status` → included automatically, no separate `bd show` needed:
      - `closed` → normal flow
      - `blocked` → worker hit a question: surface to user, wait, SendMessage to resume
-     - `in_progress` → abnormal: worker finished without closing. SendMessage to worker to retry close
+     - `in_progress` + `auto_closed: false` → worker finished without calling `worker-close`. Follow the Worker Failure Recovery steps below
 4. **For batched workers** (2-3 beads per worker), use `batch-notify` instead of separate `notify` calls:
    ```bash
    python3 .beads/tf.py batch-notify --pairs "{worker}:{bead1},{worker}:{bead2}" --context-pct {N} --files "{files}" --summary "{summary}"
@@ -433,6 +440,15 @@ bd show <bead_id> --json | jq -c '.[0].status'
 ```
 
 **Do NOT kill workers** — let them complete or self-report. The stall detection is advisory; the orchestrator decides whether to wait longer or retire.
+
+### 8. Worker Failure Recovery
+
+When `tf.py notify` returns `auto_closed: false` and `action_needed`, the worker completed without calling `worker-close`. This usually means it failed to produce output.
+
+1. **Check target files:** `wc -l` on expected outputs from the bead description
+2. **If files are stubs or missing:** `bd update <id> --status open`, `tf.py retire <worker>`, redispatch with a more explicit prompt
+3. **If files written but uncommitted:** commit them manually, then call `tf.py notify` with `--force` on the `bd close` to complete the bead
+4. **If tests fail:** SendMessage to worker to fix (if addressable), else retire and redispatch
 
 ## Worker-to-User Communication
 

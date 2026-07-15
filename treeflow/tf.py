@@ -201,15 +201,14 @@ def _is_stalled(worker: dict, threshold_mins: int = 20) -> bool:
     now = datetime.now(timezone.utc)
     # If worker has a deadline, check both deadline AND silence — a worker past deadline
     # but still heartbeating is slow, not stalled.
-    expected = worker.get("expected_completion_at")
-    if expected and now > _parse_ts(expected):
-        last_dt = _parse_ts(last_hb)
-        elapsed = (now - last_dt).total_seconds() / 60
-        return elapsed > threshold_mins
-    elif expected:
-        return False
     last_dt = _parse_ts(last_hb)
     elapsed = (now - last_dt).total_seconds() / 60
+    expected = worker.get("expected_completion_at")
+    if expected and now > _parse_ts(expected):
+        return elapsed > threshold_mins
+    elif expected:
+        # Deadline not yet passed, but flag if silent for 2x threshold
+        return elapsed > threshold_mins * 2
     return elapsed > threshold_mins
 
 
@@ -389,6 +388,15 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
     if errors:
         _out({"ok": False, "errors": errors})
         return
+
+    # Check that target files were actually modified (unless --force)
+    force = getattr(args, "force", False)
+    if files and dispatch_sha and not force:
+        r_diff = _run(f"git diff {dispatch_sha} HEAD --name-only")
+        changed_files = {f.strip() for f in r_diff.stdout.strip().split("\n") if f.strip()}
+        unmodified = [f for f in files if f not in changed_files]
+        if unmodified and len(unmodified) == len(files):
+            warnings.append(f"no target files were modified: {','.join(unmodified[:5])}. If intentional, re-run with --force")
 
     # Scan for dead-code markers (warnings only — does not block close)
     if files:
@@ -680,12 +688,19 @@ def cmd_notify(args: argparse.Namespace) -> None:
             worker["summary"] = args.summary[:200]
             _save_registry(reg, rp)
 
-    # Auto-close bead if worker didn't call worker-close
+    # Auto-close only if worker called worker-close (closed_self flag).
+    # If worker finished without calling worker-close, signal the orchestrator
+    # to inspect rather than silently masking a possible failure.
     if result["bead_status"] == "in_progress":
-        cr = _run(f'{bd} close {args.bead_id} --reason "auto-closed on worker notification" --force --json')
-        if cr.returncode == 0:
-            result["bead_status"] = "closed"
-            result["auto_closed"] = True
+        closed_self = worker.get("closed_self", False) if worker else False
+        if closed_self:
+            cr = _run(f'{bd} close {args.bead_id} --reason "auto-closed on worker notification" --force --json')
+            if cr.returncode == 0:
+                result["bead_status"] = "closed"
+                result["auto_closed"] = True
+        else:
+            result["auto_closed"] = False
+            result["action_needed"] = "worker did not call worker-close — inspect git diff and either close manually or redispatch"
 
     # Auto-close parent epic if all siblings are closed
     if result["bead_status"] == "closed" and isinstance(bead, dict):
@@ -1368,23 +1383,30 @@ def cmd_create(args: argparse.Namespace) -> None:
 
     # Try to parse the JSON output
     created = _parse_bd_json(r.stdout)
-    if created:
-        ids = [c.get("id", c.get("name", "")) for c in created if isinstance(c, dict)]
-        _out({"ok": True, "created": len(ids), "expected": expected, "ids": ids})
-        return
+    if not created:
+        # Fallback: bd create JSON was unparseable — verify via bd list
+        r2 = _run(f"{bd} list --status=open --limit {BD_LIST_LIMIT} --json")
+        created = _parse_bd_json(r2.stdout) or []
 
-    # Fallback: bd create JSON was unparseable — verify via bd list
-    r2 = _run(f"{bd} list --status=open --limit {BD_LIST_LIMIT} --json")
-    fallback = _parse_bd_json(r2.stdout)
-    count = len(fallback) if fallback else 0
-    _out({
-        "ok": True,
-        "created": count,
-        "expected": expected,
-        "ids": [b.get("id", "") for b in fallback if isinstance(b, dict)],
-        "fallback": True,
-        "note": "bd create JSON was unparseable — count from bd list"
-    })
+    ids = [c.get("id", c.get("name", "")) for c in created if isinstance(c, dict)]
+    result: dict = {"ok": True, "created": len(ids), "expected": expected, "ids": ids}
+    if not _parse_bd_json(r.stdout):
+        result["fallback"] = True
+        result["note"] = "bd create JSON was unparseable — count from bd list"
+
+    # Persist created issues for wire-plan to consume
+    ids_file = ""
+    try:
+        ctx = _context_dir()
+        ids_path = ctx / "created.json"
+        ids_path.write_text(json.dumps(created, indent=2))
+        ids_file = str(ids_path)
+    except (OSError, KeyError):
+        pass
+    if ids_file:
+        result["ids_file"] = ids_file
+
+    _out(result)
 
 
 def _parse_bd_json(stdout: str) -> list:
@@ -1415,7 +1437,9 @@ def cmd_ready(args: argparse.Namespace) -> None:
     ready_beads = [b for b in ready_beads if b.get("type", "").lower() != "epic"]
     ready_ids = {b.get("id", "") for b in ready_beads}
 
-    # Supplement: open beads with no blockers that bd ready missed
+    # Supplement: open beads with no blockers that bd ready missed.
+    # bd list may not populate blocked_by reliably, so we fetch full
+    # details via bd show and check actual dependencies for open blockers.
     r2 = _run(f"{bd} list --status=open --limit {BD_LIST_LIMIT} --json")
     all_open = _parse_bd_json(r2.stdout)
     supplemented = 0
@@ -1426,10 +1450,20 @@ def cmd_ready(args: argparse.Namespace) -> None:
         if b.get("type", "").lower() == "epic":
             continue
         blocked_by = b.get("blocked_by") or b.get("blockedBy") or []
-        if not blocked_by:
-            ready_beads.append(b)
-            ready_ids.add(bid)
-            supplemented += 1
+        if blocked_by:
+            continue
+        full = _fetch_bead(bd, bid)
+        if full:
+            deps = full.get("dependencies") or []
+            has_open_blocker = any(
+                d.get("dependency_type") == "blocks" and d.get("status") != "closed"
+                for d in deps if isinstance(d, dict)
+            )
+            if has_open_blocker:
+                continue
+        ready_beads.append(b)
+        ready_ids.add(bid)
+        supplemented += 1
 
     # Trim each bead to essential fields only (token efficiency)
     _READY_KEYS = ("id", "title", "type", "priority", "parent", "status")
@@ -1561,7 +1595,12 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
     content = plan_path.read_text()
     lines = content.split("\n")
     errors = []
+    warnings = []
     issues = []
+
+    active_plan = _beads_dir() / "active-plan"
+    if not active_plan.exists():
+        warnings.append("tf.py init has not been run — tf.py create will fail without it")
 
     for i, line in enumerate(lines, 1):
         stripped = line.strip()
@@ -1643,7 +1682,6 @@ def cmd_validate_plan(args: argparse.Namespace) -> None:
                     orphan_packages.append(iss["title"])
 
     # Parallelism analysis: scan ### Dependencies and ### Soft Dependencies
-    warnings = []
     tasks_count = len(issues) - epics
     dep_count = 0
     has_blocks = 0
@@ -1706,10 +1744,23 @@ def cmd_wire_plan(args: argparse.Namespace) -> None:
         _out({"ok": False, "error": f"file not found: {args.file}"})
         return
 
-    # Load bd create -f --json output: list of created issues with titles + IDs
-    ids_path = Path(args.ids)
+    # Load bd create -f --json output: list of created issues with titles + IDs.
+    # If --ids not provided, look for created.json from tf.py create.
+    ids_arg = args.ids
+    if not ids_arg:
+        try:
+            ctx = _context_dir()
+            default_ids = ctx / "created.json"
+            if default_ids.exists():
+                ids_arg = str(default_ids)
+        except (OSError, KeyError):
+            pass
+    if not ids_arg:
+        _out({"ok": False, "error": "no --ids file provided and no created.json found — run tf.py create first"})
+        return
+    ids_path = Path(ids_arg)
     if not ids_path.exists():
-        _out({"ok": False, "error": f"ids file not found: {args.ids}"})
+        _out({"ok": False, "error": f"ids file not found: {ids_arg}"})
         return
     try:
         created = json.loads(ids_path.read_text())
@@ -2540,6 +2591,7 @@ def main() -> None:
     s.add_argument("--context-pct", type=int, default=0, dest="context_pct")
     s.add_argument("--files", default="")
     s.add_argument("--summary", default="")
+    s.add_argument("--force", action="store_true", default=False)
 
     # claim
     s = sub.add_parser("claim")
@@ -2672,7 +2724,7 @@ def main() -> None:
     # wire-plan
     s = sub.add_parser("wire-plan")
     s.add_argument("file")
-    s.add_argument("--ids", required=True)
+    s.add_argument("--ids", default="")
 
     # update-context
     s = sub.add_parser("update-context")
