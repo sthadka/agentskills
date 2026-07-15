@@ -53,6 +53,14 @@ Skip to [Entry Protocol](#entry-protocol) below → [Orchestration Loop](#orches
 ### Scope Detection
 If the user's request is purely about creating, listing, updating, or closing beads — and does NOT mention implementing, building, or dispatching work — use the Quick Paths above. Do not initialize `tf.py`, worker context, or the full orchestration loop. Use `bd` commands directly.
 
+### Plan File Provided
+When a plan file is given as argument:
+1. Read the plan file
+2. Verify it has `Files:` annotations and acceptance criteria
+3. Proceed directly to `validate-plan` → `create` → dependency setup → `init` → dispatch
+
+Do NOT read project source files to validate or understand the plan — trust it. The plan was written by a prior planning session that already explored the codebase. Workers will read source files when they execute tasks. Re-deriving architecture from source is wasted orchestrator context.
+
 ## Entry Protocol
 
 ### Check Worker Reuse Support
@@ -131,7 +139,7 @@ State management commands — all output compact JSON:
 ```bash
 # Orchestrator commands
 python3 .beads/tf.py init {plan-name} --bd-path "$(which bd 2>/dev/null || echo bd)" [--worker-model MODEL] [--idle-timeout N]  # Create context dir + registry + gitignore (idle-timeout: minutes before auto-retire, default 8)
-python3 .beads/tf.py dispatch {worker} {bead-id}[,bead-id2] --skill {domain} [--output-file path]  # Record dispatch
+python3 .beads/tf.py dispatch {worker} {bead-id}[,bead-id2] --skill {domain} [--output-file path] [--agent-id ID]  # Record dispatch (agent-id stores the Agent tool's runtime ID for compaction resilience)
 python3 .beads/tf.py notify {worker} {bead} --context-pct N [--summary "..."] [--skill domain] [--agent-id ID] [--files "f1,f2"] [--gotcha "..."]  # Record completion (summary auto-generated from bead title if omitted)
 python3 .beads/tf.py batch-notify --pairs "w1:bead1,w2:bead2" --context-pct N [--summary "..."] [--files "f1,f2"] [--gotcha "..."]  # Batch completion for multiple worker:bead pairs
 python3 .beads/tf.py phase-gate {epic-id}                # Check phase complete
@@ -296,6 +304,8 @@ Additional rules:
 python3 .beads/tf.py sync --ready-count {N}
 ```
 
+`tf.py init` creates a new isolated context directory — it does NOT clean up workers from prior plans. If you see stale workers from prior sessions (via `tf.py status`), run `tf.py sync` to retire them. For a fresh plan with no prior workers in the current context, sync is unnecessary.
+
 During the normal completion→dispatch flow, sync is optional — the `notify` response already provides worker state. Run sync again after anomalies (stalled workers, SendMessage failures, post-compaction).
 
 **Target: ≥1.5 tasks/worker with good batching.** If your worker count exceeds task count, you're over-spawning.
@@ -333,12 +343,14 @@ python3 .beads/tf.py worker-prompt --beads {bead-id} --reuse --prior-bead {prev-
 
 Returns `{"ok": true, "prompt": "...", "model": "sonnet"|"", "beads": ["id1"]}`. Use `prompt` as the worker prompt and `model` (if non-empty) as the Agent tool `model:` parameter.
 
-**Reduce orchestrator context usage** — call `worker-prompt` once per worker. Use `--write-file` to keep the full prompt text (~2-4k tokens) out of orchestrator context:
+**Reduce orchestrator context usage** — call `worker-prompt` once per worker. Use `--write-file` for fresh prompts (>2k tokens) to keep them out of orchestrator context:
 ```bash
 python3 .beads/tf.py worker-prompt --beads {id} --write-file
 # Returns {"ok": true, "prompt_file": "/tmp/tf-prompt-xxx.md", "model": "", "beads": ["id"]}
 # Read the file only when passing to Agent tool
 ```
+
+For reuse prompts via `--reuse`, `--write-file` is ignored — reuse prompts are short (~500 tokens) and returned inline to avoid the write-read-copy roundtrip. Pass the `prompt` field directly to SendMessage.
 
 **Only model aliases work:** `"sonnet"`, `"opus"`, `"haiku"`. Full model IDs (e.g., `"claude-sonnet-4-6"`) are rejected by the Agent tool.
 
@@ -368,7 +380,7 @@ Dispatch multiple independent workers in a **single message** for parallelism.
 
 **After each dispatch**, record in registry:
 ```bash
-python3 .beads/tf.py dispatch {worker-name} {bead-id} --skill {domain} [--output-file {path}]
+python3 .beads/tf.py dispatch {worker-name} {bead-id} --skill {domain} [--output-file {path}] [--agent-id {agent-id}]
 ```
 
 ### Waiting for Workers
@@ -483,6 +495,14 @@ git remote -v | grep -q push && git push || echo "No remote configured, skipping
 Also ensure all context files are saved. (`bd sync` is deprecated — do not use.)
 
 **If workers were dispatched**, run the project's build/test command (e.g., `make check`, `cargo test`, `npm test`) to verify combined changes compile and pass. If it fails, dispatch a fix-up worker before pushing.
+
+### Acceptance Verification
+After all beads close and tests pass, verify the feature actually works — tests passing ≠ feature working. If the plan file lists verification steps or acceptance criteria, spot-check 2-3 key behaviors:
+- Run the primary CLI command / API endpoint / UI flow described in the plan
+- Verify at least one edge case from the acceptance criteria
+- If the plan doesn't have verification steps, at minimum confirm: build succeeds, one happy-path invocation works, tests pass
+
+Do not skip this step. If verification reveals issues, dispatch a fix-up worker before pushing.
 
 ## Context Compression Recovery (Reorientation Protocol)
 

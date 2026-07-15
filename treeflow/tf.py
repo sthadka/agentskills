@@ -327,6 +327,7 @@ def cmd_dispatch(args: argparse.Namespace) -> None:
         "last_heartbeat_note": None,
         "heartbeat_history": [],
         "output_file": getattr(args, "output_file", "") or "",
+        "agent_id": getattr(args, "agent_id", "") or "",
         "spawned_session": reg.get("session_id", ""),
     }
     _save_registry(reg, rp)
@@ -2321,7 +2322,8 @@ Complete each in order — claim, implement, commit, close — before starting t
 
     model = reg.get("worker_model", "")
 
-    if getattr(args, "write_file", False):
+    is_reuse = getattr(args, "reuse", False)
+    if getattr(args, "write_file", False) and not is_reuse:
         import tempfile
         fd, path = tempfile.mkstemp(prefix="tf-prompt-", suffix=".md")
         with os.fdopen(fd, "w") as f:
@@ -2583,6 +2585,7 @@ def main() -> None:
     s.add_argument("bead_id")
     s.add_argument("--skill", required=True)
     s.add_argument("--output-file", default="", dest="output_file")
+    s.add_argument("--agent-id", default="", dest="agent_id")
 
     # worker-close
     s = sub.add_parser("worker-close")

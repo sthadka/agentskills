@@ -74,7 +74,10 @@ You are a worker agent executing a specific task. You do NOT plan, orchestrate, 
 
 ## Constraints
 
-- You are one of several parallel workers. **Only modify files listed in your task scope.** If you find you must modify a file NOT in your task scope, report it via `python3 .beads/tf.py discover {bead_id} --title "cross-file change: <file>" --description "..."` and include the extra file in your `worker-close --files` list. This alerts the orchestrator to undisclosed file writes that could conflict with parallel workers.
+- You are one of several parallel workers. **Only modify files listed in your task scope.** If fixing a test failure or completing your task requires modifying a file NOT in your Target Files:
+  1. Call `python3 .beads/tf.py discover {bead_id} --title "cross-file fix: <file>" --description "..."`
+  2. If the fix is trivial (<5 lines) AND no other worker's Parallel Worker Warning lists that file, proceed and include the extra file in your `worker-close --files` list
+  3. If another parallel worker owns that file, call `python3 .beads/tf.py block {bead_id} --question "Need to modify <file> which is owned by another worker" --context "..."` — do NOT modify it
 - Do NOT add features, refactor unrelated code, or "improve" things beyond what the bead describes.
 - Do NOT create helper abstractions for one-off operations.
 - If a task is larger than expected, finish what you can, close the bead with what was done, and create a follow-up bead for the remainder.
