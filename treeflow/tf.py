@@ -252,6 +252,21 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     reg = ctx / REGISTRY_FILE
     if reg.exists():
+        new_model = getattr(args, "worker_model", "") or ""
+        new_bd = getattr(args, "bd_path", "") or ""
+        if new_model or new_bd:
+            data, _ = _load_registry(reg)
+            updated = []
+            if new_model and data.get("worker_model") != new_model:
+                data["worker_model"] = new_model
+                updated.append("worker_model")
+            if new_bd and data.get("bd_path") != new_bd:
+                data["bd_path"] = new_bd
+                updated.append("bd_path")
+            if updated:
+                _save_registry(data, reg)
+                _out({"ok": True, "msg": f"updated {', '.join(updated)}", "path": str(ctx)})
+                return
         _out({"ok": True, "msg": "already exists", "path": str(ctx)})
         return
 
@@ -998,6 +1013,101 @@ def _infer_files_from_description(desc: str) -> list[str]:
         for m in re.finditer(r"(?<!\w)([a-zA-Z0-9_]+(?:/[a-zA-Z0-9_.]+)+\.[a-zA-Z]{1,10})(?!\w)", desc):
             paths.append(m.group(1))
     return list(dict.fromkeys(paths))
+
+
+_SPEC_REF_RE = re.compile(
+    r"(?:^|\s)Spec:\s*`?([^\s`]+)`?\s*(?:§|#)\s*(.+)",
+    re.MULTILINE,
+)
+
+
+def _extract_acceptance_criteria(desc: str) -> str:
+    """Extract the ### Acceptance Criteria section from a bead description."""
+    lines = desc.split("\n")
+    capture = False
+    result: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.lower().startswith("### acceptance criteria"):
+            capture = True
+            continue
+        if capture:
+            if stripped.startswith("### ") or stripped.startswith("## "):
+                break
+            result.append(line)
+    text = "\n".join(result).strip()
+    return text
+
+
+def _extract_spec_sections(desc: str, project_root: Path) -> str:
+    """Read spec file sections referenced in a bead description.
+
+    Parses lines like 'Spec: spec.md §Section Name' and reads the
+    matching heading section from the file. Returns combined content
+    or empty string if nothing found.
+    """
+    refs = _SPEC_REF_RE.findall(desc)
+    if not refs:
+        return ""
+
+    sections: list[str] = []
+    seen_files: dict[str, str] = {}
+
+    for filepath, section_name in refs:
+        filepath = filepath.strip().strip("`")
+        section_name = section_name.strip()
+
+        if filepath not in seen_files:
+            spec_path = project_root / filepath
+            if not spec_path.exists():
+                for candidate in [
+                    project_root / "docs" / filepath,
+                    project_root / ".beads" / filepath,
+                ]:
+                    if candidate.exists():
+                        spec_path = candidate
+                        break
+            if spec_path.exists():
+                try:
+                    seen_files[filepath] = spec_path.read_text()
+                except OSError:
+                    continue
+            else:
+                continue
+
+        content = seen_files[filepath]
+        extracted = _read_heading_section(content, section_name)
+        if extracted:
+            sections.append(f"### From `{filepath}` — {section_name}\n\n{extracted}")
+
+    return "\n\n".join(sections)
+
+
+def _read_heading_section(content: str, heading: str) -> str:
+    """Extract content under a heading (any level) from markdown text."""
+    lines = content.split("\n")
+    heading_norm = heading.strip().lower()
+    capture = False
+    capture_level = 0
+    result: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        h_match = re.match(r'^(#{1,6})\s+(.+)$', stripped)
+        if h_match:
+            level = len(h_match.group(1))
+            title = h_match.group(2).strip().lower()
+            if capture:
+                if level <= capture_level:
+                    break
+                result.append(line)
+            elif title == heading_norm or heading_norm in title:
+                capture = True
+                capture_level = level
+        elif capture:
+            result.append(line)
+
+    return "\n".join(result).strip()
 
 
 def cmd_conflict_check(args: argparse.Namespace) -> None:
@@ -1837,7 +1947,7 @@ def cmd_wire_plan(args: argparse.Namespace) -> None:
         for dep_line in iss.get("deps", []):
             for part in re.split(r'[,;]\s*', dep_line):
                 part = part.strip()
-                match = re.match(r'(?:blocks?:)\s*(.+)', part, re.IGNORECASE)
+                match = re.match(r'(?:blocks?|depends[-_]?on):?\s*(.+)', part, re.IGNORECASE)
                 if match:
                     ref = match.group(1).strip().strip('"').strip("'")
                     ref_norm = _norm(ref)
@@ -2285,6 +2395,19 @@ Close when done: `python3 .beads/tf.py worker-close {bd_item['id']} --context-pc
 Complete each in order — claim, implement, commit, close — before starting the next.
 
 """ + "\n\n".join(sub_tasks)
+
+    # Auto-extract acceptance criteria and spec sections for worker context
+    project_root = _beads_dir().parent
+    for bd_item in bead_data:
+        desc = bd_item.get("description", "")
+        ac = _extract_acceptance_criteria(desc)
+        spec_content = _extract_spec_sections(desc, project_root)
+        if ac or spec_content:
+            prompt += f"\n\n## Acceptance Criteria — {bd_item.get('title', bd_item['id'])}\n"
+            if ac:
+                prompt += f"\n{ac}\n"
+            if spec_content:
+                prompt += f"\n### Spec Reference\n\n{spec_content}\n"
 
     # Append integration task guidance if any bead is marked [integration]
     for bd_item in bead_data:

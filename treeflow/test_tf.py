@@ -157,6 +157,21 @@ class TestInit:
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
         assert (workspace / ".beads" / "tf.py").exists()
 
+    def test_reinit_updates_worker_model(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd", "--worker-model", "sonnet"])
+        reg = load_registry(workspace)
+        assert reg["worker_model"] == "sonnet"
+        out = tf(workspace, ["init", "test", "--worker-model", "opus"])
+        assert out["ok"] is True
+        assert "worker_model" in out["msg"]
+        reg = load_registry(workspace)
+        assert reg["worker_model"] == "opus"
+
+    def test_reinit_no_flags_says_already_exists(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        out = tf(workspace, ["init", "test"])
+        assert out["msg"] == "already exists"
+
 
 # ── Dispatch Tests ──────────────────────────────────────────────
 
@@ -2148,6 +2163,72 @@ class TestWorkerPrompt:
         assert out["ok"] is True
         assert "Parallel Worker Warning" not in out["prompt"]
 
+    def test_includes_acceptance_criteria(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        desc = textwrap.dedent("""\
+            Build the parser module.
+
+            ### Acceptance Criteria
+            - Parses JSON input correctly
+            - Returns error on invalid input
+
+            ### Dependencies
+            blocks:Other task
+        """)
+        resp = json.dumps({"id": "1", "title": "Build parser", "description": desc})
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "1",
+        ], env={"BD_STUB_RESPONSE": resp})
+        assert out["ok"] is True
+        assert "Acceptance Criteria" in out["prompt"]
+        assert "Parses JSON input correctly" in out["prompt"]
+        assert "Returns error on invalid input" in out["prompt"]
+
+    def test_includes_spec_sections(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        spec = textwrap.dedent("""\
+            # Project Spec
+
+            ## Authentication
+            Users authenticate via JWT tokens.
+
+            ### Token Format
+            Access tokens expire after 15 minutes.
+
+            ## Data Model
+            All models use UUID primary keys.
+        """)
+        (workspace / "spec.md").write_text(spec)
+        desc = "Implement auth.\nSpec: spec.md §Authentication"
+        resp = json.dumps({"id": "1", "title": "Auth task", "description": desc})
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "1",
+        ], env={"BD_STUB_RESPONSE": resp})
+        assert out["ok"] is True
+        assert "JWT tokens" in out["prompt"]
+        assert "Spec Reference" in out["prompt"]
+
+    def test_spec_section_not_found_silently_skipped(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        (workspace / "spec.md").write_text("# Spec\n## Other Section\nStuff.\n")
+        desc = "Implement auth.\nSpec: spec.md §Nonexistent Section"
+        resp = json.dumps({"id": "1", "title": "Auth task", "description": desc})
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "1",
+        ], env={"BD_STUB_RESPONSE": resp})
+        assert out["ok"] is True
+        assert "Spec Reference" not in out["prompt"]
+
+    def test_spec_file_not_found_silently_skipped(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        desc = "Implement auth.\nSpec: nonexistent.md §Auth"
+        resp = json.dumps({"id": "1", "title": "Auth task", "description": desc})
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "1",
+        ], env={"BD_STUB_RESPONSE": resp})
+        assert out["ok"] is True
+        assert "Spec Reference" not in out["prompt"]
+
 
 # ── Validate Plan Parallelism Tests ──────────────────────────
 
@@ -2694,6 +2775,67 @@ class TestWirePlan:
         out = tf(workspace, ["wire-plan", str(plan_file), "--ids", str(ids_file)])
         assert out["total_issues"] == 4
         assert out["parent_child"] == 3
+        assert out["blocking"] == 1
+
+    def test_depends_on_syntax(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        plan = textwrap.dedent("""\
+            ## Setup project
+
+            ### Type
+            epic
+
+            ## Create scanner interface
+
+            ### Type
+            task
+
+            ## Implement snapshot package
+
+            ### Type
+            task
+
+            ### Dependencies
+            depends_on:Create scanner interface
+        """)
+        plan_file = workspace / "plan.md"
+        plan_file.write_text(plan)
+        ids = [
+            {"id": "epic-1", "title": "Setup project"},
+            {"id": "task-1", "title": "Create scanner interface"},
+            {"id": "task-2", "title": "Implement snapshot package"},
+        ]
+        ids_file = workspace / "ids.json"
+        ids_file.write_text(json.dumps(ids))
+        out = tf(workspace, ["wire-plan", str(plan_file), "--ids", str(ids_file)])
+        assert out["ok"] is True
+        assert out["blocking"] == 1
+
+    def test_depends_on_underscore_and_hyphen(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        plan = textwrap.dedent("""\
+            ## Task A
+
+            ### Type
+            task
+
+            ## Task B
+
+            ### Type
+            task
+
+            ### Dependencies
+            depends-on: Task A
+        """)
+        plan_file = workspace / "plan.md"
+        plan_file.write_text(plan)
+        ids = [
+            {"id": "t-1", "title": "Task A"},
+            {"id": "t-2", "title": "Task B"},
+        ]
+        ids_file = workspace / "ids.json"
+        ids_file.write_text(json.dumps(ids))
+        out = tf(workspace, ["wire-plan", str(plan_file), "--ids", str(ids_file)])
         assert out["blocking"] == 1
 
     def test_no_id_match_reports_error(self, workspace, bd_stub):
