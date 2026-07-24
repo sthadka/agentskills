@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Sculptor validation tool — deterministic checks for sculptor sessions."""
+from __future__ import annotations
 
 import json
 import re

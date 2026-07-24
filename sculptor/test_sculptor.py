@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Comprehensive tests for sculptor.py — sculptor validation tool.
 
 Tests pure functions via direct import and CLI commands via subprocess.

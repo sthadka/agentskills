@@ -78,6 +78,8 @@ This replaces speculation with concrete data.
 
 * **Create appendix files** for substantive topics. See [APPENDIX-TEMPLATE.md](APPENDIX-TEMPLATE.md) for the format. Link each appendix from the relevant section in research.md.
 * **Don't wait idle for background research agents.** Start writing the research doc with findings you already have. Integrate agent results when they complete.
+* **Background agents must not edit shared files.** When dispatching research agents, instruct them to report findings back only — never to edit research.md, idea.md, or other shared documents directly. The main conversation is responsible for all shared file writes. This prevents merge conflicts when multiple agents run in parallel. Agents may create new appendix files (these are independent), but must not modify existing ones.
+* **Instruct research agents to follow the appendix template.** When dispatching agents that will create appendix files, include in the prompt: "Follow the format in APPENDIX-TEMPLATE.md." Without this, agents produce valid but inconsistently formatted appendices.
 * **Aggressive first-round annotation is ideal.** Encourage users to mark everything in one pass: "Mark everything — questions, corrections, constraints, preferences — all in one pass." Providing more detailed ideas, options, and exploration paths early reduces annotation cycles.
 * **Surface shared design surfaces early.** Ask: "Are there shared data structures or config formats that serve multiple interfaces?" This prevents rework when these emerge late.
 * **Map the architectural landscape.** When exploring prior art, note how similar projects organize their modules, data flow, and extension points. These patterns inform the idea document's architecture and prevent reinventing solved problems.
@@ -166,7 +168,7 @@ Create additional artifacts once we have a crisp idea document, once the user ap
 **IMPORTANT**: After writing each escalated artifact, pause and explicitly ask:
 > "Want to annotate `{artifact}.md` before I continue to the next one?"
 
-Each artifact goes through its own annotation cycle if the user wants.
+Each artifact goes through its own annotation cycle if the user wants. If the user responds by requesting the next artifact instead of annotating (e.g., "create the plan" after the spec is written), treat that as implicit approval of the current artifact and proceed without re-asking.
 
 After the user approves each escalated artifact:
 1. Remove all annotation markers
