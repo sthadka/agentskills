@@ -65,8 +65,9 @@ Keep descriptions self-contained enough that an agent can execute without re-rea
 
 ## Conversion Steps
 
-### 1. Read sculptor artifacts
-Read `plan.md`, then `spec.md` and `idea.md` for context.
+### 1. Read sculptor artifacts (parallel)
+Read `plan.md`, `spec.md`, and `idea.md` in a single tool-call batch — they are independent reads.
+For large specs (>15k tokens), consider reading only sections referenced by the plan's tasks rather than the full spec.
 
 ### 2. Generate `.beads/plan.md`
 
@@ -129,7 +130,11 @@ python3 .beads/tf.py ready
 
 Setup task should be the first (or only) ready issue. Epics are automatically filtered out.
 
-### 5. Populate cross-worker invariants
+### 5. Verify/update CLAUDE.md
+
+Ensure CLAUDE.md includes build commands, architecture overview, and conventions from the sculptor artifacts. This is the project's persistent context — future sessions depend on it.
+
+### 6. Populate cross-worker invariants
 
 If `plan.md` contains a `## Cross-worker Invariants` section:
 1. Append to `worker-context.md` under `## Cross-worker Invariants`

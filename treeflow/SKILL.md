@@ -193,12 +193,14 @@ If validation fails (e.g., `---` separators detected), fix the plan file before 
 If the input is a sculptor session directory (contains `plan.md`, `spec.md`, `idea.md`), follow [SCULPTOR-IMPORT.md](SCULPTOR-IMPORT.md) for conversion.
 
 **Sculptor import checklist** (lessons from large imports):
-1. Pre-sanitize the plan file: strip or convert `### Task N:` group headers to bold text — they corrupt `bd create -f` parsing
-2. Run `validate-plan` and note the reported issue count
-3. Run `bd create -f` and compare its created count against validate-plan's count — if they differ, stop and investigate
-4. Run `tf.py dedup --dry-run` to check for duplicates before proceeding
-5. Always use `bd list --limit 500 --json` when calling `bd` directly
-6. Import deps only after verifying the full bead count matches
+1. Read sculptor artifacts in parallel: `plan.md`, `spec.md`, `idea.md` in a single tool-call batch
+2. Pre-sanitize the plan file: strip or convert `### Task N:` group headers to bold text — they corrupt `bd create -f` parsing
+3. Run `validate-plan` and note the reported issue count
+4. Run `bd create -f` and compare its created count against validate-plan's count — if they differ, stop and investigate
+5. Run `tf.py dedup --dry-run` to check for duplicates before proceeding
+6. Wire dependencies using `tf.py wire-plan` (preferred) — resolves inline `### Dependencies` sections and phase ordering in one command. Alternative: `tf.py import-deps` with a separate deps.txt file
+7. Run `tf.py ready` to verify the ready set matches expectations
+8. Always use `bd list --limit 500 --json` when calling `bd` directly
 
 ### From Goal/PRD
 
@@ -231,10 +233,10 @@ After planning:
 1. Ask the user what model workers should use. Valid values are aliases only: `sonnet`, `opus`, `haiku` — full model IDs like `claude-sonnet-4-6` are rejected by the Agent tool. **Best practice: omit model entirely** (workers inherit the orchestrator's exact model). Only set `--worker-model` when the user wants a *different* model tier.
 2. Resolve `bd` absolute path and initialize state:
    ```bash
-   python3 ~/.claude/skills/treeflow/tf.py init {plan-name} --bd-path "$(which bd 2>/dev/null || echo bd)" [--worker-model MODEL]
+   python3 ~/.claude/skills/treeflow/tf.py init {plan-name} --bd-path "$(which bd 2>/dev/null || echo bd)" [--worker-model MODEL] [--build-cmd "CMD"]
    ```
-   The `--bd-path` flag stores the absolute path in `registry.json` so workers can find `bd` without needing the orchestrator's shell PATH.
-3. Write `worker-context.md` from [WORKER-CONTEXT-TEMPLATE.md](WORKER-CONTEXT-TEMPLATE.md) — fill in all sections, skip anything in CLAUDE.md. The **Conventions** and **Security** sections are mandatory — these are the cross-cutting behaviors that silently diverge when left to worker discretion (logging standard, test requirements, input validation rules).
+   The `--bd-path` flag stores the absolute path in `registry.json` so workers can find `bd` without needing the orchestrator's shell PATH. The `--build-cmd` flag stores the project's build/compile command (e.g., `"mix compile"`, `"go build ./..."`) — used for build verification in worker prompts and flat-task-mode wave gating.
+3. Write `worker-context.md` from [WORKER-CONTEXT-TEMPLATE.md](WORKER-CONTEXT-TEMPLATE.md) — fill in all sections, skip anything in CLAUDE.md. The **Conventions** and **Security** sections are mandatory — these are the cross-cutting behaviors that silently diverge when left to worker discretion (logging standard, test requirements, input validation rules). **Note:** `tf.py init` creates `worker-context.md` from the template — Read it before overwriting (Claude Code's Write tool requires a prior Read on existing files).
 4. *(Optional)* Add skill routing if you have >10 beads across many domains: `python3 .beads/tf.py routing --add "pattern:domain:prefix"`. For smaller workloads, manual `--skill` on dispatch is simpler.
 5. Copy `## Cross-worker Invariants` from `plan.md` into `worker-context.md` and `CLAUDE.md`. If the plan has no invariants section, prompt the user: "Are there cross-cutting contracts that every worker must know? (e.g., 'all DB writes must update the FTS index', 'all file writes must be atomic')"
 
@@ -252,6 +254,8 @@ When working from existing beads with no epic hierarchy, skip `phase-gate` and `
 3. Dispatch wave 1 (all beads in group 1 can run in parallel), batch by domain
 4. As workers complete: `tf.py notify` → `tf.py ready` → `tf.py wave-plan` with newly ready beads
 5. Dispatch next wave. Loop until all beads closed.
+
+**Build verification in flat-task mode:** Without phase gates, builds can silently diverge. Run the project's build command (`tf.py init --build-cmd "..."` stores it in registry) after Wave 1 completes and every 2-3 waves thereafter. If the build fails, fix before dispatching the next wave.
 
 `wave-plan` handles file conflict analysis and active worker awareness automatically. Use section annotations (`Files (modifies): src/config.rs [StorageConfig]`) to enable fine-grained parallelism — beads modifying different sections of the same file are classified as `low_risk` and grouped into the same wave.
 
@@ -343,11 +347,15 @@ python3 .beads/tf.py worker-prompt --beads {bead-id} --reuse --prior-bead {prev-
 
 Returns `{"ok": true, "prompt": "...", "model": "sonnet"|"", "beads": ["id1"]}`. Use `prompt` as the worker prompt and `model` (if non-empty) as the Agent tool `model:` parameter.
 
-**Reduce orchestrator context usage** — call `worker-prompt` once per worker. Use `--write-file` for fresh prompts (>2k tokens) to keep them out of orchestrator context:
+**Reduce orchestrator context usage** — use `--prompt-only` to capture the prompt directly via Bash `$()` without a file roundtrip:
 ```bash
+# Preferred: stdout capture — no file read needed, prompt goes straight to Agent tool
+prompt=$(python3 .beads/tf.py worker-prompt --beads {id} --prompt-only)
+
+# Alternative: --write-file for prompts you need to inspect or edit before dispatch
 python3 .beads/tf.py worker-prompt --beads {id} --write-file
-# Returns {"ok": true, "prompt_file": "/tmp/tf-prompt-xxx.md", "model": "", "beads": ["id"]}
-# Read the file only when passing to Agent tool
+# Returns {"ok": true, "prompt_file": "/tmp/tf-prompt-xxx.md", ...}
+# Requires a Read before passing to Agent — use only when editing the prompt
 ```
 
 For reuse prompts via `--reuse`, `--write-file` is ignored — reuse prompts are short (~500 tokens) and returned inline to avoid the write-read-copy roundtrip. Pass the `prompt` field directly to SendMessage.
@@ -405,10 +413,11 @@ When a `<task-notification>` arrives:
      - `closed` → normal flow
      - `blocked` → worker hit a question: surface to user, wait, SendMessage to resume
      - `in_progress` + `auto_closed: false` → worker finished without calling `worker-close`. Follow the Worker Failure Recovery steps below
-4. **For batched workers** (2-3 beads per worker), use `batch-notify` instead of separate `notify` calls:
+4. **For batched workers** (2-3 beads per worker), pass comma-separated bead IDs to `notify`:
    ```bash
-   python3 .beads/tf.py batch-notify --pairs "{worker}:{bead1},{worker}:{bead2}" --context-pct {N} --files "{files}" --summary "{summary}"
+   python3 .beads/tf.py notify {worker-name} --beads "{bead1},{bead2}" --context-pct {N} --files "{files}" --summary "{summary}"
    ```
+   This processes each bead in sequence under the same worker. (`batch-notify` with `--pairs` is still supported for cross-worker batches.)
 5. **Update context** is handled by `notify --files` above. Use `tf.py update-context` only for manual orchestrator notes outside of notification flow.
 6. **Discard the full `<result>` content** — it's now captured in registry and context files
 7. **Ignore transient LSP diagnostics** — during active worker runs, `go.sum` missing entries, `could not import` errors, build-tag exclusion warnings, and `undefined: <symbol>` in partially-written files are almost always transient. Do not act on these until the responsible worker completes.

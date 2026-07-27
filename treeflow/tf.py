@@ -254,7 +254,8 @@ def cmd_init(args: argparse.Namespace) -> None:
     if reg.exists():
         new_model = getattr(args, "worker_model", "") or ""
         new_bd = getattr(args, "bd_path", "") or ""
-        if new_model or new_bd:
+        new_build = getattr(args, "build_cmd", "") or ""
+        if new_model or new_bd or new_build:
             data, _ = _load_registry(reg)
             updated = []
             if new_model and data.get("worker_model") != new_model:
@@ -263,6 +264,9 @@ def cmd_init(args: argparse.Namespace) -> None:
             if new_bd and data.get("bd_path") != new_bd:
                 data["bd_path"] = new_bd
                 updated.append("bd_path")
+            if new_build and data.get("build_cmd") != new_build:
+                data["build_cmd"] = new_build
+                updated.append("build_cmd")
             if updated:
                 _save_registry(data, reg)
                 _out({"ok": True, "msg": f"updated {', '.join(updated)}", "path": str(ctx)})
@@ -272,10 +276,12 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     bd_path = getattr(args, "bd_path", "") or _resolve_bd()
     worker_model = getattr(args, "worker_model", "") or ""
+    build_cmd = getattr(args, "build_cmd", "") or ""
     data = {
         "plan_name": args.plan_name,
         "bd_path": bd_path,
         "worker_model": worker_model,
+        "build_cmd": build_cmd,
         "session_id": _now(),
         "settings": {
             "stall_threshold_mins": 20,
@@ -635,6 +641,18 @@ def cmd_bd_path(args: argparse.Namespace) -> None:
 
 def cmd_notify(args: argparse.Namespace) -> None:
     """Orchestrator calls on task-notification. Updates registry atomically."""
+    # Multi-bead shorthand: notify worker --beads id1,id2
+    notify_beads = getattr(args, "notify_beads", "") or ""
+    if notify_beads:
+        bead_list = [b.strip() for b in notify_beads.split(",") if b.strip()]
+        results = []
+        for bid in bead_list:
+            args.bead_id = bid
+            args.notify_beads = ""
+            cmd_notify(args)
+            results.append(bid)
+        return
+
     reg, rp = _load_registry()
     now = _now()
 
@@ -1326,12 +1344,22 @@ def cmd_wave_plan(args: argparse.Namespace) -> None:
             waves.append([bid])
             assigned[bid] = len(waves) - 1
 
+    # Identify beads already dispatched to active workers
+    already_dispatched = []
+    for bid in bead_ids:
+        for wname, w in reg.get("workers", {}).items():
+            if w.get("status") == STATUS_ACTIVE and w.get("bead") == bid:
+                already_dispatched.append({"bead": bid, "worker": wname})
+                break
+
     result: dict = {
         "ok": True,
         "waves": [{"group": i + 1, "beads": w} for i, w in enumerate(waves)],
         "total_waves": len(waves),
         "total_beads": len(assigned),
     }
+    if already_dispatched:
+        result["already_dispatched"] = already_dispatched
     if blocked_by_active:
         result["blocked_by_active"] = blocked_by_active
     unplanned = [bid for bid in bead_ids if bid not in assigned and bid not in [b["bead"] for b in blocked_by_active]]
@@ -1579,6 +1607,26 @@ def cmd_ready(args: argparse.Namespace) -> None:
     # Trim each bead to essential fields only (token efficiency)
     _READY_KEYS = ("id", "title", "type", "priority", "parent", "status")
     trimmed: list[dict] = []
+    verbose = getattr(args, "verbose", False)
+
+    # Pre-compute will_unblock map if verbose
+    will_unblock_map: dict = {}
+    if verbose:
+        r_all = _run(f"{bd} list --status=open --limit {BD_LIST_LIMIT} --json")
+        all_beads = _parse_bd_json(r_all.stdout)
+        for ob in all_beads:
+            ob_id = ob.get("id", "")
+            if ob_id in ready_ids:
+                continue
+            full_ob = _fetch_bead(bd, ob_id)
+            if not full_ob:
+                continue
+            for dep in full_ob.get("dependencies", []):
+                if isinstance(dep, dict) and dep.get("dependency_type") == "blocks" and dep.get("status") != "closed":
+                    blocker_id = dep.get("depends_on", "")
+                    if blocker_id in ready_ids:
+                        will_unblock_map.setdefault(blocker_id, []).append(ob_id)
+
     for b in ready_beads:
         t: dict = {}
         for k in _READY_KEYS:
@@ -1586,9 +1634,26 @@ def cmd_ready(args: argparse.Namespace) -> None:
                 t[k] = b.get("type") or b.get("issue_type", "")
             elif k in b:
                 t[k] = b[k]
+        if verbose:
+            bid = t.get("id", "")
+            t["will_unblock"] = will_unblock_map.get(bid, [])
         trimmed.append(t)
 
-    _out({"ok": True, "ready": trimmed, "supplemented": supplemented})
+    # --newly-ready: filter to beads not in the last known ready set
+    newly_ready_flag = getattr(args, "newly_ready", False)
+    reg, reg_path = _load_registry(rp)
+    prev_ready = set(reg.get("last_ready_ids", []))
+    current_ids = [t["id"] for t in trimmed if "id" in t]
+
+    if newly_ready_flag and prev_ready:
+        newly = [t for t in trimmed if t.get("id") not in prev_ready]
+        reg["last_ready_ids"] = current_ids
+        _save_registry(reg, reg_path)
+        _out({"ok": True, "ready": newly, "newly_ready": len(newly), "total_ready": len(trimmed), "supplemented": supplemented})
+    else:
+        reg["last_ready_ids"] = current_ids
+        _save_registry(reg, reg_path)
+        _out({"ok": True, "ready": trimmed, "supplemented": supplemented})
 
 
 def cmd_recover(args: argparse.Namespace) -> None:
@@ -2252,16 +2317,6 @@ def cmd_worker_prompt(args: argparse.Namespace) -> None:
     else:
         project_context = ""
 
-    # Include latest phase file, capped to avoid bloating worker context
-    phase_files = sorted(ctx.glob("phase-*.md"))
-    if phase_files:
-        phase_content = phase_files[-1].read_text()
-        lines = phase_content.split("\n")
-        if len(lines) > 60:
-            lines = lines[:20] + ["\n... (earlier summaries trimmed) ...\n"] + lines[-40:]
-            phase_content = "\n".join(lines)
-        project_context += "\n\n" + phase_content
-
     # Fetch bead data
     bead_data = []
     for bid in bead_ids:
@@ -2271,6 +2326,28 @@ def cmd_worker_prompt(args: argparse.Namespace) -> None:
         bead.setdefault("description", "")
         bead["target_files"] = _extract_files_from_description(bead["description"])
         bead_data.append(bead)
+
+    # Build direct-dependency summaries instead of full phase file dump
+    dep_ids = set()
+    for bd_item in bead_data:
+        for dep in bd_item.get("dependencies", []):
+            if isinstance(dep, dict) and dep.get("dependency_type") == "blocks" and dep.get("status") == "closed":
+                dep_ids.add(dep.get("depends_on", ""))
+    dep_ids.discard("")
+    if dep_ids:
+        dep_lines = []
+        for did in sorted(dep_ids):
+            dep_bead = _fetch_bead(bd_bin, did)
+            if dep_bead:
+                title = dep_bead.get("title", dep_bead.get("name", did))
+                summary = ""
+                for w in (reg.get("workers") or {}).values():
+                    if w.get("bead") == did and w.get("summary"):
+                        summary = f" — {w['summary']}"
+                        break
+                dep_lines.append(f"- **{did}**: {title}{summary}")
+        if dep_lines:
+            project_context += "\n\n## Completed Dependencies\n" + "\n".join(dep_lines)
 
     # Determine epic context
     epic_context = "N/A"
@@ -2401,6 +2478,8 @@ Complete each in order — claim, implement, commit, close — before starting t
     for bd_item in bead_data:
         desc = bd_item.get("description", "")
         ac = _extract_acceptance_criteria(desc)
+        if not ac:
+            ac = bd_item.get("acceptance_criteria", "") or ""
         spec_content = _extract_spec_sections(desc, project_root)
         if ac or spec_content:
             prompt += f"\n\n## Acceptance Criteria — {bd_item.get('title', bd_item['id'])}\n"
@@ -2408,6 +2487,11 @@ Complete each in order — claim, implement, commit, close — before starting t
                 prompt += f"\n{ac}\n"
             if spec_content:
                 prompt += f"\n### Spec Reference\n\n{spec_content}\n"
+
+    # Append build verification step if build_cmd is configured
+    build_cmd = reg.get("build_cmd", "")
+    if build_cmd:
+        prompt += f"\n\n## Build Verification\nAfter implementing, run `{build_cmd}` to verify. If it fails, fix compilation errors before closing."
 
     # Append integration task guidance if any bead is marked [integration]
     for bd_item in bead_data:
@@ -2701,6 +2785,7 @@ def main() -> None:
     s.add_argument("--bd-path", default="", dest="bd_path")
     s.add_argument("--worker-model", default="", dest="worker_model")
     s.add_argument("--idle-timeout", type=int, default=0, dest="idle_timeout")
+    s.add_argument("--build-cmd", default="", dest="build_cmd")
 
     # dispatch
     s = sub.add_parser("dispatch")
@@ -2752,6 +2837,7 @@ def main() -> None:
     s = sub.add_parser("notify")
     s.add_argument("worker")
     s.add_argument("bead_id", nargs="?", default=None)
+    s.add_argument("--beads", default="", dest="notify_beads")
     s.add_argument("--context-pct", type=int, default=0, dest="context_pct")
     s.add_argument("--summary", default="")
     s.add_argument("--skill", default="")
@@ -2806,7 +2892,9 @@ def main() -> None:
     sub.add_parser("status")
 
     # ready (filtered bd ready + supplement)
-    sub.add_parser("ready")
+    s = sub.add_parser("ready")
+    s.add_argument("--newly-ready", action="store_true", default=False, dest="newly_ready")
+    s.add_argument("--verbose", action="store_true", default=False)
 
     # recover (find orphaned in-progress beads)
     sub.add_parser("recover")

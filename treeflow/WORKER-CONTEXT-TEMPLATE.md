@@ -15,6 +15,15 @@
 - **Testing**: {e.g., Vitest, Go test}
 - **Build**: {e.g., Vite, esbuild}
 
+## Build Environment
+
+<!-- Workers spawn in clean shells without the orchestrator's PATH or tool shims. -->
+<!-- If your project uses a version manager (asdf, nvm, rbenv), document activation here. -->
+
+- **Setup command**: {e.g., `source ~/.asdf/asdf.sh && asdf install`, or `nvm use`}
+- **Build command**: {e.g., `mix compile`, `go build ./...`, `npm run build`}
+- **Test command**: {e.g., `mix test`, `go test ./...`, `npm test`}
+
 ## Repo Structure
 
 ```

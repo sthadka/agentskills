@@ -2078,7 +2078,8 @@ class TestWorkerPrompt:
         assert "worker-context.md" in out["prompt"]
         assert "TypeScript everywhere" not in out["prompt"]
 
-    def test_includes_phase_context(self, workspace, bd_stub):
+    def test_excludes_phase_file_uses_dep_summaries(self, workspace, bd_stub):
+        """Phase file content is NOT included — replaced by direct-dependency summaries."""
         tf(workspace, ["init", "test", "--bd-path", bd_stub])
         ctx = workspace / ".beads" / "context-test"
         (ctx / "phase-1.md").write_text("# Phase 1\nParser built.")
@@ -2086,7 +2087,20 @@ class TestWorkerPrompt:
         out = tf(workspace, [
             "worker-prompt", "--beads", "1",
         ], env={"BD_STUB_RESPONSE": resp})
-        assert "Parser built" in out["prompt"]
+        assert "Parser built" not in out["prompt"]
+
+    def test_ac_fallback_from_bead_field(self, workspace, bd_stub):
+        """AC from separate acceptance_criteria field when description has none."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        resp = json.dumps({
+            "id": "1", "title": "T1",
+            "description": "implement the widget",
+            "acceptance_criteria": "- Widget renders correctly\n- Widget handles empty state",
+        })
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "1",
+        ], env={"BD_STUB_RESPONSE": resp})
+        assert "Widget renders correctly" in out["prompt"]
 
     def test_includes_epic_context(self, workspace, bd_stub):
         tf(workspace, ["init", "test", "--bd-path", bd_stub])
@@ -2689,31 +2703,17 @@ class TestNotifyAutoCloseParent:
 
 
 class TestWorkerPromptPhaseCap:
-    def test_phase_content_capped(self, workspace, bd_stub):
-        """Phase files exceeding 60 lines should be trimmed in worker prompt."""
+    def test_phase_content_excluded(self, workspace, bd_stub):
+        """Phase files are no longer included in worker prompts (replaced by dep summaries)."""
         tf(workspace, ["init", "test", "--bd-path", bd_stub])
         ctx_dir = workspace / ".beads" / "context-test"
-        # Create a large phase file with 100 lines
         phase_lines = ["# Phase 1 Summary"] + [f"Task {i}: completed thing {i}" for i in range(100)]
         (ctx_dir / "phase-1.md").write_text("\n".join(phase_lines))
         bead = [{"id": "bead-1", "title": "Test Task", "description": "Do stuff"}]
         out = tf(workspace, ["worker-prompt", "--beads", "bead-1"],
                  env={"BD_STUB_RESPONSE": json.dumps(bead)})
         assert out["ok"] is True
-        prompt = out["prompt"]
-        assert "earlier summaries trimmed" in prompt
-
-    def test_small_phase_not_capped(self, workspace, bd_stub):
-        """Phase files under 60 lines should not be trimmed."""
-        tf(workspace, ["init", "test", "--bd-path", bd_stub])
-        ctx_dir = workspace / ".beads" / "context-test"
-        phase_lines = ["# Phase 1 Summary"] + [f"Task {i}: done" for i in range(10)]
-        (ctx_dir / "phase-1.md").write_text("\n".join(phase_lines))
-        bead = [{"id": "bead-1", "title": "Test Task", "description": "Do stuff"}]
-        out = tf(workspace, ["worker-prompt", "--beads", "bead-1"],
-                 env={"BD_STUB_RESPONSE": json.dumps(bead)})
-        assert out["ok"] is True
-        assert "earlier summaries trimmed" not in out["prompt"]
+        assert "Phase 1 Summary" not in out["prompt"]
 
 
 # ── Wire-Plan Tests ──────────────────────
