@@ -356,7 +356,6 @@ class TestStalled:
         tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
         out = tf(workspace, ["stalled"])
         assert out["stalled"] == []
-        assert out["threshold_mins"] == 20
 
     def test_detects_stalled_worker(self, workspace):
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
@@ -369,7 +368,7 @@ class TestStalled:
 
         out = tf(workspace, ["stalled"])
         assert len(out["stalled"]) == 1
-        assert out["stalled"][0]["worker"] == "rust-1"
+        assert out["stalled"][0]["w"] == "rust-1"
         assert out["stalled"][0]["skill"] == "rust"
 
     def test_custom_threshold(self, workspace):
@@ -383,7 +382,6 @@ class TestStalled:
         # High threshold — not stalled
         out = tf(workspace, ["stalled", "--threshold-mins", "60"])
         assert out["stalled"] == []
-        assert out["threshold_mins"] == 60
 
         # Low threshold — stalled
         out = tf(workspace, ["stalled", "--threshold-mins", "10"])
@@ -400,7 +398,6 @@ class TestStalled:
 
         out = tf(workspace, ["stalled"])
         assert len(out["stalled"]) == 1
-        assert out["threshold_mins"] == 5
 
     def test_idle_worker_not_stalled(self, workspace):
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
@@ -541,7 +538,7 @@ class TestNotify:
                  env={"BD_STUB_RESPONSE": bead_resp})
         assert out["ok"] is True
         assert out.get("auto_closed") is False
-        assert "action_needed" in out
+        assert "action_needed" not in out
 
     def test_auto_closes_with_closed_self(self, workspace, bd_stub):
         """Notify should auto-close in_progress beads when worker called worker-close."""
@@ -729,7 +726,7 @@ class TestSync:
         out = tf(workspace, ["sync"])
         assert "stalled" in out
         assert len(out["stalled"]) == 1
-        assert out["stalled"][0]["worker"] == "rust-1"
+        assert out["stalled"][0]["w"] == "rust-1"
 
     def test_sync_persists_retirements(self, workspace):
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
@@ -1017,7 +1014,7 @@ class TestHelpers:
             "last_heartbeat": "2026-04-12T12:00:00Z",
             "last_heartbeat_note": "compiling",
         })
-        assert info["worker"] == "rust-1"
+        assert info["w"] == "rust-1"
         assert info["bead"] == "abc"
         assert info["last_hb"] == "2026-04-12T12:00:00Z"
         assert info["note"] == "compiling"
@@ -1028,7 +1025,7 @@ class TestHelpers:
         info = self.tf_mod._stalled_info("rust-1", {})
         assert info["bead"] == "?"
         assert info["last_hb"] == "?"
-        assert info["note"] == ""
+        assert "note" not in info
         assert "silent_mins" not in info
 
     def test_stalled_info_falls_back_to_dispatched_at(self):
@@ -3604,7 +3601,20 @@ class TestWorkerPromptWriteFile:
         assert prompt_file.exists()
         content = prompt_file.read_text()
         assert "Fix bug" in content
+        assert out["summary"] == "Fix bug"
         prompt_file.unlink()
+
+    def test_write_file_multi_bead_summary(self, workspace, bd_stub):
+        """write-file with multiple beads should produce a batch summary."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        bead_data = [{"id": "bead-1", "title": "Add auth", "description": "Add auth\n\nFiles: `src/auth.py`"}]
+        out = tf(workspace, ["worker-prompt", "--beads", "bead-1,bead-2", "--write-file"],
+                 env={"BD_STUB_RESPONSE": json.dumps(bead_data)})
+        assert out["ok"] is True
+        assert out["summary"].startswith("Batch: ")
+        assert "Add auth" in out["summary"]
+        assert len(out["summary"]) <= 120
+        Path(out["prompt_file"]).unlink()
 
     def test_normal_mode_returns_inline_prompt(self, workspace, bd_stub):
         """worker-prompt without --write-file should return prompt inline."""
@@ -4142,7 +4152,56 @@ class TestNotifyAutoClose:
                  env={"BD_STUB_RESPONSE": json.dumps(bead_resp)})
         assert out["ok"] is True
         assert out.get("auto_closed") is False
-        assert "action_needed" in out
+        assert "action_needed" not in out
+
+
+# ── Notify --auto Tests ──────────────────────────────────────
+
+
+class TestNotifyAuto:
+    """Verify --auto flag infers bead, skill, and files from registry + git."""
+
+    def test_auto_infers_bead_and_skill(self, workspace, bd_stub):
+        """--auto should infer bead_id and skill from registry."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+        bead_resp = json.dumps([{"id": "bead-abc", "status": "closed", "title": "Test"}])
+        out = tf(workspace, ["notify", "rust-1", "--auto", "--context-pct", "50"],
+                 env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
+        assert out["bead_status"] == "closed"
+
+    def test_auto_explicit_bead_overrides(self, workspace, bd_stub):
+        """Explicit bead_id should override --auto inference."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+        bead_resp = json.dumps([{"id": "bead-xyz", "status": "closed", "title": "Other"}])
+        out = tf(workspace, ["notify", "rust-1", "bead-xyz", "--auto", "--context-pct", "50"],
+                 env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
+
+    def test_auto_unknown_worker_fails(self, workspace):
+        """--auto with unknown worker should return error."""
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        out = tf(workspace, ["notify", "unknown-1", "--auto", "--context-pct", "50"])
+        assert out["ok"] is False
+        assert "--auto" in out["error"]
+
+    def test_auto_infers_files_from_git(self, workspace, bd_stub):
+        """--auto should infer files from git diff since dispatch SHA."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+
+        # Create a file and commit it after dispatch
+        (workspace / "src").mkdir(exist_ok=True)
+        (workspace / "src" / "new_file.py").write_text("# new")
+        subprocess.run(["git", "add", "src/new_file.py"], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "add new file"], cwd=workspace, check=True)
+
+        bead_resp = json.dumps([{"id": "bead-abc", "status": "closed", "title": "Test"}])
+        out = tf(workspace, ["notify", "rust-1", "--auto", "--context-pct", "50"],
+                 env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
 
 
 # ── Stall Detection with Expected Mins ──────────────────────────

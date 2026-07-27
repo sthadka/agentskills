@@ -224,11 +224,13 @@ def _stalled_info(wname: str, w: dict) -> dict:
     """Build a compact stalled-worker dict for output."""
     last_hb = w.get("last_heartbeat", w.get("dispatched_at", "?"))
     info: dict = {
-        "worker": wname,
+        "w": wname,
         "bead": w.get("bead", "?"),
         "last_hb": last_hb,
-        "note": w.get("last_heartbeat_note", ""),
     }
+    note = w.get("last_heartbeat_note", "")
+    if note:
+        info["note"] = note
     if last_hb and last_hb != "?":
         try:
             elapsed = (datetime.now(timezone.utc) - _parse_ts(last_hb)).total_seconds() / 60
@@ -630,7 +632,7 @@ def cmd_stalled(args: argparse.Namespace) -> None:
             info = _stalled_info(wname, w)
             info["skill"] = w.get("skill", "?")
             stalled.append(info)
-    _out({"stalled": stalled, "threshold_mins": threshold})
+    _out({"stalled": stalled})
 
 
 def cmd_bd_path(args: argparse.Namespace) -> None:
@@ -655,6 +657,32 @@ def cmd_notify(args: argparse.Namespace) -> None:
 
     reg, rp = _load_registry()
     now = _now()
+
+    # --auto: infer parameters from registry + git
+    if getattr(args, "auto", False):
+        w_entry = reg["workers"].get(args.worker)
+        if not w_entry:
+            _out({"ok": False, "error": f"--auto: worker '{args.worker}' not in registry"})
+            return
+        # Infer bead_id from registry if not explicitly provided
+        if not args.bead_id:
+            bead_val = w_entry.get("bead", "")
+            if isinstance(bead_val, list):
+                args.notify_beads = ",".join(bead_val)
+                args.auto = False
+                cmd_notify(args)
+                return
+            args.bead_id = bead_val
+        # Infer skill from registry if not explicitly provided
+        if not args.skill:
+            args.skill = w_entry.get("skill", "unknown")
+        # Infer files from git diff since dispatch SHA
+        if not getattr(args, "files", ""):
+            dispatch_sha = w_entry.get("dispatch_sha", "")
+            if dispatch_sha:
+                r = _run(f"git diff --name-only {shlex.quote(dispatch_sha)} HEAD 2>/dev/null")
+                if r.returncode == 0 and r.stdout.strip():
+                    args.files = ",".join(f.strip() for f in r.stdout.strip().split("\n") if f.strip())
 
     # Resolve bead_id: use provided value, or look up from registry
     if not args.bead_id:
@@ -734,7 +762,6 @@ def cmd_notify(args: argparse.Namespace) -> None:
                 result["auto_closed"] = True
         else:
             result["auto_closed"] = False
-            result["action_needed"] = "worker did not call worker-close — inspect git diff and either close manually or redispatch"
 
     # Auto-close parent epic if all siblings are closed
     if result["bead_status"] == "closed" and isinstance(bead, dict):
@@ -2535,7 +2562,9 @@ Complete each in order — claim, implement, commit, close — before starting t
         fd, path = tempfile.mkstemp(prefix="tf-prompt-", suffix=".md")
         with os.fdopen(fd, "w") as f:
             f.write(prompt)
-        _out({"ok": True, "prompt_file": path, "model": model, "beads": bead_ids})
+        titles = [bd.get("title", bd.get("id", "?")) for bd in bead_data]
+        summary = titles[0] if len(titles) == 1 else f"Batch: {', '.join(titles[:3])}"
+        _out({"ok": True, "prompt_file": path, "model": model, "beads": bead_ids, "summary": summary[:120]})
         return
 
     _out({"ok": True, "prompt": prompt, "model": model, "beads": bead_ids})
@@ -2837,6 +2866,7 @@ def main() -> None:
     s = sub.add_parser("notify")
     s.add_argument("worker")
     s.add_argument("bead_id", nargs="?", default=None)
+    s.add_argument("--auto", action="store_true", default=False)
     s.add_argument("--beads", default="", dest="notify_beads")
     s.add_argument("--context-pct", type=int, default=0, dest="context_pct")
     s.add_argument("--summary", default="")
