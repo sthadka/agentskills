@@ -8,6 +8,7 @@ Run: uv run --with pytest pytest sculptor/test_sculptor.py -v
 """
 
 import importlib.util
+import json
 import subprocess
 import textwrap
 from pathlib import Path
@@ -1229,6 +1230,278 @@ class TestGenerateBeadsPlan:
         assert "spec.md" in output
 
 
+# ── generate_graph_plan Tests ──────────────────────────────────
+
+
+class TestGenerateGraphPlan:
+    def _make_plan(self, text: str) -> dict:
+        from sculptor_mod import parse_plan
+        return parse_plan(textwrap.dedent(text))
+
+    def test_structure(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Auth System
+
+            ## Setup
+            - [ ] S1: Init project
+              - AC: scaffold ready
+
+            ## Phase 1: Core
+            - [ ] 1.1: Add login
+              - AC: login works
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "Build auth system")
+        nodes = graph["nodes"]
+        edges = graph["edges"]
+
+        epic = next(n for n in nodes if n["key"] == "epic")
+        assert epic["type"] == "epic"
+        assert epic["priority"] == 0
+        assert "Auth System" in epic["title"]
+        assert epic["description"] == "Build auth system"
+
+        task_nodes = [n for n in nodes if n["type"] == "task"]
+        assert len(task_nodes) == 2
+        for tn in task_nodes:
+            assert tn["parent_key"] == "epic"
+
+        setup_node = next(n for n in nodes if n["key"] == "setup.1")
+        assert setup_node["priority"] == 1
+        assert "setup" in setup_node.get("labels", [])
+
+        core_node = next(n for n in nodes if n["key"] == "1.1")
+        assert core_node["priority"] == 2
+
+    def test_setup_deps(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Test
+
+            ## Setup
+            - [ ] S1: Init
+              - AC: done
+            - [ ] S2: Deps
+              - AC: done
+
+            ## Phase 1: Core
+            - [ ] 1.1: Build
+              - AC: built
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "")
+        edges = graph["edges"]
+
+        def has_edge(f, t):
+            return any(e["from_key"] == f and e["to_key"] == t for e in edges)
+
+        assert has_edge("setup.1", "1.1")
+        assert has_edge("setup.2", "1.1")
+
+    def test_sequential_chain(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Test
+
+            ## Phase 1: Core
+            - [ ] 1.1: First
+              - AC: done
+            - [ ] 1.2: Second
+              - AC: done
+            - [ ] 1.3: Third
+              - AC: done
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "")
+        edges = graph["edges"]
+
+        def has_edge(f, t):
+            return any(e["from_key"] == f and e["to_key"] == t for e in edges)
+
+        assert has_edge("1.1", "1.2")
+        assert has_edge("1.2", "1.3")
+
+    def test_parallel_no_chain(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Test
+
+            ## Phase 1: Core [parallel]
+            - [ ] 1.1: A
+              - AC: done
+            - [ ] 1.2: B
+              - AC: done
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "")
+        edges = graph["edges"]
+
+        def has_edge(f, t):
+            return any(e["from_key"] == f and e["to_key"] == t for e in edges)
+
+        assert not has_edge("1.1", "1.2")
+        assert not has_edge("1.2", "1.1")
+
+    def test_cross_phase(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Test
+
+            ## Phase 1: Core
+            - [ ] 1.1: A
+              - AC: done
+            - [ ] 1.2: B
+              - AC: done
+
+            ## Phase 2: Integrate
+            - [ ] 2.1: Wire
+              - AC: done
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "")
+        edges = graph["edges"]
+
+        def has_edge(f, t):
+            return any(e["from_key"] == f and e["to_key"] == t for e in edges)
+
+        # Last task of sequential phase 1 blocks first task of phase 2
+        assert has_edge("1.2", "2.1")
+        # First task of phase 1 does NOT directly block phase 2
+        assert not has_edge("1.1", "2.1")
+
+    def test_explicit_deps(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Test
+
+            ## Phase 1: Core [parallel]
+            - [ ] 1.1: A
+              - AC: done
+            - [ ] 1.2: B
+              - AC: done
+
+            ## Phase 2: Build
+            - [ ] 2.1: C
+              - AC: done
+
+            ## Phase 3: Test
+            - [ ] 3.1: D
+              - AC: done
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            - Phase 3 depends on Phase 1 and Phase 2
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "")
+        edges = graph["edges"]
+
+        def has_edge(f, t):
+            return any(e["from_key"] == f and e["to_key"] == t for e in edges)
+
+        # Phase 3 depends on both phase 1 (all parallel tasks) and phase 2
+        assert has_edge("1.1", "3.1")
+        assert has_edge("1.2", "3.1")
+        assert has_edge("2.1", "3.1")
+
+    def test_acceptance_criteria_in_node(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Test
+
+            ## Phase 1: Core
+            - [ ] 1.1: Build widget
+              - AC: widget renders
+              - AC: widget responds to clicks
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "")
+        node = next(n for n in graph["nodes"] if n["key"] == "1.1")
+        assert "widget renders" in node["acceptance_criteria"]
+        assert "widget responds to clicks" in node["acceptance_criteria"]
+
+    def test_graph_is_valid_json(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: JSON Test
+
+            ## Setup
+            - [ ] S1: Init
+              - AC: done
+
+            ## Phase 1: Core
+            - [ ] 1.1: Build
+              - AC: done
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "desc")
+        serialized = json.dumps(graph)
+        parsed = json.loads(serialized)
+        assert parsed["nodes"] == graph["nodes"]
+        assert parsed["edges"] == graph["edges"]
+
+
 # ── read_idea_description Tests ──────────────────────────────────
 
 
@@ -1308,15 +1581,18 @@ class TestExportBeads:
 
         beads_dir = idea_dir / ".beads"
         assert (beads_dir / "plan.md").exists()
-        assert (beads_dir / "deps.txt").exists()
+        assert (beads_dir / "beads-graph.jsonl").exists()
         assert (beads_dir / "invariants.md").exists()
 
         plan_content = (beads_dir / "plan.md").read_text()
         assert "## Goal: Test Export" in plan_content
         assert "S1: Init" in plan_content or "Init" in plan_content
 
-        deps_content = (beads_dir / "deps.txt").read_text()
-        assert "blocks" in deps_content
+        graph = json.loads((beads_dir / "beads-graph.jsonl").read_text())
+        assert "nodes" in graph
+        assert "edges" in graph
+        assert any(n["key"] == "epic" for n in graph["nodes"])
+        assert any(e["type"] == "blocks" for e in graph["edges"])
 
         inv_content = (beads_dir / "invariants.md").read_text()
         assert "atomic" in inv_content
@@ -1357,18 +1633,25 @@ class TestExportBeads:
         """)
 
         sculptor(["export-beads", str(idea_dir)])
-        deps = (idea_dir / ".beads" / "deps.txt").read_text()
+        graph = json.loads((idea_dir / ".beads" / "beads-graph.jsonl").read_text())
+        edges = graph["edges"]
 
-        assert '"S1: Init" blocks "1.1: A"' in deps
-        assert '"S1: Init" blocks "1.2: B"' in deps
-        assert '"S1: Init" blocks "1.3: C"' in deps
+        def has_edge(from_key, to_key):
+            return any(e["from_key"] == from_key and e["to_key"] == to_key for e in edges)
 
-        assert '"1.1: A" blocks "1.2: B"' not in deps
-        assert '"1.2: B" blocks "1.3: C"' not in deps
+        # Setup blocks all parallel phase 1 tasks
+        assert has_edge("setup.1", "1.1")
+        assert has_edge("setup.1", "1.2")
+        assert has_edge("setup.1", "1.3")
 
-        assert '"1.1: A" blocks "2.1: Wire"' in deps
-        assert '"1.2: B" blocks "2.1: Wire"' in deps
-        assert '"1.3: C" blocks "2.1: Wire"' in deps
+        # No intra-phase edges for parallel phase
+        assert not has_edge("1.1", "1.2")
+        assert not has_edge("1.2", "1.3")
+
+        # All parallel tasks block phase 2
+        assert has_edge("1.1", "2.1")
+        assert has_edge("1.2", "2.1")
+        assert has_edge("1.3", "2.1")
 
 
 # ── wire-deps Tests (CLI, no bd) ────────────────────────────────

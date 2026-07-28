@@ -1583,223 +1583,53 @@ class TestTfClose:
         assert out["ok"] is True
 
 
-# ── Validate Plan Tests (Problem 2) ───────────────────────────
+# ── Import Graph Tests ────────────────────────────────────────
 
 
-class TestValidatePlan:
-    def test_valid_plan_passes(self, workspace):
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan = workspace / "plan.md"
-        plan.write_text(textwrap.dedent("""\
-            ## Build auth system
+class TestImportGraph:
+    def test_missing_file(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["import-graph", "nonexistent.jsonl"])
+        assert out["ok"] is False
+        assert "not found" in out["error"]
 
-            ### Type
-            epic
+    def test_rejects_md_file(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        md = workspace / "plan.md"
+        md.write_text("## Task\n")
+        out = tf(workspace, ["import-graph", str(md)])
+        assert out["ok"] is False
+        assert "sculptor" in out["error"].lower()
 
-            ## Create user model
-
-            ### Type
-            task
-
-            Files: `models/user.py`
-
-            ## Add login endpoint
-
-            ### Type
-            task
-
-            Files: `routes/auth.py`
-        """))
-        out = tf(workspace, ["validate-plan", str(plan)])
+    def test_calls_bd_create_graph(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        graph = workspace / "beads-graph.jsonl"
+        graph.write_text(json.dumps({
+            "nodes": [
+                {"key": "epic", "title": "Goal: Test", "type": "epic"},
+                {"key": "1.1", "title": "Task A", "type": "task", "parent_key": "epic"},
+            ],
+            "edges": [],
+        }))
+        bd_response = json.dumps({"ids": {"epic": "proj-001", "1.1": "proj-002"}})
+        out = tf(workspace, ["import-graph", str(graph)],
+                 env={"BD_STUB_RESPONSE": bd_response})
         assert out["ok"] is True
-        assert out["issues"] == 3
-        assert out["epics"] == 1
-        assert out["tasks"] == 2
+        assert out["epic_id"] == "proj-001"
+        assert out["created"] == 2
+        assert out["ids"]["epic"] == "proj-001"
 
-    def test_detects_hr_separators(self, workspace):
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan = workspace / "plan.md"
-        plan.write_text(textwrap.dedent("""\
-            ## Epic one
-
-            ---
-
-            ## Task one
-        """))
-        out = tf(workspace, ["validate-plan", str(plan)])
-        assert out["ok"] is False
-        assert any("---" in e for e in out["errors"])
-        assert any("line 3" in e for e in out["errors"])
-
-    def test_counts_epics_and_tasks(self, workspace):
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan = workspace / "plan.md"
-        plan.write_text(textwrap.dedent("""\
-            ## My Epic
-
-            ### Type
-            epic
-
-            ## Task A
-
-            ## Task B
-
-            ## Task C
-        """))
-        out = tf(workspace, ["validate-plan", str(plan)])
-        assert out["epics"] == 1
-        assert out["tasks"] == 3
-
-    def test_issue_count(self, workspace):
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan = workspace / "plan.md"
-        plan.write_text("## First issue\n\n## Second issue\n")
-        out = tf(workspace, ["validate-plan", str(plan)])
-        assert out["issues"] == 2
-        assert "dry_run" not in out
-
-    def test_nonexistent_file(self, workspace):
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        out = tf(workspace, ["validate-plan", "/nonexistent/plan.md"])
-        assert out["ok"] is False
-        assert "not found" in out.get("error", "")
-
-    def test_dash_variants(self, workspace):
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan = workspace / "plan.md"
-        plan.write_text("## Issue\n---\n----\n-----\n## Another\n")
-        out = tf(workspace, ["validate-plan", str(plan)])
-        assert out["ok"] is False
-        dash_errors = [e for e in out["errors"] if "---" in e]
-        assert len(dash_errors) == 3
-
-    def test_errors_missing_files_section(self, workspace):
-        """Tasks without a Files: line should produce an error."""
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan = workspace / "plan.md"
-        plan.write_text(textwrap.dedent("""\
-            ## Goal: Build Auth
-
-            ### Type
-            epic
-
-            ## Create User model
-
-            ### Description
-            Create models/user.py with fields.
-
-            ## Add login endpoint
-
-            ### Description
-            Login endpoint.
-            Files: `routes/auth.py`, `routes/login.py`
-        """))
-        out = tf(workspace, ["validate-plan", str(plan)])
-        assert out["ok"] is False
-        assert "missing_files" not in out  # removed from output
-        assert any("Create User model" in e and "missing Files" in e for e in out.get("errors", []))
-
-    def test_no_warning_when_all_have_files(self, workspace):
-        """All tasks with Files: lines should produce no missing_files."""
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan = workspace / "plan.md"
-        plan.write_text(textwrap.dedent("""\
-            ## Goal: Build Auth
-
-            ### Type
-            epic
-
-            ## Create User model
-
-            Files: `models/user.py`
-
-            ## Add login endpoint
-
-            Files: `routes/auth.py`
-        """))
-        out = tf(workspace, ["validate-plan", str(plan)])
-        assert "missing_files" not in out
-
-    def test_detects_depends_on(self, workspace):
-        """validate-plan should count depends_on entries in soft_deps."""
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan = workspace / "plan.md"
-        plan.write_text(textwrap.dedent("""\
-            ## Epic
-
-            ### Type
-            epic
-
-            ## Implement scanner interface
-
-            Files: `pkg/scanner/scanner.go`
-
-            ## Implement snapshot package
-
-            Files: `pkg/scanner/snapshot.go`
-
-            ### Dependencies
-            depends_on:Implement scanner interface
-        """))
-        out = tf(workspace, ["validate-plan", str(plan)])
-        assert out["ok"] is True
-        assert out.get("soft_deps") == 1
-
-    def test_detects_rogue_h3_headers(self, workspace):
-        """Unrecognized ### headers inside issue bodies should produce errors."""
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan = workspace / ".beads" / "plan.md"
-        plan.write_text(textwrap.dedent("""\
-            ## Setup config loader
-
-            ### Type
-            task
-
-            ### Description
-            Implement config loading.
-            ### Task 2: Database session with ATTACH
-            This line should not be here.
-
-            ## Implement database layer
-
-            ### Type
-            task
-
-            ### Description
-            Database stuff.
-        """))
-        out = tf(workspace, ["validate-plan", str(plan)])
-        assert out["ok"] is False
-        assert any("Task 2: Database session" in e for e in out.get("errors", []))
-
-    def test_recognized_h3_headers_pass(self, workspace):
-        """Recognized ### headers (Type, Priority, etc.) should not trigger errors."""
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan = workspace / ".beads" / "plan.md"
-        plan.write_text(textwrap.dedent("""\
-            ## Setup config loader
-
-            ### Type
-            task
-
-            ### Priority
-            high
-
-            ### Description
-            Implement config loading.
-
-            ### Acceptance Criteria
-            - Config loads from file
-
-            Files: `config.py`
-        """))
-        out = tf(workspace, ["validate-plan", str(plan)])
-        assert not out.get("errors")
-
-
-# ── Dedup Tests ────────────────────────────────────────────
-
-
+    def test_writes_created_json(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        graph = workspace / "beads-graph.jsonl"
+        graph.write_text(json.dumps({"nodes": [{"key": "epic", "title": "G", "type": "epic"}], "edges": []}))
+        bd_response = json.dumps({"ids": {"epic": "proj-001"}})
+        tf(workspace, ["import-graph", str(graph)],
+           env={"BD_STUB_RESPONSE": bd_response})
+        created_path = workspace / ".beads" / "context-test" / "created.json"
+        assert created_path.exists()
+        created = json.loads(created_path.read_text())
+        assert any(item["id"] == "proj-001" for item in created)
 class TestDedup:
     def test_no_duplicates(self, workspace, bd_stub):
         tf(workspace, ["init", "test", "--bd-path", bd_stub])
@@ -2239,182 +2069,6 @@ class TestWorkerPrompt:
         ], env={"BD_STUB_RESPONSE": resp})
         assert out["ok"] is True
         assert "Spec Reference" not in out["prompt"]
-
-
-# ── Validate Plan Parallelism Tests ──────────────────────────
-
-
-class TestValidatePlanParallelism:
-    def test_warns_fully_sequential_plan(self, workspace):
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan = workspace / "plan.md"
-        plan.write_text(textwrap.dedent("""\
-            ## Epic
-
-            ### Type
-            epic
-
-            ## Task A
-
-            Files: `src/a.py`
-
-            ### Dependencies
-            blocks:epic
-
-            ## Task B
-
-            Files: `src/b.py`
-
-            ### Dependencies
-            blocks:task-a
-
-            ## Task C
-
-            Files: `src/c.py`
-
-            ### Dependencies
-            blocks:task-b
-
-            ## Task D
-
-            Files: `src/d.py`
-
-            ### Dependencies
-            blocks:task-c
-        """))
-        out = tf(workspace, ["validate-plan", str(plan)])
-        assert out["ok"] is True
-        assert "warnings" in out
-        assert any("sequential" in w.lower() for w in out["warnings"])
-
-    def test_no_warning_for_parallel_plan(self, workspace):
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan = workspace / "plan.md"
-        plan.write_text(textwrap.dedent("""\
-            ## Epic
-
-            ### Type
-            epic
-
-            ## Task A
-
-            Files: `src/a.py`
-
-            ## Task B
-
-            Files: `src/b.py`
-
-            ## Task C
-
-            Files: `src/c.py`
-
-            ### Dependencies
-            blocks:task-a
-
-            ## Task D
-
-            Files: `src/d.py`
-
-            ### Dependencies
-            blocks:task-b
-        """))
-        out = tf(workspace, ["validate-plan", str(plan)])
-        assert "warnings" not in out or not any("sequential" in w.lower() for w in out.get("warnings", []))
-
-    def test_warns_no_dependencies(self, workspace):
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan = workspace / "plan.md"
-        plan.write_text(textwrap.dedent("""\
-            ## Epic
-
-            ### Type
-            epic
-
-            ## Task A
-
-            Files: `src/a.py`
-
-            ## Task B
-
-            Files: `src/b.py`
-
-            ## Task C
-
-            Files: `src/c.py`
-
-            ## Task D
-
-            Files: `src/d.py`
-        """))
-        out = tf(workspace, ["validate-plan", str(plan)])
-        assert "warnings" in out
-        assert any("dependencies" in w.lower() or "parallel" in w.lower() for w in out["warnings"])
-
-    def test_check_parallelism_flag_errors(self, workspace):
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan = workspace / "plan.md"
-        plan.write_text(textwrap.dedent("""\
-            ## Epic
-
-            ### Type
-            epic
-
-            ## Task A
-
-            Files: `src/a.py`
-
-            ### Dependencies
-            blocks:epic
-
-            ## Task B
-
-            Files: `src/b.py`
-
-            ### Dependencies
-            blocks:task-a
-
-            ## Task C
-
-            Files: `src/c.py`
-
-            ### Dependencies
-            blocks:task-b
-
-            ## Task D
-
-            Files: `src/d.py`
-
-            ### Dependencies
-            blocks:task-c
-        """))
-        out = tf(workspace, ["validate-plan", "--check-parallelism", str(plan)])
-        assert out["ok"] is False
-        assert "warnings" in out
-
-    def test_small_plan_no_warning(self, workspace):
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan = workspace / "plan.md"
-        plan.write_text(textwrap.dedent("""\
-            ## Epic
-
-            ### Type
-            epic
-
-            ## Task A
-
-            Files: `src/a.py`
-
-            ## Task B
-
-            Files: `src/b.py`
-        """))
-        out = tf(workspace, ["validate-plan", str(plan)])
-        assert "warnings" not in out
-
-
-# ── Session Tracking Tests ───────────────────────────────────
-
-
 class TestSessionTracking:
     def test_init_sets_session_id(self, workspace):
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
@@ -2711,145 +2365,6 @@ class TestWorkerPromptPhaseCap:
                  env={"BD_STUB_RESPONSE": json.dumps(bead)})
         assert out["ok"] is True
         assert "Phase 1 Summary" not in out["prompt"]
-
-
-# ── Wire-Plan Tests ──────────────────────
-
-
-class TestWirePlan:
-    def test_missing_plan_file(self, workspace):
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        ids_file = workspace / "ids.json"
-        ids_file.write_text("[]")
-        out = tf(workspace, ["wire-plan", "nonexistent.md", "--ids", str(ids_file)])
-        assert out["ok"] is False
-        assert "not found" in out["error"]
-
-    def test_missing_ids_file(self, workspace):
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan_file = workspace / "plan.md"
-        plan_file.write_text("## Task 1\n")
-        out = tf(workspace, ["wire-plan", str(plan_file), "--ids", "nonexistent.json"])
-        assert out["ok"] is False
-        assert "not found" in out["error"]
-
-    def test_parses_plan_structure(self, workspace, bd_stub):
-        tf(workspace, ["init", "test", "--bd-path", bd_stub])
-        plan = textwrap.dedent("""\
-            ## Build Auth System
-
-            ### Type
-            epic
-
-            ## Create User model
-
-            ### Type
-            task
-
-            ## Add login endpoint
-
-            ### Type
-            task
-
-            ### Dependencies
-            blocks:Add logout endpoint
-
-            ## Add logout endpoint
-
-            ### Type
-            task
-        """)
-        plan_file = workspace / "plan.md"
-        plan_file.write_text(plan)
-        ids = [
-            {"id": "epic-1", "title": "Build Auth System"},
-            {"id": "task-1", "title": "Create User model"},
-            {"id": "task-2", "title": "Add login endpoint"},
-            {"id": "task-3", "title": "Add logout endpoint"},
-        ]
-        ids_file = workspace / "ids.json"
-        ids_file.write_text(json.dumps(ids))
-        out = tf(workspace, ["wire-plan", str(plan_file), "--ids", str(ids_file)])
-        assert out["total_issues"] == 4
-        assert out["parent_child"] == 3
-        assert out["blocking"] == 1
-
-    def test_depends_on_syntax(self, workspace, bd_stub):
-        tf(workspace, ["init", "test", "--bd-path", bd_stub])
-        plan = textwrap.dedent("""\
-            ## Setup project
-
-            ### Type
-            epic
-
-            ## Create scanner interface
-
-            ### Type
-            task
-
-            ## Implement snapshot package
-
-            ### Type
-            task
-
-            ### Dependencies
-            depends_on:Create scanner interface
-        """)
-        plan_file = workspace / "plan.md"
-        plan_file.write_text(plan)
-        ids = [
-            {"id": "epic-1", "title": "Setup project"},
-            {"id": "task-1", "title": "Create scanner interface"},
-            {"id": "task-2", "title": "Implement snapshot package"},
-        ]
-        ids_file = workspace / "ids.json"
-        ids_file.write_text(json.dumps(ids))
-        out = tf(workspace, ["wire-plan", str(plan_file), "--ids", str(ids_file)])
-        assert out["ok"] is True
-        assert out["blocking"] == 1
-
-    def test_depends_on_underscore_and_hyphen(self, workspace, bd_stub):
-        tf(workspace, ["init", "test", "--bd-path", bd_stub])
-        plan = textwrap.dedent("""\
-            ## Task A
-
-            ### Type
-            task
-
-            ## Task B
-
-            ### Type
-            task
-
-            ### Dependencies
-            depends-on: Task A
-        """)
-        plan_file = workspace / "plan.md"
-        plan_file.write_text(plan)
-        ids = [
-            {"id": "t-1", "title": "Task A"},
-            {"id": "t-2", "title": "Task B"},
-        ]
-        ids_file = workspace / "ids.json"
-        ids_file.write_text(json.dumps(ids))
-        out = tf(workspace, ["wire-plan", str(plan_file), "--ids", str(ids_file)])
-        assert out["blocking"] == 1
-
-    def test_no_id_match_reports_error(self, workspace, bd_stub):
-        tf(workspace, ["init", "test", "--bd-path", bd_stub])
-        plan = "## Unknown Task\n\n### Type\ntask\n"
-        plan_file = workspace / "plan.md"
-        plan_file.write_text(plan)
-        ids_file = workspace / "ids.json"
-        ids_file.write_text(json.dumps([{"id": "x", "title": "Different Title"}]))
-        out = tf(workspace, ["wire-plan", str(plan_file), "--ids", str(ids_file)])
-        assert out["ok"] is False
-        assert len(out["errors"]) > 0
-
-
-# ── Sync Stale Reuse Enforcement Tests ──────────────────────
-
-
 class TestSyncStaleReuse:
     def test_all_stale_workers_no_reuse_enforced(self, workspace):
         """When all idle workers are stale, reuse_enforced should not be set."""
@@ -3216,65 +2731,6 @@ class TestWorkerPromptIntegration:
                  env={"BD_STUB_RESPONSE": bead_resp})
         assert out["ok"] is True
         assert "Integration Task" not in out["prompt"]
-
-
-# ── Import-Deps Tests ──────────────────────
-
-
-class TestImportDeps:
-    def test_basic_import(self, workspace, bd_stub):
-        tf(workspace, ["init", "test", "--bd-path", bd_stub])
-        deps = workspace / "deps.txt"
-        deps.write_text('"Task A" blocks "Task B"\n"Task A" blocks "Task C"\n')
-        beads = [
-            {"id": "b1", "title": "Task A"},
-            {"id": "b2", "title": "Task B"},
-            {"id": "b3", "title": "Task C"},
-        ]
-        out = tf(workspace, ["import-deps", str(deps)],
-                 env={"BD_STUB_RESPONSE": json.dumps(beads)})
-        assert out["ok"] is True
-        assert out["applied"] == 2
-
-    def test_validate_mode(self, workspace, bd_stub):
-        tf(workspace, ["init", "test", "--bd-path", bd_stub])
-        deps = workspace / "deps.txt"
-        deps.write_text('"Task A" blocks "Task B"\n')
-        beads = [{"id": "b1", "title": "Task A"}, {"id": "b2", "title": "Task B"}]
-        out = tf(workspace, ["import-deps", str(deps), "--validate"],
-                 env={"BD_STUB_RESPONSE": json.dumps(beads)})
-        assert out["ok"] is True
-        assert out["total"] == 1
-        assert out["unresolved"] == []
-
-    def test_unresolved_title(self, workspace, bd_stub):
-        tf(workspace, ["init", "test", "--bd-path", bd_stub])
-        deps = workspace / "deps.txt"
-        deps.write_text('"Task A" blocks "Unknown Task"\n')
-        beads = [{"id": "b1", "title": "Task A"}]
-        out = tf(workspace, ["import-deps", str(deps)],
-                 env={"BD_STUB_RESPONSE": json.dumps(beads)})
-        assert out["ok"] is False
-        assert "Unknown Task" in out["unresolved"]
-
-    def test_empty_file(self, workspace, bd_stub):
-        tf(workspace, ["init", "test", "--bd-path", bd_stub])
-        deps = workspace / "deps.txt"
-        deps.write_text("# just a comment\n\n")
-        out = tf(workspace, ["import-deps", str(deps)],
-                 env={"BD_STUB_RESPONSE": "[]"})
-        assert out["ok"] is True
-        assert out["applied"] == 0
-
-    def test_file_not_found(self, workspace):
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        out = tf(workspace, ["import-deps", "/nonexistent/deps.txt"])
-        assert out["ok"] is False
-
-
-# ── Ready Tests ──────────────────────
-
-
 class TestReady:
     def test_filters_epics(self, workspace, bd_stub):
         tf(workspace, ["init", "test", "--bd-path", bd_stub])
@@ -3543,46 +2999,6 @@ class TestNotifyAutoSummary:
         assert out["ok"] is True
         reg = load_registry(workspace)
         assert reg["workers"]["rust-1"]["summary"] == "Custom summary"
-
-
-# ── Validate Plan --no-files-check Tests ──────────────────────
-
-
-class TestValidatePlanNoFilesCheck:
-    def test_no_files_check_skips_missing_files_warning(self, workspace):
-        """validate-plan --no-files-check should not warn about missing Files: lines."""
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan = workspace / "plan.md"
-        plan.write_text(textwrap.dedent("""\
-            ## Port feature X from anarlog
-
-            Backlog task — study commit abc123 and apply to sruti.
-
-            ## Port feature Y from anarlog
-
-            Backlog task — study commit def456 and apply to sruti.
-        """))
-        out = tf(workspace, ["validate-plan", str(plan), "--no-files-check"])
-        assert out["ok"] is True
-        assert "errors" not in out or not any("missing Files" in e for e in out.get("errors", []))
-
-    def test_without_flag_warns_about_missing_files(self, workspace):
-        """validate-plan without --no-files-check should warn about missing Files: lines."""
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan = workspace / "plan.md"
-        plan.write_text(textwrap.dedent("""\
-            ## Port feature X from anarlog
-
-            Backlog task — study commit abc123 and apply to sruti.
-        """))
-        out = tf(workspace, ["validate-plan", str(plan)])
-        assert out["ok"] is False
-        assert any("missing Files" in e for e in out.get("errors", []))
-
-
-# ── Worker Prompt --write-file Tests ──────────────────────────
-
-
 class TestWorkerPromptWriteFile:
     def test_write_file_creates_temp_file(self, workspace, bd_stub):
         """worker-prompt --write-file should write prompt to a temp file."""
@@ -3628,6 +3044,42 @@ class TestWorkerPromptWriteFile:
         assert "prompt_file" not in out
 
 
+# ── Inline Context Tests ─────────────────────────────────────
+
+
+class TestWorkerPromptInlineContext:
+    def test_inline_context_embeds_content(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        ctx = workspace / ".beads" / "context-test"
+        (ctx / "worker-context.md").write_text("# Project\nUse TypeScript everywhere.")
+        resp = json.dumps({"id": "1", "title": "T1", "description": "desc"})
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "1", "--inline-context",
+        ], env={"BD_STUB_RESPONSE": resp})
+        assert "TypeScript everywhere" in out["prompt"]
+        assert "Read `" not in out["prompt"]
+
+    def test_default_references_file(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        ctx = workspace / ".beads" / "context-test"
+        (ctx / "worker-context.md").write_text("# Project\nUse TypeScript everywhere.")
+        resp = json.dumps({"id": "1", "title": "T1", "description": "desc"})
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "1",
+        ], env={"BD_STUB_RESPONSE": resp})
+        assert "worker-context.md" in out["prompt"]
+        assert "TypeScript everywhere" not in out["prompt"]
+
+    def test_inline_context_no_file(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        resp = json.dumps({"id": "1", "title": "T1", "description": "desc"})
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "1", "--inline-context",
+        ], env={"BD_STUB_RESPONSE": resp})
+        assert out["ok"] is True
+        assert "worker-context.md" not in out["prompt"]
+
+
 # ── Infer Files Improved Tests ────────────────────────────────
 
 
@@ -3655,63 +3107,6 @@ class TestInferFilesImproved:
         desc = "Add the new method in store/mod.rs"
         result = _infer_files_from_description(desc)
         assert "store/mod.rs" in result
-
-
-# ── Create Wrapper Tests ──────────────────────────────────────
-
-
-class TestCreate:
-    def test_create_parses_bd_output(self, workspace, bd_stub):
-        """tf.py create should parse bd create -f output and return clean JSON."""
-        tf(workspace, ["init", "test", "--bd-path", bd_stub])
-        plan = workspace / "plan.md"
-        plan.write_text(textwrap.dedent("""\
-            ## Task one
-
-            Description for task one
-
-            ## Task two
-
-            Description for task two
-        """))
-
-        created = [{"id": "bead-1", "title": "Task one"}, {"id": "bead-2", "title": "Task two"}]
-        out = tf(workspace, ["create", str(plan)],
-                 env={"BD_STUB_RESPONSE": json.dumps(created)})
-        assert out["ok"] is True
-        assert out["created"] == 2
-        assert out["expected"] == 2
-        assert "bead-1" in out["ids"]
-        assert "bead-2" in out["ids"]
-
-    def test_create_fallback_on_bad_json(self, workspace, bd_stub):
-        """tf.py create should fall back to bd list when bd create JSON is unparseable."""
-        tf(workspace, ["init", "test", "--bd-path", bd_stub])
-        plan = workspace / "plan.md"
-        plan.write_text(textwrap.dedent("""\
-            ## Task one
-
-            Description
-        """))
-
-        # Simulate bd create returning garbage, then bd list returning valid JSON
-        # The stub returns the same response for all calls, so we use a valid list
-        listed = [{"id": "bead-x", "status": "open"}]
-        out = tf(workspace, ["create", str(plan)],
-                 env={"BD_STUB_RESPONSE": json.dumps(listed)})
-        assert out["ok"] is True
-
-    def test_create_file_not_found(self, workspace, bd_stub):
-        """tf.py create should fail gracefully for missing files."""
-        tf(workspace, ["init", "test", "--bd-path", bd_stub])
-        out = tf(workspace, ["create", "/nonexistent/plan.md"])
-        assert out["ok"] is False
-        assert "not found" in out["error"]
-
-
-# ── Section-Aware Conflict Check Tests ────────────────────────
-
-
 class TestConflictCheckSections:
     def test_same_file_different_sections_is_low_risk(self, workspace, bd_stub):
         """Two beads modifying different sections of the same file → low_risk."""
@@ -4235,39 +3630,6 @@ class TestStallExpectedMins:
 
         out = tf(workspace, ["stalled", "--threshold-mins", "20"])
         assert len(out["stalled"]) == 0, "Worker silent 30min with 20min threshold (2x=40) should not be stalled"
-
-
-# ── Validate-Plan Init Warning Tests ────────────────────────────
-
-
-class TestValidatePlanInitWarning:
-    """Verify validate-plan warns when tf.py init hasn't been run."""
-
-    def test_warns_when_no_active_plan(self, workspace):
-        """validate-plan should warn if .beads/active-plan doesn't exist."""
-        plan = workspace / ".beads" / "plan.md"
-        plan.write_text("## Task 1\n\n### Type\ntask\n\n### Description\nDo something\nFiles: foo.py\n")
-
-        out = tf(workspace, ["validate-plan", str(plan)])
-        assert out["ok"] is True
-        assert any("init has not been run" in w for w in out.get("warnings", [])), \
-            f"Expected init warning, got: {out.get('warnings', [])}"
-
-    def test_no_warning_after_init(self, workspace):
-        """validate-plan should not warn about init after tf.py init has been run."""
-        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
-        plan = workspace / ".beads" / "plan.md"
-        plan.write_text("## Task 1\n\n### Type\ntask\n\n### Description\nDo something\nFiles: foo.py\n")
-
-        out = tf(workspace, ["validate-plan", str(plan)])
-        assert out["ok"] is True
-        for w in out.get("warnings", []):
-            assert "init has not been run" not in w
-
-
-# ── Worker-Close File Validation Tests ──────────────────────────
-
-
 class TestWorkerCloseFileValidation:
     """Verify worker-close warns when target files were not modified."""
 

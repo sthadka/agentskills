@@ -1410,102 +1410,6 @@ def cmd_dep(args: argparse.Namespace) -> None:
     _out({"ok": False, "error": f"bd dep failed: {r.stderr.strip()[:200]}"})
 
 
-def cmd_import_deps(args: argparse.Namespace) -> None:
-    """Bulk-import deps from a file using "Title A" blocks "Title B" format."""
-    dep_path = Path(args.file)
-    if not dep_path.exists():
-        _out({"ok": False, "error": f"file not found: {args.file}"})
-        return
-
-    # Parse dep lines
-    pairs: list[tuple[str, str]] = []
-    for line in dep_path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        m = re.match(r'"([^"]+)"\s+blocks\s+"([^"]+)"', line)
-        if m:
-            pairs.append((m.group(1), m.group(2)))
-
-    if not pairs:
-        _out({"ok": True, "applied": 0, "already_existed": 0, "errors": [], "unresolved": []})
-        return
-
-    # Build title→ID mapping via bd list
-    rp = _registry_path()
-    bd = _bd(rp)
-    r = _run(f"{bd} list --limit {BD_LIST_LIMIT} --json")
-    stdout = r.stdout.strip()
-    json_start = next((i for i, ch in enumerate(stdout) if ch in ("[", "{")), -1)
-    all_beads = []
-    if json_start >= 0:
-        try:
-            all_beads = json.loads(stdout[json_start:])
-        except json.JSONDecodeError as e:
-            sys.stderr.write(f"tf.py warning: parsing bd list JSON in import-deps: {e}\n")
-    if isinstance(all_beads, dict):
-        all_beads = all_beads.get("issues", [])
-
-    title_to_id: dict[str, str] = {}
-    for b in all_beads:
-        title = b.get("title", b.get("name", ""))
-        bid = b.get("id", "")
-        if title and bid:
-            title_to_id[_norm(title)] = bid
-
-    def _resolve(title: str) -> str:
-        norm_t = _norm(title)
-        if norm_t in title_to_id:
-            return title_to_id[norm_t]
-        for t, tid in title_to_id.items():
-            if t.startswith(norm_t) or norm_t.startswith(t):
-                return tid
-        return ""
-
-    unresolved = []
-    applied = 0
-    already_existed = 0
-    errors = []
-
-    if args.validate:
-        for blocker_title, blocked_title in pairs:
-            if not _resolve(blocker_title):
-                unresolved.append(blocker_title)
-            if not _resolve(blocked_title):
-                unresolved.append(blocked_title)
-        unresolved = sorted(set(unresolved))
-        _out({"ok": len(unresolved) == 0, "total": len(pairs), "resolved": len(pairs) * 2 - len(unresolved), "unresolved": unresolved})
-        return
-
-    for blocker_title, blocked_title in pairs:
-        blocker_id = _resolve(blocker_title)
-        blocked_id = _resolve(blocked_title)
-        if not blocker_id:
-            unresolved.append(blocker_title)
-            continue
-        if not blocked_id:
-            unresolved.append(blocked_title)
-            continue
-
-        r = _run(f"{bd} dep {blocker_id} --blocks {blocked_id}")
-        if r.returncode == 0:
-            applied += 1
-        else:
-            combined = (r.stderr + r.stdout).lower()
-            if "unique" in combined or "duplicate" in combined or "already exists" in combined:
-                already_existed += 1
-            else:
-                errors.append(f"{blocker_title} -> {blocked_title}: {r.stderr.strip()[:100]}")
-
-    unresolved = sorted(set(unresolved))
-    result: dict = {"ok": len(errors) == 0 and len(unresolved) == 0, "applied": applied, "already_existed": already_existed}
-    if errors:
-        result["errors"] = errors
-    if unresolved:
-        result["unresolved"] = unresolved
-    _out(result)
-
-
 def cmd_close(args: argparse.Namespace) -> None:
     """Close a bead via bd close, normalizing output to a simple JSON object."""
     rp = _registry_path()
@@ -1521,58 +1425,46 @@ def cmd_close(args: argparse.Namespace) -> None:
     _out({"ok": True, "id": args.bead_id, "status": status})
 
 
-def cmd_create(args: argparse.Namespace) -> None:
-    """Wrapper for bd create -f with clean JSON output.
-
-    Handles the common issue where bd create --json output is truncated or
-    contains non-JSON prefixes that break jq parsing. Falls back to bd list
-    to verify creation count if JSON parsing fails.
-    """
-    plan_path = Path(args.file)
-    if not plan_path.exists():
+def cmd_import_graph(args: argparse.Namespace) -> None:
+    """Import a beads-graph.jsonl file via bd create --graph."""
+    graph_path = Path(args.file)
+    if not graph_path.exists():
         _out({"ok": False, "error": f"file not found: {args.file}"})
+        return
+    if graph_path.suffix == '.md':
+        _out({"ok": False, "error": "Markdown plans must be converted first. Run: /sculptor export-beads <idea-dir>"})
         return
 
     rp = _registry_path()
     bd = _bd(rp)
-
-    # Count expected issues from plan file (## headers)
-    content = plan_path.read_text()
-    expected = len(re.findall(r"^## .+", content, re.MULTILINE))
-
-    # Run bd create -f
-    file_escaped = shlex.quote(str(plan_path))
-    r = _run(f"{bd} create -f {file_escaped} --json")
+    r = _run(f"{bd} create --graph {shlex.quote(str(graph_path))} --json")
     if r.returncode != 0:
-        _out({"ok": False, "error": f"bd create failed: {r.stderr.strip()[:300]}"})
+        _out({"ok": False, "error": f"bd create --graph failed: {r.stderr.strip()[:300]}"})
         return
 
-    # Try to parse the JSON output
-    created = _parse_bd_json(r.stdout)
-    if not created:
-        # Fallback: bd create JSON was unparseable — verify via bd list
-        r2 = _run(f"{bd} list --status=open --limit {BD_LIST_LIMIT} --json")
-        created = _parse_bd_json(r2.stdout) or []
+    stdout = r.stdout.strip()
+    json_start = next((i for i, ch in enumerate(stdout) if ch in ("{", "[")), -1)
+    if json_start < 0:
+        _out({"ok": False, "error": "no JSON in bd create --graph output"})
+        return
+    try:
+        result = json.loads(stdout[json_start:])
+    except json.JSONDecodeError as e:
+        _out({"ok": False, "error": f"JSON parse error: {e}"})
+        return
 
-    ids = [c.get("id", c.get("name", "")) for c in created if isinstance(c, dict)]
-    result: dict = {"ok": True, "created": len(ids), "expected": expected, "ids": ids}
-    if not _parse_bd_json(r.stdout):
-        result["fallback"] = True
-        result["note"] = "bd create JSON was unparseable — count from bd list"
+    ids = result.get("ids", {})
+    epic_id = ids.get("epic", "")
 
-    # Persist created issues for wire-plan to consume
-    ids_file = ""
     try:
         ctx = _context_dir()
-        ids_path = ctx / "created.json"
-        ids_path.write_text(json.dumps(created, indent=2))
-        ids_file = str(ids_path)
+        created_path = ctx / "created.json"
+        created = [{"id": v, "title": k} for k, v in ids.items()]
+        created_path.write_text(json.dumps(created, indent=2))
     except (OSError, KeyError):
         pass
-    if ids_file:
-        result["ids_file"] = ids_file
 
-    _out(result)
+    _out({"ok": True, "epic_id": epic_id, "created": len(ids), "ids": ids})
 
 
 def _parse_bd_json(stdout: str) -> list:
@@ -1786,289 +1678,6 @@ def cmd_ad_hoc(args: argparse.Namespace) -> None:
     }
     _save_registry(reg, rp)
     _out({"ok": True, "worker": worker, "bead": f"ad-hoc:{args.name}"})
-
-
-def cmd_validate_plan(args: argparse.Namespace) -> None:
-    """Validate a plan markdown file for bd create -f compatibility."""
-    plan_path = Path(args.file)
-    if not plan_path.exists():
-        _out({"ok": False, "error": f"file not found: {args.file}"})
-        return
-
-    content = plan_path.read_text()
-    lines = content.split("\n")
-    errors = []
-    warnings = []
-    issues = []
-
-    active_plan = _beads_dir() / "active-plan"
-    if not active_plan.exists():
-        warnings.append("tf.py init has not been run — tf.py create will fail without it")
-
-    for i, line in enumerate(lines, 1):
-        stripped = line.strip()
-        if re.match(r'^-{3,}\s*$', stripped):
-            errors.append(f"line {i}: '---' horizontal rule breaks bd parser — remove it")
-        elif stripped.startswith("## "):
-            title = stripped[3:].strip()
-            issues.append({"line": i, "title": title})
-
-    # Determine types and extract bodies for each issue
-    epics = 0
-    epic_indices: set[int] = set()
-    for idx, iss in enumerate(issues):
-        start = iss["line"] - 1  # 0-based
-        end = issues[idx + 1]["line"] - 1 if idx + 1 < len(issues) else len(lines)
-        body = "\n".join(lines[start:end])
-        iss["body"] = body
-        # Check if this issue is an epic
-        for i in range(start, end):
-            if re.match(r'^###\s+[Tt]ype\s*$', lines[i].strip()):
-                for j in range(i + 1, min(i + 4, end)):
-                    type_line = lines[j].strip()
-                    if type_line and not type_line.startswith("#"):
-                        if type_line.lower() == "epic":
-                            epics += 1
-                            epic_indices.add(idx)
-                        break
-                break
-
-    # Check for unrecognized ### headers that bd may misparse as metadata
-    recognized_h3 = {
-        "type", "priority", "description", "design", "acceptance criteria",
-        "assignee", "labels", "dependencies", "soft dependencies", "files",
-    }
-    rogue_headers = []
-    for idx, iss in enumerate(issues):
-        start = iss["line"] - 1
-        end = issues[idx + 1]["line"] - 1 if idx + 1 < len(issues) else len(lines)
-        for li in range(start + 1, end):
-            stripped = lines[li].strip()
-            h3_match = re.match(r'^###\s+(.+)$', stripped)
-            if h3_match:
-                header_text = h3_match.group(1).strip().lower()
-                if header_text not in recognized_h3:
-                    rogue_headers.append(
-                        f"line {li + 1}: unrecognized H3: '{stripped}'"
-                    )
-
-    # Check that non-epic issues have a Files: line
-    missing_files = []
-    no_files_check = getattr(args, "no_files_check", False)
-    if not no_files_check:
-        for idx, iss in enumerate(issues):
-            if idx in epic_indices:
-                continue
-            files = _extract_files_from_description(iss.get("body", ""))
-            if not files:
-                missing_files.append(iss["title"])
-
-    # Check that producer tasks name their consumer
-    orphan_packages = []
-    task_titles = [iss["title"] for idx, iss in enumerate(issues) if idx not in epic_indices]
-    all_bodies = " ".join(iss.get("body", "") for iss in issues)
-    for idx, iss in enumerate(issues):
-        if idx in epic_indices:
-            continue
-        title_lower = iss["title"].lower()
-        if any(kw in title_lower for kw in ("implement", "create")) and any(kw in title_lower for kw in ("package", "module", "library", "pkg/")):
-            # Extract a package-like name from the title
-            pkg_match = re.search(r'`?(?:pkg/|internal/)?([a-zA-Z0-9_/-]+)`?', iss["title"])
-            if pkg_match:
-                pkg_name = pkg_match.group(1).split("/")[-1]
-                # Check if any other task references this package
-                other_bodies = " ".join(
-                    other.get("body", "") for jdx, other in enumerate(issues)
-                    if jdx != idx and jdx not in epic_indices
-                )
-                if pkg_name not in other_bodies:
-                    orphan_packages.append(iss["title"])
-
-    # Parallelism analysis: scan ### Dependencies and ### Soft Dependencies
-    tasks_count = len(issues) - epics
-    dep_count = 0
-    has_blocks = 0
-    has_depends_on = 0
-    in_deps = False
-    for line in lines:
-        stripped = line.strip()
-        if re.match(r'^###\s+(?:[Dd]ependencies|[Ss]oft [Dd]ependencies)\s*$', stripped):
-            in_deps = True
-            dep_count += 1
-            continue
-        if stripped.startswith("##"):
-            in_deps = False
-            continue
-        if in_deps and stripped:
-            if "blocks:" in stripped.lower():
-                has_blocks += 1
-            if "depends_on:" in stripped.lower():
-                has_depends_on += 1
-
-    if tasks_count > 3:
-        if dep_count == 0:
-            warnings.append("No ### Dependencies sections found — remember to add parallel groups after creation")
-        elif has_blocks > 0 and has_blocks >= tasks_count - 1:
-            roots = tasks_count - has_blocks
-            if roots <= 1:
-                warnings.append("fully sequential — no parallelism")
-
-    if rogue_headers:
-        errors.extend(rogue_headers)
-    if missing_files:
-        for title in missing_files:
-            errors.append(f"'{title}' missing Files:")
-    if orphan_packages:
-        for title in orphan_packages:
-            warnings.append(f"Task '{title}' has no consumer task — add a 'wire into' task or reference it from a downstream task")
-
-    check_parallelism = getattr(args, "check_parallelism", False)
-
-    result: dict = {
-        "ok": len(errors) == 0 and not (check_parallelism and warnings),
-        "file": args.file,
-        "issues": len(issues),
-        "epics": epics,
-        "tasks": tasks_count,
-    }
-    if errors:
-        result["errors"] = errors
-    if warnings:
-        result["warnings"] = warnings
-    if has_depends_on:
-        result["soft_deps"] = has_depends_on
-    _out(result)
-
-
-def cmd_wire_plan(args: argparse.Namespace) -> None:
-    """Auto-wire parent-child and blocking deps from a plan file + bd create output."""
-    plan_path = Path(args.file)
-    if not plan_path.exists():
-        _out({"ok": False, "error": f"file not found: {args.file}"})
-        return
-
-    # Load bd create -f --json output: list of created issues with titles + IDs.
-    # If --ids not provided, look for created.json from tf.py create.
-    ids_arg = args.ids
-    if not ids_arg:
-        try:
-            ctx = _context_dir()
-            default_ids = ctx / "created.json"
-            if default_ids.exists():
-                ids_arg = str(default_ids)
-        except (OSError, KeyError):
-            pass
-    if not ids_arg:
-        _out({"ok": False, "error": "no --ids file provided and no created.json found — run tf.py create first"})
-        return
-    ids_path = Path(ids_arg)
-    if not ids_path.exists():
-        _out({"ok": False, "error": f"ids file not found: {ids_arg}"})
-        return
-    try:
-        created = json.loads(ids_path.read_text())
-        if isinstance(created, dict):
-            created = created.get("issues", created.get("created", []))
-    except json.JSONDecodeError:
-        _out({"ok": False, "error": "ids file is not valid JSON"})
-        return
-
-    # Build title→ID mapping (normalize titles for fuzzy matching)
-    title_to_id: dict[str, str] = {}
-    for item in created:
-        title = item.get("title", item.get("name", ""))
-        iid = item.get("id", "")
-        if title and iid:
-            title_to_id[_norm(title)] = iid
-
-    # Parse plan structure: extract issues, their types, parent epics, and deps
-    content = plan_path.read_text()
-    lines = content.split("\n")
-
-    issues: list[dict] = []
-    current = None
-
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("## ") and not stripped.startswith("### "):
-            if current:
-                issues.append(current)
-            title = stripped[3:].strip()
-            current = {"title": title, "type": "task", "deps": [], "in_section": ""}
-        elif current and stripped.startswith("### "):
-            current["in_section"] = stripped[4:].strip().lower()
-        elif current:
-            sec = current["in_section"]
-            if sec == "type" and stripped and not stripped.startswith("#"):
-                current["type"] = stripped.lower()
-            elif sec == "dependencies" and stripped:
-                current["deps"].append(stripped)
-
-    if current:
-        issues.append(current)
-
-    # Resolve parent-child: tasks belong to the most recent preceding epic
-    rp = _registry_path()
-    bd = _bd(rp)
-    parent_child_wired = 0
-    blocking_wired = 0
-    errors = []
-    current_epic_id = ""
-
-    for iss in issues:
-        norm_title = _norm(iss["title"])
-        iss_id = title_to_id.get(norm_title, "")
-        if not iss_id:
-            errors.append(f"no ID found for: {iss['title']}")
-            continue
-
-        if iss["type"] == "epic":
-            current_epic_id = iss_id
-            continue
-
-        # Wire parent-child
-        if current_epic_id:
-            r = _run(f"{bd} dep add {iss_id} {current_epic_id} -t parent-child")
-            combined = (r.stderr + r.stdout).lower()
-            if r.returncode == 0 or "unique" in combined or "duplicate" in combined or "already" in combined:
-                parent_child_wired += 1
-            else:
-                errors.append(f"parent-child failed for {iss_id}: {r.stderr.strip()[:100]}")
-
-        # Wire blocking deps from ### Dependencies section
-        for dep_line in iss.get("deps", []):
-            for part in re.split(r'[,;]\s*', dep_line):
-                part = part.strip()
-                match = re.match(r'(?:blocks?|depends[-_]?on):?\s*(.+)', part, re.IGNORECASE)
-                if match:
-                    ref = match.group(1).strip().strip('"').strip("'")
-                    ref_norm = _norm(ref)
-                    # Try exact match, then prefix match
-                    blocker_id = title_to_id.get(ref_norm, "")
-                    if not blocker_id:
-                        for t, tid in title_to_id.items():
-                            if t.startswith(ref_norm) or ref_norm.startswith(t):
-                                blocker_id = tid
-                                break
-                    if blocker_id:
-                        r = _run(f"{bd} dep {blocker_id} --blocks {iss_id}")
-                        combined = (r.stderr + r.stdout).lower()
-                        if r.returncode == 0 or "unique" in combined or "duplicate" in combined or "already" in combined:
-                            blocking_wired += 1
-                        else:
-                            errors.append(f"dep failed {blocker_id}→{iss_id}: {r.stderr.strip()[:100]}")
-                    else:
-                        errors.append(f"dep ref not found: '{ref}' in task '{iss['title']}'")
-
-    result: dict = {
-        "ok": len(errors) == 0,
-        "parent_child": parent_child_wired,
-        "blocking": blocking_wired,
-        "total_issues": len(issues),
-    }
-    if errors:
-        result["errors"] = errors[:20]
-    _out(result)
 
 
 def _norm(t: str) -> str:
@@ -2336,11 +1945,14 @@ def cmd_worker_prompt(args: argparse.Namespace) -> None:
     ctx = _context_dir()
     bead_ids = [b.strip() for b in args.beads.split(",") if b.strip()]
 
-    # Build context reference instead of embedding full worker-context.md
     wc_path = ctx / "worker-context.md"
     wc_relative = f".beads/context-{ctx.name.removeprefix('context-')}/worker-context.md"
+    inline_context = getattr(args, "inline_context", False)
     if wc_path.exists():
-        project_context = f"**Read `{wc_relative}` for project conventions, tech stack, and known gotchas before starting work.**"
+        if inline_context:
+            project_context = f"## Project Context\n\n{wc_path.read_text().strip()}"
+        else:
+            project_context = f"**Read `{wc_relative}` for project conventions, tech stack, and known gotchas before starting work.**"
     else:
         project_context = ""
 
@@ -2945,30 +2557,14 @@ def main() -> None:
     s.add_argument("blocker")
     s.add_argument("blocked")
 
-    # import-deps (bulk dep import from deps.txt)
-    s = sub.add_parser("import-deps")
-    s.add_argument("file")
-    s.add_argument("--validate", action="store_true")
-
     # close (normalized bd close wrapper)
     s = sub.add_parser("close")
     s.add_argument("bead_id")
     s.add_argument("--reason", default="completed")
 
-    # create (bd create -f wrapper with clean JSON)
-    s = sub.add_parser("create")
+    # import-graph
+    s = sub.add_parser("import-graph")
     s.add_argument("file")
-
-    # validate-plan
-    s = sub.add_parser("validate-plan")
-    s.add_argument("file")
-    s.add_argument("--check-parallelism", action="store_true", dest="check_parallelism")
-    s.add_argument("--no-files-check", action="store_true", dest="no_files_check")
-
-    # wire-plan
-    s = sub.add_parser("wire-plan")
-    s.add_argument("file")
-    s.add_argument("--ids", default="")
 
     # update-context
     s = sub.add_parser("update-context")
@@ -2995,6 +2591,7 @@ def main() -> None:
     s.add_argument("--prior-bead", default="", dest="prior_bead")
     s.add_argument("--prompt-only", action="store_true", dest="prompt_only")
     s.add_argument("--write-file", action="store_true", dest="write_file")
+    s.add_argument("--inline-context", action="store_true", dest="inline_context")
     s.add_argument("--parallel-with", default="", dest="parallel_with")
 
     args = p.parse_args()
@@ -3028,11 +2625,8 @@ def main() -> None:
         "dedup": cmd_dedup,
         "ad-hoc": cmd_ad_hoc,
         "dep": cmd_dep,
-        "import-deps": cmd_import_deps,
         "close": cmd_close,
-        "create": cmd_create,
-        "validate-plan": cmd_validate_plan,
-        "wire-plan": cmd_wire_plan,
+        "import-graph": cmd_import_graph,
         "update-context": cmd_update_context,
         "phase-summary": cmd_phase_summary,
         "phase-complete": cmd_phase_complete,

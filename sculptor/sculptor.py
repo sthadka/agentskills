@@ -838,6 +838,162 @@ def generate_beads_plan(plan: dict, epic_description: str) -> str:
     return '\n'.join(out)
 
 
+def generate_graph_plan(plan: dict, epic_description: str) -> dict:
+    """Generate a bd create --graph JSON plan with symbolic keys and edges."""
+    nodes: list[dict] = []
+    edges: list[dict] = []
+
+    epic_node: dict = {
+        'key': 'epic',
+        'title': f'Goal: {plan["title"]}',
+        'type': 'epic',
+        'priority': 0,
+    }
+    if epic_description:
+        epic_node['description'] = epic_description
+    if plan['risks']:
+        epic_node['design'] = f'**Risks:**\n{plan["risks"]}'
+    nodes.append(epic_node)
+
+    slug_to_key: dict[str, str] = {}
+    all_tasks: list[tuple[int, int, str, dict]] = []
+
+    # Map phase list index → user-facing phase number (non-setup phases count from 1)
+    phase_num: dict[int, int] = {}
+    non_setup_count = 0
+    for pi, phase in enumerate(plan['phases']):
+        if phase['is_setup']:
+            phase_num[pi] = 0
+        else:
+            non_setup_count += 1
+            phase_num[pi] = non_setup_count
+
+    for pi, phase in enumerate(plan['phases']):
+        for ti, task in enumerate(phase['tasks']):
+            key = f'setup.{ti + 1}' if phase['is_setup'] else f'{phase_num[pi]}.{ti + 1}'
+            slug = make_task_slug(task['description'])
+            slug_to_key[slug] = key
+            all_tasks.append((pi, ti, slug, phase))
+
+            desc_parts = [task['description']]
+            if task.get('body_lines'):
+                desc_parts.append('')
+                desc_parts.extend(task['body_lines'])
+            if task['extra_lines']:
+                desc_parts.append('')
+                desc_parts.extend(task['extra_lines'])
+            if task['subtasks']:
+                desc_parts.append('')
+                desc_parts.append('Sub-tasks:')
+                for st in task['subtasks']:
+                    desc_parts.append(f'- {st["description"]}')
+                    for el in st.get('extra_lines', []):
+                        desc_parts.append(f'  {el}')
+                    for bl in st.get('body_lines', []):
+                        desc_parts.append(f'  {bl.strip()}')
+
+            ac_lines = list(task['ac'])
+            for st in task['subtasks']:
+                ac_lines.extend(st['ac'])
+
+            labels = []
+            if phase['is_parallel']:
+                labels.append('parallel')
+            if task['is_tdd']:
+                labels.append('tdd')
+            if phase['is_setup']:
+                labels.append('setup')
+
+            node: dict = {
+                'key': key,
+                'title': slug,
+                'type': 'task',
+                'priority': 1 if phase['is_setup'] else 2,
+                'parent_key': 'epic',
+                'description': '\n'.join(desc_parts),
+            }
+            if ac_lines:
+                node['acceptance_criteria'] = '\n'.join(f'- {ac}' for ac in ac_lines)
+            if labels:
+                node['labels'] = labels
+            nodes.append(node)
+
+    # Build edges — same logic as generate_deps()
+    phase_task_map: dict[int, list[tuple[int, str]]] = {}
+    for pi, phase in enumerate(plan['phases']):
+        phase_task_map[pi] = []
+        for ti, task in enumerate(phase['tasks']):
+            phase_task_map[pi].append((ti, make_task_slug(task['description'])))
+
+    explicit_deps = parse_dependency_section(plan.get('dependencies', ''), plan['phases'])
+
+    setup_slugs = [slug for _, _, slug, ph in all_tasks if ph['is_setup']]
+    first_non_setup = [(pi, ti, slug, ph) for pi, ti, slug, ph in all_tasks if not ph['is_setup']]
+    if setup_slugs and first_non_setup:
+        first_phase_idx = first_non_setup[0][0]
+        setup_target_indices = {first_phase_idx}
+        if explicit_deps is not None:
+            for pi_key, dep_list in explicit_deps.items():
+                if dep_list == []:
+                    setup_target_indices.add(pi_key)
+        for ss in setup_slugs:
+            for stt_slug in [s for p, _, s, ph in all_tasks if p in setup_target_indices and not ph['is_setup']]:
+                if ss in slug_to_key and stt_slug in slug_to_key:
+                    edges.append({'from_key': slug_to_key[ss], 'to_key': slug_to_key[stt_slug], 'type': 'blocks'})
+
+    prev_phase_idx = -1
+    prev_phase_last_slugs: list[str] = []
+
+    for pi, phase in enumerate(plan['phases']):
+        if phase['is_setup']:
+            continue
+        phase_tasks = phase_task_map.get(pi, [])
+        if not phase_tasks:
+            continue
+
+        def _add_cross_edges(from_slugs: list[str], to_slugs: list[str]) -> None:
+            for fs in from_slugs:
+                for ts in to_slugs:
+                    if fs in slug_to_key and ts in slug_to_key:
+                        edges.append({'from_key': slug_to_key[fs], 'to_key': slug_to_key[ts], 'type': 'blocks'})
+
+        def _first_slugs_for_phase(pt: list[tuple[int, str]], par: bool) -> list[str]:
+            return [s for _, s in pt] if par else [pt[0][1]]
+
+        if explicit_deps is not None:
+            dep_phase_indices = explicit_deps.get(pi)
+            if dep_phase_indices is None:
+                if prev_phase_last_slugs:
+                    is_par = phase['is_parallel'] or plan['phases'][prev_phase_idx]['is_parallel']
+                    _add_cross_edges(prev_phase_last_slugs, _first_slugs_for_phase(phase_tasks, is_par))
+            elif dep_phase_indices:
+                for dep_pi in dep_phase_indices:
+                    dep_tasks = phase_task_map.get(dep_pi, [])
+                    if not dep_tasks:
+                        continue
+                    dep_phase = plan['phases'][dep_pi]
+                    dep_last = [s for _, s in dep_tasks] if dep_phase['is_parallel'] else [dep_tasks[-1][1]]
+                    _add_cross_edges(dep_last, _first_slugs_for_phase(phase_tasks, phase['is_parallel']))
+        else:
+            if prev_phase_last_slugs and phase_tasks:
+                is_par = phase['is_parallel'] or plan['phases'][prev_phase_idx]['is_parallel']
+                _add_cross_edges(prev_phase_last_slugs, _first_slugs_for_phase(phase_tasks, is_par))
+
+        if not phase['is_parallel'] and len(phase_tasks) > 1:
+            for i in range(len(phase_tasks) - 1):
+                s1, s2 = phase_tasks[i][1], phase_tasks[i + 1][1]
+                if s1 in slug_to_key and s2 in slug_to_key:
+                    edges.append({'from_key': slug_to_key[s1], 'to_key': slug_to_key[s2], 'type': 'blocks'})
+
+        prev_phase_idx = pi
+        if phase['is_parallel']:
+            prev_phase_last_slugs = [s for _, s in phase_tasks]
+        else:
+            prev_phase_last_slugs = [phase_tasks[-1][1]] if phase_tasks else []
+
+    return {'nodes': nodes, 'edges': edges}
+
+
 def parse_dependency_section(deps_text: str, phases: list[dict]) -> dict[int, list[int]] | None:
     """Parse '## Dependencies' text into explicit phase dependency map.
 
@@ -1305,96 +1461,81 @@ def cmd_export_beads(args: list[str]) -> int:
         return 1
 
     epic_desc = read_idea_description(idea_dir)
-    beads_plan = generate_beads_plan(plan, epic_desc)
-    deps_text = generate_deps(plan)
+    graph = generate_graph_plan(plan, epic_desc)
 
-    # Write output files
     beads_dir = idea_dir / '.beads'
     beads_dir.mkdir(exist_ok=True)
 
+    # Primary output: graph JSON for bd create --graph
+    graph_out = beads_dir / 'beads-graph.jsonl'
+    graph_out.write_text(json.dumps(graph, indent=2) + '\n')
+
+    # Human-readable plan.md (reference only, not used for import)
+    beads_plan = generate_beads_plan(plan, epic_desc)
     plan_out = beads_dir / 'plan.md'
     plan_out.write_text(beads_plan)
-
-    deps_out = beads_dir / 'deps.txt'
-    deps_out.write_text(deps_text)
 
     if plan['invariants']:
         inv_out = beads_dir / 'invariants.md'
         inv_out.write_text(f'# Cross-worker Invariants\n\n{plan["invariants"]}\n')
 
-    # Stats
     task_count = sum(len(ph['tasks']) for ph in plan['phases'])
     subtask_count = sum(
         len(t['subtasks']) for ph in plan['phases'] for t in ph['tasks']
     )
     phase_count = len(plan['phases'])
+    edge_count = len(graph['edges'])
 
     print(f'Exported {task_count} tasks ({subtask_count} sub-tasks) '
-          f'across {phase_count} phases:\n')
-    print(f'  {plan_out.relative_to(idea_dir)}  — bd create -f input')
-    print(f'  {deps_out.relative_to(idea_dir)} — dependency graph')
+          f'across {phase_count} phases, {edge_count} dependency edges:\n')
+    print(f'  {graph_out.relative_to(idea_dir)}  — bd create --graph input')
+    print(f'  {plan_out.relative_to(idea_dir)}  — human-readable reference')
     if plan['invariants']:
         print(f'  .beads/invariants.md — cross-worker invariants')
 
     if not run_mode:
         print(f'\nNext steps:')
-        print(f'  sculptor export-beads {idea_dir} --run')
-        print(f'  # or manually:')
-        print(f'  bd create -f {plan_out} --json')
-        print(f'  # Then wire dependencies using {deps_out}')
+        print(f'  bd create --graph {graph_out} --json')
+        print(f'  # Or use treeflow:')
+        print(f'  python3 .beads/tf.py import-graph {graph_out}')
         return 0
 
-    # --run mode: execute bd commands
     if dry_run:
-        print(f'\n--dry-run: validating plan format...')
+        print(f'\n--dry-run: validating graph...')
         result = subprocess.run(
-            ['bd', 'create', '-f', str(plan_out), '--dry-run', '--json'],
+            ['bd', 'create', '--graph', str(graph_out), '--dry-run', '--json'],
             capture_output=True, text=True,
         )
         if result.returncode != 0:
             print(f'  Validation failed: {result.stderr.strip()[:200]}')
             return 1
-        print(f'  Plan format is valid')
+        print(f'  Graph is valid')
         return 0
 
-    print(f'\nCreating beads...')
-    created_issues = run_bd_create(plan_out)
-    if created_issues is None:
-        print('  Failed to create issues. Fix errors and retry.')
+    print(f'\nCreating beads via bd create --graph...')
+    result = subprocess.run(
+        ['bd', 'create', '--graph', str(graph_out), '--json'],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f'  Failed: {result.stderr.strip()[:200]}')
         return 1
 
-    print(f'  Created {len(created_issues)} issues')
+    try:
+        created = json.loads(result.stdout)
+        ids = created.get('ids', {})
+    except (json.JSONDecodeError, AttributeError):
+        ids = {}
 
-    # Save title→ID mapping for reference
+    print(f'  Created {len(ids)} issues (epic + {len(ids) - 1} tasks)')
+
     mapping_out = beads_dir / 'id-map.json'
-    mapping_out.write_text(json.dumps(
-        {issue.get('title', f'issue-{i}'): issue['id']
-         for i, issue in enumerate(created_issues) if 'id' in issue},
-        indent=2,
-    ) + '\n')
+    mapping_out.write_text(json.dumps(ids, indent=2) + '\n')
     print(f'  ID mapping saved to {mapping_out.relative_to(idea_dir)}')
 
-    # Wire dependencies
-    parsed_deps = parse_deps_file(deps_text)
-    fail = 0
-    if parsed_deps:
-        print(f'\nWiring {len(parsed_deps)} dependencies...')
-        success, dep_fail = run_bd_deps(parsed_deps, created_issues)
-        print(f'  Done: {success} wired, {dep_fail} failed/skipped')
-        fail += dep_fail
-    else:
-        print(f'\nNo dependencies to wire.')
-
-    # Wire parent-child relationships
-    print(f'\nWiring parent-child relationships...')
-    pc_success, pc_fail = run_bd_parent_child(created_issues)
-    print(f'  Done: {pc_success} wired, {pc_fail} failed/skipped')
-    fail += pc_fail
-
-    if fail > 0:
-        print(f'\n  Check {mapping_out.relative_to(idea_dir)} for ID mappings '
-              f'and wire remaining deps manually.')
-        return 1
+    epic_id = ids.get('epic', '')
+    if epic_id:
+        print(f'\n  Epic: {epic_id}')
 
     return 0
 

@@ -41,8 +41,7 @@ Your context window is the most precious resource. Minimize what stays in contex
 
 ### Create tasks from a list
 1. Write plan file (`## Title` per task, description body)
-2. `python3 ~/.claude/skills/treeflow/tf.py validate-plan plan.md` (use `--no-files-check` for backlog plans without target files)
-3. `python3 ~/.claude/skills/treeflow/tf.py create plan.md`
+2. `bd create -f plan.md --json`
 
 ### Triage existing beads
 1. `bd list --json --limit 100 | jq -c`
@@ -52,21 +51,25 @@ Your context window is the most precious resource. Minimize what stays in contex
 Read [SKILL-DISPATCH.md](SKILL-DISPATCH.md) for the complete orchestration loop, then begin with [Entry Protocol](#entry-protocol).
 
 ### Sculptor Import
-Read [SKILL-IMPORT.md](SKILL-IMPORT.md) for sculptor artifact conversion, then continue with [Entry Protocol](#entry-protocol).
+After running `/sculptor export-beads <idea-dir>`:
+1. `python3 .beads/tf.py import-graph .beads/beads-graph.jsonl`
+2. `python3 .beads/tf.py init <project> --epic <epic-id>`
+3. `python3 .beads/tf.py ready`
 
 ### Mode Detection
 - Bead management only (create/list/triage) → Quick Paths above. STOP.
-- Sculptor import (input has `plan.md`, `spec.md`, `idea.md`) → Read [SKILL-IMPORT.md](SKILL-IMPORT.md)
+- Sculptor import (input has `plan.md`, `spec.md`, `idea.md`) → Run `/sculptor export-beads`, then Sculptor Import above
 - Worker dispatch needed → Read [SKILL-DISPATCH.md](SKILL-DISPATCH.md) for full orchestration loop
 
 ### Scope Detection
 If the user's request is purely about creating, listing, updating, or closing beads — and does NOT mention implementing, building, or dispatching work — use the Quick Paths above. Do not initialize `tf.py`, worker context, or the full orchestration loop. Use `bd` commands directly.
 
 ### Plan File Provided
-When a plan file is given as argument:
-1. Read the plan file
-2. Verify it has `Files:` annotations and acceptance criteria
-3. Proceed directly to `validate-plan` → `create` → dependency setup → `init` → dispatch
+When a `beads-graph.jsonl` file is given as argument:
+1. `python3 .beads/tf.py import-graph beads-graph.jsonl`
+2. Proceed to `init` → dispatch
+
+When a `.md` plan file is given, run `/sculptor export-beads` first to generate the graph file.
 
 Do NOT read project source files to validate or understand the plan — trust it. The plan was written by a prior planning session that already explored the codebase. Workers will read source files when they execute tasks. Re-deriving architecture from source is wasted orchestrator context.
 
@@ -167,10 +170,8 @@ python3 .beads/tf.py ready                                             # Dispatc
 python3 .beads/tf.py recover                                           # Find orphaned in-progress beads (post-compaction recovery)
 python3 .beads/tf.py ad-hoc --name {name} --worker {worker} [--skill domain]  # Register informal task for stall detection
 python3 .beads/tf.py dep {blocker} {blocked}                           # Add dep idempotently (UNIQUE errors = success)
-python3 .beads/tf.py import-deps {file} [--validate]                   # Bulk import deps from "A" blocks "B" format
-python3 .beads/tf.py validate-plan {file} [--no-files-check]             # Validate plan md for bd create -f (--no-files-check: skip missing Files: warning for backlog-style plans)
-python3 .beads/tf.py create {file}                                       # Wrapper for bd create -f with clean JSON output
-python3 .beads/tf.py worker-prompt --beads {id}[,id2,id3] [--reuse --prior-bead {prev}] [--parallel-with bead1,bead2] [--prompt-only] [--write-file]  # Assemble worker prompt
+python3 .beads/tf.py import-graph {file}                                # Import beads-graph.jsonl via bd create --graph
+python3 .beads/tf.py worker-prompt --beads {id}[,id2,id3] [--reuse --prior-bead {prev}] [--parallel-with bead1,bead2] [--prompt-only] [--write-file] [--inline-context]  # Assemble worker prompt
 # --prompt-only: print raw prompt to stdout (no JSON). --write-file: write prompt to temp file, return {"prompt_file": path} instead of inline prompt
 python3 .beads/tf.py update-context --bead {id} --worker {name} --summary "..." --files "..." [--gotcha "..."]  # Append to context
 python3 .beads/tf.py phase-complete --epic {id} [--build-cmd "cmd"] [--phase-num N]  # Gate + smoke test + summary
@@ -184,22 +185,21 @@ python3 .beads/tf.py heartbeat {bead_id} [--note "..."]  # Explicit heartbeat fo
 python3 .beads/tf.py worker-close {bead_id} --context-pct N --files f1,f2 --summary "..." [--force]  # Validate + close (--force skips target file modification check)
 ```
 
-## Markdown File Format
+## Graph Import Format
 
-For batch issue creation with `bd create -f`, see [PLAN-FORMAT.md](PLAN-FORMAT.md). **Always validate first:**
+For sculptor-generated plans, use `beads-graph.jsonl` (produced by `/sculptor export-beads`):
 ```bash
-# Before init: run from skill source path
-python3 ~/.claude/skills/treeflow/tf.py validate-plan plan.md
-# After init: run from local copy
-python3 .beads/tf.py validate-plan plan.md
+python3 .beads/tf.py import-graph .beads/beads-graph.jsonl
 ```
-If validation fails (e.g., `---` separators detected), fix the plan file before running `bd create -f`.
+This calls `bd create --graph` which handles issues, parent-child hierarchy, and blocking deps atomically.
+
+For manual batch creation, use `bd create -f plan.md --json` directly.
 
 ## Planning Mode
 
 ### From Goal/PRD
 
-Follow beadflow's planning process: analyze goal, write plan file, `bd create -f`, add deps, validate.
+Follow sculptor's planning process or write a plan file directly, then import via `bd create --graph` or `bd create -f`.
 
 **Additional treeflow requirements for task descriptions:**
 
