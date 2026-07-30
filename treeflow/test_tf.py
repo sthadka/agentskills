@@ -19,6 +19,17 @@ import pytest
 
 TF_PY = Path(__file__).parent / "tf.py"
 
+_tf_module = None
+
+def _load_tf():
+    global _tf_module
+    if _tf_module is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("tf", TF_PY)
+        _tf_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_tf_module)
+    return _tf_module
+
 
 # ── Fixtures ────────────────────────────────────────────────────
 
@@ -3089,21 +3100,21 @@ class TestInferFilesImproved:
         tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
 
         # Test via conflict-check since it uses _infer_files_from_description
-        from treeflow.tf import _infer_files_from_description
+        _infer_files_from_description = _load_tf()._infer_files_from_description
         desc = "Update the handler in listen.rs to add timeout support"
         result = _infer_files_from_description(desc)
         assert "listen.rs" in result
 
     def test_infers_backtick_paths(self, workspace):
         """_infer_files_from_description should match backtick-wrapped paths."""
-        from treeflow.tf import _infer_files_from_description
+        _infer_files_from_description = _load_tf()._infer_files_from_description
         desc = "Modify `src/commands/daemon.rs` to add the new flag"
         result = _infer_files_from_description(desc)
         assert "src/commands/daemon.rs" in result
 
     def test_infers_in_path_with_slash(self, workspace):
         """_infer_files_from_description should match 'in store/mod.rs' patterns."""
-        from treeflow.tf import _infer_files_from_description
+        _infer_files_from_description = _load_tf()._infer_files_from_description
         desc = "Add the new method in store/mod.rs"
         result = _infer_files_from_description(desc)
         assert "store/mod.rs" in result
@@ -3119,7 +3130,7 @@ class TestConflictCheckSections:
         # So we need a single response that works for both. Use a list approach.
         # Actually, the stub returns the same response for all calls.
         # We'll test via the Python function directly instead.
-        from treeflow.tf import _extract_files_with_sections, _parse_file_entry
+        _m = _load_tf(); _extract_files_with_sections = _m._extract_files_with_sections; _parse_file_entry = _m._parse_file_entry
 
         # Test _parse_file_entry
         path, section = _parse_file_entry("src/config.rs [StorageConfig]")
@@ -3132,7 +3143,7 @@ class TestConflictCheckSections:
 
     def test_extract_files_with_sections(self, workspace):
         """_extract_files_with_sections should return (path, section) tuples."""
-        from treeflow.tf import _extract_files_with_sections
+        _extract_files_with_sections = _load_tf()._extract_files_with_sections
         desc = "Modify config\n\nFiles (modifies): `src/config.rs` [StorageConfig], `src/daemon.rs` [EventLoop]"
         result = _extract_files_with_sections(desc)
         assert ("src/config.rs", "StorageConfig") in result
@@ -3140,7 +3151,7 @@ class TestConflictCheckSections:
 
     def test_same_file_same_section_is_hard_conflict(self, workspace):
         """Two beads modifying the same section → hard conflict."""
-        from treeflow.tf import _extract_files_with_sections
+        _extract_files_with_sections = _load_tf()._extract_files_with_sections
         desc1 = "Files (modifies): `src/config.rs` [StorageConfig]"
         desc2 = "Files (modifies): `src/config.rs` [StorageConfig]"
         r1 = _extract_files_with_sections(desc1)
@@ -3150,7 +3161,7 @@ class TestConflictCheckSections:
 
     def test_no_section_annotation_is_hard_conflict(self, workspace):
         """Files without section annotations should be treated as hard conflicts."""
-        from treeflow.tf import _parse_file_entry
+        _parse_file_entry = _load_tf()._parse_file_entry
         path, section = _parse_file_entry("src/config.rs")
         assert section == ""
 
