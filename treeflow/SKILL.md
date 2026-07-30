@@ -203,7 +203,7 @@ Follow sculptor's planning process or write a plan file directly, then import vi
 
 **Additional treeflow requirements for task descriptions:**
 
-1. **Include target file paths** — every task MUST include a `Files:` line listing all files it will create or modify. Use `Files (new):` and `Files (modifies):` to distinguish. `validate-plan` will warn on tasks missing this section. Without it, `conflict-check` cannot detect file-level parallelism conflicts.
+1. **Include target file paths** — every task MUST include a `Files:` line listing all files it will create or modify. Use `Files (new):` and `Files (modifies):` to distinguish. Without it, `conflict-check` cannot detect file-level parallelism conflicts.
 2. **Mark parallel groups** — add `[parallel]` for tasks within a phase that have no cross-dependencies.
 3. **Add skill hints** — when obvious, note the skill domain (e.g., "Go implementation", "React component", "test suite", "CI/CD setup").
 4. **Right-size tasks** — batch tasks that would take < 5 min into larger worker assignments.

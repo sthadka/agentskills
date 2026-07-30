@@ -751,93 +751,6 @@ def read_idea_description(idea_dir: Path) -> str:
     return ''
 
 
-def generate_beads_plan(plan: dict, epic_description: str) -> str:
-    """Generate .beads/plan.md in bd create -f format."""
-    out: list[str] = []
-
-    # Epic
-    out.append(f'## Goal: {plan["title"]}')
-    out.append('')
-    out.append('### Type')
-    out.append('epic')
-    out.append('')
-    out.append('### Priority')
-    out.append('0')
-    out.append('')
-    if epic_description:
-        out.append('### Description')
-        out.append(epic_description)
-        out.append('')
-    if plan['risks']:
-        out.append('### Design')
-        out.append('**Risks:**')
-        out.append(plan['risks'])
-        out.append('')
-
-    # Tasks by phase
-    task_index = 0
-    for phase in plan['phases']:
-        for task in phase['tasks']:
-            task_index += 1
-            task_title = make_task_slug(task['description'])
-
-            out.append(f'## {task_title}')
-            out.append('')
-            out.append('### Type')
-            out.append('task')
-            out.append('')
-            out.append('### Priority')
-            out.append('1' if phase['is_setup'] else '2')
-            out.append('')
-
-            # Description: task desc + body + sub-tasks + extra lines
-            out.append('### Description')
-            out.append(task['description'])
-            if task.get('body_lines'):
-                out.append('')
-                for bl in task['body_lines']:
-                    out.append(bl)
-            if task['extra_lines']:
-                out.append('')
-                for el in task['extra_lines']:
-                    out.append(el)
-            if task['subtasks']:
-                out.append('')
-                out.append('Sub-tasks:')
-                for st in task['subtasks']:
-                    out.append(f'- {st["description"]}')
-                    for el in st.get('extra_lines', []):
-                        out.append(f'  {el}')
-                    for bl in st.get('body_lines', []):
-                        out.append(f'  {bl.strip()}')
-            out.append('')
-
-            # Acceptance criteria
-            ac_lines = list(task['ac'])
-            for st in task['subtasks']:
-                ac_lines.extend(st['ac'])
-            if ac_lines:
-                out.append('### Acceptance Criteria')
-                for ac in ac_lines:
-                    out.append(f'- {ac}')
-                out.append('')
-
-            # Labels
-            labels = []
-            if phase['is_parallel']:
-                labels.append('parallel')
-            if task['is_tdd']:
-                labels.append('tdd')
-            if phase['is_setup']:
-                labels.append('setup')
-            if labels:
-                out.append('### Labels')
-                out.append(', '.join(labels))
-                out.append('')
-
-    return '\n'.join(out)
-
-
 def generate_graph_plan(plan: dict, epic_description: str) -> dict:
     """Generate a bd create --graph JSON plan with symbolic keys and edges."""
     nodes: list[dict] = []
@@ -1091,14 +1004,8 @@ def cmd_export_beads(args: list[str]) -> int:
     beads_dir = idea_dir / '.beads'
     beads_dir.mkdir(exist_ok=True)
 
-    # Primary output: graph JSON for bd create --graph
     graph_out = beads_dir / 'beads-graph.jsonl'
     graph_out.write_text(json.dumps(graph, indent=2) + '\n')
-
-    # Human-readable plan.md (reference only, not used for import)
-    beads_plan = generate_beads_plan(plan, epic_desc)
-    plan_out = beads_dir / 'plan.md'
-    plan_out.write_text(beads_plan)
 
     if plan['invariants']:
         inv_out = beads_dir / 'invariants.md'
@@ -1114,7 +1021,6 @@ def cmd_export_beads(args: list[str]) -> int:
     print(f'Exported {task_count} tasks ({subtask_count} sub-tasks) '
           f'across {phase_count} phases, {edge_count} dependency edges:\n')
     print(f'  {graph_out.relative_to(idea_dir)}  — bd create --graph input')
-    print(f'  {plan_out.relative_to(idea_dir)}  — human-readable reference')
     if plan['invariants']:
         print(f'  .beads/invariants.md — cross-worker invariants')
 
@@ -1186,7 +1092,7 @@ Commands:
   lint-spec <spec.md>                Lint spec for dead types, path issues, TODOs
   lint-plan <plan.md> [--spec X]     Lint plan for missing AC, sections, spec refs
   lint-cross <idea-dir>              Cross-document lint (appendix links, types, refs)
-  export-beads <idea-dir>            Generate .beads/ files (graph, plan, invariants)
+  export-beads <idea-dir>            Generate .beads/ files (graph, invariants)
   export-beads <idea-dir> --run      Generate files AND run bd create --graph
   export-beads <idea-dir> --dry-run  Validate plan format without creating issues
 """

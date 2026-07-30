@@ -4,7 +4,7 @@
 ```bash
 bd create -f plan.md --json
 ```
-Write a `.md` file with all issues, then create them all in one command. See [PLAN-FORMAT.md](PLAN-FORMAT.md) for the file format.
+Write a `.md` file with `## Title` + description body per issue, then create them all in one command. For graph-based creation with deps, use `bd create --graph beads-graph.jsonl`.
 
 ## Single Issue Creation (with combined flags)
 ```bash
@@ -103,10 +103,6 @@ These commands extend the base orchestration beyond what `bd` provides:
 ```bash
 # Find dispatchable tasks (filters epics, supplements missed unblocked beads)
 python3 .beads/tf.py ready
-
-# Bulk import deps from "Title A" blocks "Title B" format
-python3 .beads/tf.py import-deps deps.txt            # Apply all deps
-python3 .beads/tf.py import-deps deps.txt --validate  # Validate only (check title resolution)
 
 # Find orphaned beads after context compaction (in_progress with no active worker)
 python3 .beads/tf.py recover

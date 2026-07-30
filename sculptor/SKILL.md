@@ -204,7 +204,7 @@ When the user approves the document:
    - Idea
    - Technical spec
    - Implementation plan
-3. **Export beads plan** — Run `sculptor.py export-beads {idea-name}/` to generate `.beads/beads-graph.jsonl`, `.beads/plan.md` (human-readable reference), and `invariants.md`. These files are the handoff artifact for implementation — they travel with the idea directory when copied to a new project.
+3. **Export beads plan** — Run `sculptor.py export-beads {idea-name}/` to generate `.beads/beads-graph.jsonl` and `invariants.md`. These files are the handoff artifact for implementation — they travel with the idea directory when copied to a new project.
 4. **Commit**: `<idea-name>: finalize — polished artifacts and beads export`
 
 Proceed to Phase 7 once user approves.
@@ -247,7 +247,7 @@ python3 ~/.claude/skills/sculptor/sculptor.py <command> [args]
 | `lint-spec <spec.md>` | Before asking user to annotate spec | Dead types, path consistency, TODOs, untagged code blocks |
 | `lint-plan <plan.md> --spec <spec.md>` | Before asking user to annotate plan | Missing AC lines, missing sections, spec coverage table validation |
 | `lint-cross <dir>` | After writing spec + plan | Appendix link resolution, spec type coverage in plan, cross-reference consistency |
-| `export-beads <dir>` | Phase 6 (finalize) | Generates `.beads/beads-graph.jsonl`, `.beads/plan.md` (reference), `invariants.md`. Add `--run` to execute `bd create --graph` atomically |
+| `export-beads <dir>` | Phase 6 (finalize) | Generates `.beads/beads-graph.jsonl` and `invariants.md`. Add `--run` to execute `bd create --graph` atomically |
 
 ### Required integration points
 

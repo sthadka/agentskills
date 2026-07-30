@@ -734,78 +734,6 @@ class TestMakeTaskSlug:
         assert make_task_slug("src/utils/diff.py — Implement diff engine") == "Implement diff engine"
 
 
-# ── generate_beads_plan Tests ────────────────────────────────────
-
-
-class TestGenerateBeadsPlan:
-    def test_generates_epic_and_tasks(self):
-        from sculptor_mod import generate_beads_plan, parse_plan
-
-        text = textwrap.dedent("""\
-            # Implementation Plan: My Project
-
-            ## Setup
-            - [ ] S1: Init scaffold
-              - AC: dirs exist
-
-            ## Phase 1: Core [parallel]
-            - [ ] 1.1: Build client [TDD]
-              - AC: client works
-
-            ## Cross-worker Invariants
-            None
-
-            ## Dependencies
-            None
-
-            ## Risks
-            Some risk
-        """)
-        plan = parse_plan(text)
-        output = generate_beads_plan(plan, "Build something cool")
-
-        assert "## Goal: My Project" in output
-        assert "### Type\nepic" in output
-        assert "## S1: Init scaffold" in output or "## Init scaffold" in output
-        assert "### Priority\n1" in output
-        assert "### Acceptance Criteria" in output
-        assert "tdd" in output.lower()
-
-    def test_includes_risks_in_epic(self):
-        from sculptor_mod import generate_beads_plan, parse_plan
-
-        text = "# Plan: X\n## Setup\n- [ ] S1: Init\n  - AC: done\n## Risks\nData loss possible\n"
-        plan = parse_plan(text)
-        output = generate_beads_plan(plan, "")
-        assert "Data loss possible" in output
-
-    def test_task_body_in_output(self):
-        from sculptor_mod import generate_beads_plan, parse_plan
-
-        text = textwrap.dedent("""\
-            # Implementation Plan: Test
-
-            ## Phase 1: Core [parallel]
-            - [ ] Task 1.1: Schema types — db/schema.go
-              Implement bucket name constants: BucketAdvisory, BucketDetail
-              Spec: spec.md §Data Model
-              - AC: Qualifier produces correct keys
-
-            ## Cross-worker Invariants
-            None
-
-            ## Dependencies
-            None
-
-            ## Risks
-            None
-        """)
-        plan = parse_plan(text)
-        output = generate_beads_plan(plan, "")
-        assert "BucketAdvisory" in output
-        assert "spec.md" in output
-
-
 # ── generate_graph_plan Tests ──────────────────────────────────
 
 
@@ -1156,13 +1084,8 @@ class TestExportBeads:
         assert r["returncode"] == 0
 
         beads_dir = idea_dir / ".beads"
-        assert (beads_dir / "plan.md").exists()
         assert (beads_dir / "beads-graph.jsonl").exists()
         assert (beads_dir / "invariants.md").exists()
-
-        plan_content = (beads_dir / "plan.md").read_text()
-        assert "## Goal: Test Export" in plan_content
-        assert "S1: Init" in plan_content or "Init" in plan_content
 
         graph = json.loads((beads_dir / "beads-graph.jsonl").read_text())
         assert "nodes" in graph
