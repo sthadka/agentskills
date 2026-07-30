@@ -814,7 +814,7 @@ class TestGenerateGraphPlan:
         edges = graph["edges"]
 
         def has_edge(f, t):
-            return any(e["from_key"] == f and e["to_key"] == t for e in edges)
+            return any(e["from_key"] == t and e["to_key"] == f for e in edges)
 
         assert has_edge("setup.1", "1.1")
         assert has_edge("setup.2", "1.1")
@@ -845,7 +845,7 @@ class TestGenerateGraphPlan:
         edges = graph["edges"]
 
         def has_edge(f, t):
-            return any(e["from_key"] == f and e["to_key"] == t for e in edges)
+            return any(e["from_key"] == t and e["to_key"] == f for e in edges)
 
         assert has_edge("1.1", "1.2")
         assert has_edge("1.2", "1.3")
@@ -874,7 +874,7 @@ class TestGenerateGraphPlan:
         edges = graph["edges"]
 
         def has_edge(f, t):
-            return any(e["from_key"] == f and e["to_key"] == t for e in edges)
+            return any(e["from_key"] == t and e["to_key"] == f for e in edges)
 
         assert not has_edge("1.1", "1.2")
         assert not has_edge("1.2", "1.1")
@@ -907,7 +907,7 @@ class TestGenerateGraphPlan:
         edges = graph["edges"]
 
         def has_edge(f, t):
-            return any(e["from_key"] == f and e["to_key"] == t for e in edges)
+            return any(e["from_key"] == t and e["to_key"] == f for e in edges)
 
         # Last task of sequential phase 1 blocks first task of phase 2
         assert has_edge("1.2", "2.1")
@@ -946,7 +946,7 @@ class TestGenerateGraphPlan:
         edges = graph["edges"]
 
         def has_edge(f, t):
-            return any(e["from_key"] == f and e["to_key"] == t for e in edges)
+            return any(e["from_key"] == t and e["to_key"] == f for e in edges)
 
         # Phase 3 depends on both phase 1 (all parallel tasks) and phase 2
         assert has_edge("1.1", "3.1")
@@ -1136,7 +1136,7 @@ class TestExportBeads:
         edges = graph["edges"]
 
         def has_edge(from_key, to_key):
-            return any(e["from_key"] == from_key and e["to_key"] == to_key for e in edges)
+            return any(e["from_key"] == to_key and e["to_key"] == from_key for e in edges)
 
         # Setup blocks all parallel phase 1 tasks
         assert has_edge("setup.1", "1.1")
@@ -1190,7 +1190,7 @@ class TestExportBeads:
         edges = graph["edges"]
 
         def has_edge(f, t):
-            return any(e["from_key"] == f and e["to_key"] == t for e in edges)
+            return any(e["from_key"] == t and e["to_key"] == f for e in edges)
 
         # deps.txt edges present
         assert has_edge("1.1", "1.3")  # Task 1 → Task 3
@@ -1232,7 +1232,7 @@ class TestExportBeads:
         edges = graph["edges"]
 
         def has_edge(f, t):
-            return any(e["from_key"] == f and e["to_key"] == t for e in edges)
+            return any(e["from_key"] == t and e["to_key"] == f for e in edges)
 
         assert has_edge("1.1", "1.2")
         assert len(edges) == 1
@@ -1252,8 +1252,8 @@ class TestParseDeps:
         text = '"Task 1: Alpha" blocks "Task 2: Beta"\n"Task 2: Beta" blocks "Task 3: Gamma"'
         edges = parse_deps_txt(text, slug_to_key)
         assert len(edges) == 2
-        assert edges[0] == {"from_key": "1.1", "to_key": "1.2", "type": "blocks"}
-        assert edges[1] == {"from_key": "1.2", "to_key": "2.1", "type": "blocks"}
+        assert edges[0] == {"from_key": "1.2", "to_key": "1.1", "type": "blocks"}
+        assert edges[1] == {"from_key": "2.1", "to_key": "1.2", "type": "blocks"}
 
     def test_skips_comments_and_blanks(self):
         from sculptor_mod import parse_deps_txt
@@ -1261,7 +1261,7 @@ class TestParseDeps:
         text = '# comment\n\n"A" blocks "B"\n\n# another comment'
         edges = parse_deps_txt(text, slug_to_key)
         assert len(edges) == 1
-        assert edges[0]["from_key"] == "1.1"
+        assert edges[0]["from_key"] == "1.2"
 
     def test_substring_match_fallback(self):
         from sculptor_mod import parse_deps_txt
@@ -1272,7 +1272,7 @@ class TestParseDeps:
         text = '"Create ref/rit-readiness-check.sh" blocks "Task 1: Build runbooks"'
         edges = parse_deps_txt(text, slug_to_key)
         assert len(edges) == 1
-        assert edges[0] == {"from_key": "setup.7", "to_key": "1.1", "type": "blocks"}
+        assert edges[0] == {"from_key": "1.1", "to_key": "setup.7", "type": "blocks"}
 
     def test_unresolved_warns(self, capsys):
         from sculptor_mod import parse_deps_txt
@@ -1333,7 +1333,7 @@ class TestGraphPlanDeps:
         edges = graph["edges"]
 
         def has_edge(f, t):
-            return any(e["from_key"] == f and e["to_key"] == t for e in edges)
+            return any(e["from_key"] == t and e["to_key"] == f for e in edges)
 
         assert has_edge("1.1", "2.1")
         # Fallback would also add 1.2 → 2.1, but deps_txt overrides
@@ -1364,7 +1364,7 @@ class TestGraphPlanDeps:
         edges = graph["edges"]
 
         def has_edge(f, t):
-            return any(e["from_key"] == f and e["to_key"] == t for e in edges)
+            return any(e["from_key"] == t and e["to_key"] == f for e in edges)
 
         # Fallback sequential chain
         assert has_edge("1.1", "1.2")

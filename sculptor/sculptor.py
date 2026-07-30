@@ -855,7 +855,7 @@ def generate_graph_plan(plan: dict, epic_description: str, deps_txt: str | None 
             for ss in setup_slugs:
                 for stt_slug in [s for p, _, s, ph in all_tasks if p in setup_target_indices and not ph['is_setup']]:
                     if ss in slug_to_key and stt_slug in slug_to_key:
-                        edges.append({'from_key': slug_to_key[ss], 'to_key': slug_to_key[stt_slug], 'type': 'blocks'})
+                        edges.append({'from_key': slug_to_key[stt_slug], 'to_key': slug_to_key[ss], 'type': 'blocks'})
 
         prev_phase_idx = -1
         prev_phase_last_slugs: list[str] = []
@@ -871,7 +871,7 @@ def generate_graph_plan(plan: dict, epic_description: str, deps_txt: str | None 
                 for fs in from_slugs:
                     for ts in to_slugs:
                         if fs in slug_to_key and ts in slug_to_key:
-                            edges.append({'from_key': slug_to_key[fs], 'to_key': slug_to_key[ts], 'type': 'blocks'})
+                            edges.append({'from_key': slug_to_key[ts], 'to_key': slug_to_key[fs], 'type': 'blocks'})
 
             def _first_slugs_for_phase(pt: list[tuple[int, str]], par: bool) -> list[str]:
                 return [s for _, s in pt] if par else [pt[0][1]]
@@ -899,7 +899,7 @@ def generate_graph_plan(plan: dict, epic_description: str, deps_txt: str | None 
                 for i in range(len(phase_tasks) - 1):
                     s1, s2 = phase_tasks[i][1], phase_tasks[i + 1][1]
                     if s1 in slug_to_key and s2 in slug_to_key:
-                        edges.append({'from_key': slug_to_key[s1], 'to_key': slug_to_key[s2], 'type': 'blocks'})
+                        edges.append({'from_key': slug_to_key[s2], 'to_key': slug_to_key[s1], 'type': 'blocks'})
 
             prev_phase_idx = pi
             if phase['is_parallel']:
@@ -1009,7 +1009,7 @@ def parse_deps_txt(deps_text: str, slug_to_key: dict[str, str]) -> list[dict]:
         from_key = _resolve(from_title)
         to_key = _resolve(to_title)
         if from_key and to_key:
-            edges.append({'from_key': from_key, 'to_key': to_key, 'type': 'blocks'})
+            edges.append({'from_key': to_key, 'to_key': from_key, 'type': 'blocks'})
         else:
             parts = []
             if not from_key:
