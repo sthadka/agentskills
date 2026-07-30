@@ -751,7 +751,7 @@ def read_idea_description(idea_dir: Path) -> str:
     return ''
 
 
-def generate_graph_plan(plan: dict, epic_description: str) -> dict:
+def generate_graph_plan(plan: dict, epic_description: str, deps_txt: str | None = None) -> dict:
     """Generate a bd create --graph JSON plan with symbolic keys and edges."""
     nodes: list[dict] = []
     edges: list[dict] = []
@@ -831,78 +831,81 @@ def generate_graph_plan(plan: dict, epic_description: str) -> dict:
                 node['labels'] = labels
             nodes.append(node)
 
-    # Build edges
-    phase_task_map: dict[int, list[tuple[int, str]]] = {}
-    for pi, phase in enumerate(plan['phases']):
-        phase_task_map[pi] = []
-        for ti, task in enumerate(phase['tasks']):
-            phase_task_map[pi].append((ti, make_task_slug(task['description'])))
+    # Build edges — use deps_txt when available, otherwise fall back to phase-level inference
+    if deps_txt is not None:
+        edges = parse_deps_txt(deps_txt, slug_to_key)
+    else:
+        phase_task_map: dict[int, list[tuple[int, str]]] = {}
+        for pi, phase in enumerate(plan['phases']):
+            phase_task_map[pi] = []
+            for ti, task in enumerate(phase['tasks']):
+                phase_task_map[pi].append((ti, make_task_slug(task['description'])))
 
-    explicit_deps = parse_dependency_section(plan.get('dependencies', ''), plan['phases'])
+        explicit_deps = parse_dependency_section(plan.get('dependencies', ''), plan['phases'])
 
-    setup_slugs = [slug for _, _, slug, ph in all_tasks if ph['is_setup']]
-    first_non_setup = [(pi, ti, slug, ph) for pi, ti, slug, ph in all_tasks if not ph['is_setup']]
-    if setup_slugs and first_non_setup:
-        first_phase_idx = first_non_setup[0][0]
-        setup_target_indices = {first_phase_idx}
-        if explicit_deps is not None:
-            for pi_key, dep_list in explicit_deps.items():
-                if dep_list == []:
-                    setup_target_indices.add(pi_key)
-        for ss in setup_slugs:
-            for stt_slug in [s for p, _, s, ph in all_tasks if p in setup_target_indices and not ph['is_setup']]:
-                if ss in slug_to_key and stt_slug in slug_to_key:
-                    edges.append({'from_key': slug_to_key[ss], 'to_key': slug_to_key[stt_slug], 'type': 'blocks'})
+        setup_slugs = [slug for _, _, slug, ph in all_tasks if ph['is_setup']]
+        first_non_setup = [(pi, ti, slug, ph) for pi, ti, slug, ph in all_tasks if not ph['is_setup']]
+        if setup_slugs and first_non_setup:
+            first_phase_idx = first_non_setup[0][0]
+            setup_target_indices = {first_phase_idx}
+            if explicit_deps is not None:
+                for pi_key, dep_list in explicit_deps.items():
+                    if dep_list == []:
+                        setup_target_indices.add(pi_key)
+            for ss in setup_slugs:
+                for stt_slug in [s for p, _, s, ph in all_tasks if p in setup_target_indices and not ph['is_setup']]:
+                    if ss in slug_to_key and stt_slug in slug_to_key:
+                        edges.append({'from_key': slug_to_key[ss], 'to_key': slug_to_key[stt_slug], 'type': 'blocks'})
 
-    prev_phase_idx = -1
-    prev_phase_last_slugs: list[str] = []
+        prev_phase_idx = -1
+        prev_phase_last_slugs: list[str] = []
 
-    for pi, phase in enumerate(plan['phases']):
-        if phase['is_setup']:
-            continue
-        phase_tasks = phase_task_map.get(pi, [])
-        if not phase_tasks:
-            continue
+        for pi, phase in enumerate(plan['phases']):
+            if phase['is_setup']:
+                continue
+            phase_tasks = phase_task_map.get(pi, [])
+            if not phase_tasks:
+                continue
 
-        def _add_cross_edges(from_slugs: list[str], to_slugs: list[str]) -> None:
-            for fs in from_slugs:
-                for ts in to_slugs:
-                    if fs in slug_to_key and ts in slug_to_key:
-                        edges.append({'from_key': slug_to_key[fs], 'to_key': slug_to_key[ts], 'type': 'blocks'})
+            def _add_cross_edges(from_slugs: list[str], to_slugs: list[str]) -> None:
+                for fs in from_slugs:
+                    for ts in to_slugs:
+                        if fs in slug_to_key and ts in slug_to_key:
+                            edges.append({'from_key': slug_to_key[fs], 'to_key': slug_to_key[ts], 'type': 'blocks'})
 
-        def _first_slugs_for_phase(pt: list[tuple[int, str]], par: bool) -> list[str]:
-            return [s for _, s in pt] if par else [pt[0][1]]
+            def _first_slugs_for_phase(pt: list[tuple[int, str]], par: bool) -> list[str]:
+                return [s for _, s in pt] if par else [pt[0][1]]
 
-        if explicit_deps is not None:
-            dep_phase_indices = explicit_deps.get(pi)
-            if dep_phase_indices is None:
-                if prev_phase_last_slugs:
+            if explicit_deps is not None:
+                dep_phase_indices = explicit_deps.get(pi)
+                if dep_phase_indices is None:
+                    if prev_phase_last_slugs:
+                        is_par = phase['is_parallel'] or plan['phases'][prev_phase_idx]['is_parallel']
+                        _add_cross_edges(prev_phase_last_slugs, _first_slugs_for_phase(phase_tasks, is_par))
+                elif dep_phase_indices:
+                    for dep_pi in dep_phase_indices:
+                        dep_tasks = phase_task_map.get(dep_pi, [])
+                        if not dep_tasks:
+                            continue
+                        dep_phase = plan['phases'][dep_pi]
+                        dep_last = [s for _, s in dep_tasks] if dep_phase['is_parallel'] else [dep_tasks[-1][1]]
+                        _add_cross_edges(dep_last, _first_slugs_for_phase(phase_tasks, phase['is_parallel']))
+            else:
+                if prev_phase_last_slugs and phase_tasks:
                     is_par = phase['is_parallel'] or plan['phases'][prev_phase_idx]['is_parallel']
                     _add_cross_edges(prev_phase_last_slugs, _first_slugs_for_phase(phase_tasks, is_par))
-            elif dep_phase_indices:
-                for dep_pi in dep_phase_indices:
-                    dep_tasks = phase_task_map.get(dep_pi, [])
-                    if not dep_tasks:
-                        continue
-                    dep_phase = plan['phases'][dep_pi]
-                    dep_last = [s for _, s in dep_tasks] if dep_phase['is_parallel'] else [dep_tasks[-1][1]]
-                    _add_cross_edges(dep_last, _first_slugs_for_phase(phase_tasks, phase['is_parallel']))
-        else:
-            if prev_phase_last_slugs and phase_tasks:
-                is_par = phase['is_parallel'] or plan['phases'][prev_phase_idx]['is_parallel']
-                _add_cross_edges(prev_phase_last_slugs, _first_slugs_for_phase(phase_tasks, is_par))
 
-        if not phase['is_parallel'] and len(phase_tasks) > 1:
-            for i in range(len(phase_tasks) - 1):
-                s1, s2 = phase_tasks[i][1], phase_tasks[i + 1][1]
-                if s1 in slug_to_key and s2 in slug_to_key:
-                    edges.append({'from_key': slug_to_key[s1], 'to_key': slug_to_key[s2], 'type': 'blocks'})
+            if not phase['is_parallel'] and len(phase_tasks) > 1:
+                for i in range(len(phase_tasks) - 1):
+                    s1, s2 = phase_tasks[i][1], phase_tasks[i + 1][1]
+                    if s1 in slug_to_key and s2 in slug_to_key:
+                        edges.append({'from_key': slug_to_key[s1], 'to_key': slug_to_key[s2], 'type': 'blocks'})
 
-        prev_phase_idx = pi
-        if phase['is_parallel']:
-            prev_phase_last_slugs = [s for _, s in phase_tasks]
-        else:
-            prev_phase_last_slugs = [phase_tasks[-1][1]] if phase_tasks else []
+            prev_phase_idx = pi
+            if phase['is_parallel']:
+                prev_phase_last_slugs = [s for _, s in phase_tasks]
+            else:
+                prev_phase_last_slugs = [phase_tasks[-1][1]] if phase_tasks else []
 
     return {'nodes': nodes, 'edges': edges}
 
@@ -977,6 +980,54 @@ def parse_dependency_section(deps_text: str, phases: list[dict]) -> dict[int, li
     return result
 
 
+def parse_deps_txt(deps_text: str, slug_to_key: dict[str, str]) -> list[dict]:
+    """Parse deps.txt into explicit edge list.
+
+    Format: "blocker title" blocks "blocked title"
+    Returns [{'from_key': ..., 'to_key': ..., 'type': 'blocks'}]
+    """
+    edges: list[dict] = []
+    line_re = re.compile(r'"(.+?)"\s+blocks\s+"(.+?)"')
+
+    def _resolve(title: str) -> str | None:
+        slug = make_task_slug(title)
+        if slug in slug_to_key:
+            return slug_to_key[slug]
+        for s, k in slug_to_key.items():
+            if slug in s or s in slug:
+                return k
+        return None
+
+    for line in deps_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        m = line_re.match(line)
+        if not m:
+            continue
+        from_title, to_title = m.group(1), m.group(2)
+        from_key = _resolve(from_title)
+        to_key = _resolve(to_title)
+        if from_key and to_key:
+            edges.append({'from_key': from_key, 'to_key': to_key, 'type': 'blocks'})
+        else:
+            parts = []
+            if not from_key:
+                parts.append(f'from="{from_title[:60]}"')
+            if not to_key:
+                parts.append(f'to="{to_title[:60]}"')
+            print(f'  warning: unresolved dep — {", ".join(parts)}', file=sys.stderr)
+
+    seen: set[tuple[str, str]] = set()
+    deduped: list[dict] = []
+    for e in edges:
+        pair = (e['from_key'], e['to_key'])
+        if pair not in seen:
+            seen.add(pair)
+            deduped.append(e)
+    return deduped
+
+
 def cmd_export_beads(args: list[str]) -> int:
     run_mode = '--run' in args
     dry_run = '--dry-run' in args
@@ -999,7 +1050,15 @@ def cmd_export_beads(args: list[str]) -> int:
         return 1
 
     epic_desc = read_idea_description(idea_dir)
-    graph = generate_graph_plan(plan, epic_desc)
+
+    deps_txt = None
+    for deps_candidate in [idea_dir / 'deps.txt', idea_dir / '.beads' / 'deps.txt']:
+        if deps_candidate.exists():
+            deps_txt = deps_candidate.read_text()
+            print(f'Using deps from {deps_candidate.relative_to(idea_dir)}')
+            break
+
+    graph = generate_graph_plan(plan, epic_desc, deps_txt=deps_txt)
 
     beads_dir = idea_dir / '.beads'
     beads_dir.mkdir(exist_ok=True)

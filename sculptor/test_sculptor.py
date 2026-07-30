@@ -1152,6 +1152,222 @@ class TestExportBeads:
         assert has_edge("1.2", "2.1")
         assert has_edge("1.3", "2.1")
 
+    def test_deps_txt_used_when_present(self, idea_dir):
+        write_file(idea_dir / "plan.md", """\
+            # Implementation Plan: Deps Test
+
+            ## Phase 1: Build [parallel]
+            - [ ] Task 1: Alpha
+              - AC: alpha done
+            - [ ] Task 2: Beta
+              - AC: beta done
+            - [ ] Task 3: Gamma
+              - AC: gamma done
+
+            ## Phase 2: Ship
+            - [ ] Task 4: Deploy
+              - AC: deployed
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        write_file(idea_dir / "deps.txt", """\
+# Only Task 1 and Task 2 block Task 3
+"Task 1: Alpha" blocks "Task 3: Gamma"
+"Task 2: Beta" blocks "Task 3: Gamma"
+# Task 3 gates Phase 2
+"Task 3: Gamma" blocks "Task 4: Deploy"
+        """)
+
+        sculptor(["export-beads", str(idea_dir)])
+        graph = json.loads((idea_dir / ".beads" / "beads-graph.jsonl").read_text())
+        edges = graph["edges"]
+
+        def has_edge(f, t):
+            return any(e["from_key"] == f and e["to_key"] == t for e in edges)
+
+        # deps.txt edges present
+        assert has_edge("1.1", "1.3")  # Task 1 → Task 3
+        assert has_edge("1.2", "1.3")  # Task 2 → Task 3
+        assert has_edge("1.3", "2.1")  # Task 3 → Task 4
+
+        # fallback edges absent (without deps.txt, all Phase 1 would fan into Phase 2)
+        assert not has_edge("1.1", "2.1")
+        assert not has_edge("1.2", "2.1")
+
+        assert len(edges) == 3
+
+    def test_deps_txt_in_beads_subdir(self, idea_dir):
+        write_file(idea_dir / "plan.md", """\
+            # Implementation Plan: Beads Subdir
+
+            ## Phase 1: Build
+            - [ ] Task 1: Alpha
+              - AC: done
+            - [ ] Task 2: Beta
+              - AC: done
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        (idea_dir / ".beads").mkdir(exist_ok=True)
+        write_file(idea_dir / ".beads" / "deps.txt", """\
+"Task 1: Alpha" blocks "Task 2: Beta"
+        """)
+
+        sculptor(["export-beads", str(idea_dir)])
+        graph = json.loads((idea_dir / ".beads" / "beads-graph.jsonl").read_text())
+        edges = graph["edges"]
+
+        def has_edge(f, t):
+            return any(e["from_key"] == f and e["to_key"] == t for e in edges)
+
+        assert has_edge("1.1", "1.2")
+        assert len(edges) == 1
+
+
+# ── parse_deps_txt Tests ─────────────────────────────────────────
+
+
+class TestParseDeps:
+    def test_basic_parsing(self):
+        from sculptor_mod import parse_deps_txt
+        slug_to_key = {
+            "Task 1: Alpha": "1.1",
+            "Task 2: Beta": "1.2",
+            "Task 3: Gamma": "2.1",
+        }
+        text = '"Task 1: Alpha" blocks "Task 2: Beta"\n"Task 2: Beta" blocks "Task 3: Gamma"'
+        edges = parse_deps_txt(text, slug_to_key)
+        assert len(edges) == 2
+        assert edges[0] == {"from_key": "1.1", "to_key": "1.2", "type": "blocks"}
+        assert edges[1] == {"from_key": "1.2", "to_key": "2.1", "type": "blocks"}
+
+    def test_skips_comments_and_blanks(self):
+        from sculptor_mod import parse_deps_txt
+        slug_to_key = {"A": "1.1", "B": "1.2"}
+        text = '# comment\n\n"A" blocks "B"\n\n# another comment'
+        edges = parse_deps_txt(text, slug_to_key)
+        assert len(edges) == 1
+        assert edges[0]["from_key"] == "1.1"
+
+    def test_substring_match_fallback(self):
+        from sculptor_mod import parse_deps_txt
+        slug_to_key = {
+            "Create ref/rit-readiness-check.sh": "setup.7",
+            "Task 1: Build runbooks": "1.1",
+        }
+        text = '"Create ref/rit-readiness-check.sh" blocks "Task 1: Build runbooks"'
+        edges = parse_deps_txt(text, slug_to_key)
+        assert len(edges) == 1
+        assert edges[0] == {"from_key": "setup.7", "to_key": "1.1", "type": "blocks"}
+
+    def test_unresolved_warns(self, capsys):
+        from sculptor_mod import parse_deps_txt
+        slug_to_key = {"A": "1.1"}
+        text = '"A" blocks "Nonexistent"'
+        edges = parse_deps_txt(text, slug_to_key)
+        assert len(edges) == 0
+        captured = capsys.readouterr()
+        assert "unresolved" in captured.err
+
+    def test_deduplicates(self):
+        from sculptor_mod import parse_deps_txt
+        slug_to_key = {"A": "1.1", "B": "1.2"}
+        text = '"A" blocks "B"\n"A" blocks "B"'
+        edges = parse_deps_txt(text, slug_to_key)
+        assert len(edges) == 1
+
+    def test_empty_input(self):
+        from sculptor_mod import parse_deps_txt
+        edges = parse_deps_txt("", {})
+        assert edges == []
+
+
+# ── generate_graph_plan deps_txt Tests ───────────────────────────
+
+
+class TestGraphPlanDeps:
+    def _make_plan(self, text: str) -> dict:
+        from sculptor_mod import parse_plan
+        return parse_plan(textwrap.dedent(text))
+
+    def test_deps_txt_overrides_fallback(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Override Test
+
+            ## Phase 1: Build [parallel]
+            - [ ] 1.1: A
+              - AC: done
+            - [ ] 1.2: B
+              - AC: done
+
+            ## Phase 2: Ship
+            - [ ] 2.1: Deploy
+              - AC: done
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        deps_txt = '"1.1: A" blocks "2.1: Deploy"'
+        graph = generate_graph_plan(plan, "", deps_txt=deps_txt)
+        edges = graph["edges"]
+
+        def has_edge(f, t):
+            return any(e["from_key"] == f and e["to_key"] == t for e in edges)
+
+        assert has_edge("1.1", "2.1")
+        # Fallback would also add 1.2 → 2.1, but deps_txt overrides
+        assert not has_edge("1.2", "2.1")
+        assert len(edges) == 1
+
+    def test_no_deps_txt_uses_fallback(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Fallback Test
+
+            ## Phase 1: Build
+            - [ ] 1.1: A
+              - AC: done
+            - [ ] 1.2: B
+              - AC: done
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "", deps_txt=None)
+        edges = graph["edges"]
+
+        def has_edge(f, t):
+            return any(e["from_key"] == f and e["to_key"] == t for e in edges)
+
+        # Fallback sequential chain
+        assert has_edge("1.1", "1.2")
 
 
 # ── CLI Smoke Tests ──────────────────────────────────────────────
