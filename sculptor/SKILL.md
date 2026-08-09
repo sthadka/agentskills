@@ -77,6 +77,7 @@ This replaces speculation with concrete data.
 ### Deep research
 
 * **Create appendix files** for substantive topics. See [APPENDIX-TEMPLATE.md](APPENDIX-TEMPLATE.md) for the format. Link each appendix from the relevant section in research.md.
+* **Create explainer appendices** when a concept is central to the idea and non-obvious to at least one stakeholder group. See [EXPLAINER-TEMPLATE.md](EXPLAINER-TEMPLATE.md) for the layered altitude format (Intuition → Mental Model → Mechanics → Edge Cases).
 * **Don't wait idle for background research agents.** Start writing the research doc with findings you already have. Integrate agent results when they complete.
 * **Background agents must not edit shared files.** When dispatching research agents, instruct them to report findings back only — never to edit research.md, idea.md, or other shared documents directly. The main conversation is responsible for all shared file writes. This prevents merge conflicts when multiple agents run in parallel. Agents may create new appendix files (these are independent), but must not modify existing ones.
 * **Instruct research agents to follow the appendix template.** When dispatching agents that will create appendix files, include in the prompt: "Follow the format in APPENDIX-TEMPLATE.md." Without this, agents produce valid but inconsistently formatted appendices.
@@ -131,8 +132,11 @@ Annotations use `>>` at the start of a line. This is unambiguous — it won't co
 | `>> +` | Addition | `>> + also needs to handle pagination` |
 | `>> -` | Remove this | `>> - cut this section, out of scope` |
 | `>> *` | Strong opinion | `>> * must be backwards compatible` |
+| `>> explain` | Create explainer | `>> explain what is CRDT convergence` |
 
 Bare `>> free text` is always fine — intent can be inferred from context.
+
+When the user marks a passage with `>> explain`, create an explainer appendix for that concept. See [EXPLAINER-TEMPLATE.md](EXPLAINER-TEMPLATE.md) for the format. Link the explainer from the annotated passage.
 
 ### The Cycle
 
