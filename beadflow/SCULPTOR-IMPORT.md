@@ -4,6 +4,18 @@ When a sculptor session produces a plan (`plan.md`), beadflow can import it dire
 
 ## Entry
 
+### From sculptor export-beads (preferred)
+
+If `/sculptor export-beads` has already been run and produced `beads-graph.jsonl`:
+
+```bash
+python3 .beads/bf.py import-graph .beads/beads-graph.jsonl
+```
+
+This creates all issues with dependencies atomically. Skip to Validate below.
+
+### Manual conversion
+
 ```
 /beadflow import sculptor <path-to-idea-directory>
 ```
@@ -102,7 +114,7 @@ Then add dependencies per the rules above. See [COMMANDS.md](COMMANDS.md) for de
 
 ### 4. Validate
 ```bash
-bd ready --json
+python3 .beads/bf.py ready
 ```
 
 Setup task should be the first (or only) ready issue.

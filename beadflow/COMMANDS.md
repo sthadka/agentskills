@@ -1,12 +1,30 @@
 # BeadFlow Command Reference
 
-## Batch Creation (preferred for multiple issues)
+## bf.py — Quality Layer
+
+Always close via `bf.py` instead of raw `bd close`:
+
+```bash
+python3 .beads/bf.py init --bd-path "$(which bd)"     # Setup (copies bf.py, stores bd path)
+python3 .beads/bf.py ready                             # Filtered ready (no epics, supplements capped results)
+python3 .beads/bf.py verify --files "f1,f2"            # Mid-task quality check
+python3 .beads/bf.py close <id> --files "f1,f2" --summary "AC: pass. ..."  # Validate + close
+python3 .beads/bf.py close <id> --force                # Skip validation
+python3 .beads/bf.py smoke-test --build-cmd "cmd" --beads a,b  # Build + wiring check
+python3 .beads/bf.py conflict-check --beads a,b,c      # File-conflict analysis for parallel dispatch
+python3 .beads/bf.py dep <blocker> <blocked>            # Idempotent dep addition
+python3 .beads/bf.py import-graph graph.jsonl           # Import sculptor graph
+```
+
+## bd — Issue Tracker
+
+### Batch Creation (preferred for multiple issues)
 ```bash
 bd create -f plan.md --json
 ```
 Write a `.md` file with all issues, then create them all in one command. See [PLAN-FORMAT.md](PLAN-FORMAT.md) for the file format.
 
-## Single Issue Creation (with combined flags)
+### Single Issue Creation (with combined flags)
 ```bash
 bd create "Title" -t <type> -p <priority> -d "Description" --parent <parent-id> --json
 bd create "Title" -t bug -p 1 --deps "discovered-from:<id>" --json
@@ -14,12 +32,13 @@ bd q "Title" -t task -p 2                  # Quick capture: outputs only the ID
 ```
 Use `--deps` to create with dependencies in one command. Use `--parent` for hierarchy.
 
-## Find Work
+### Find Work
 ```bash
-bd ready --json                             # Unblocked, actionable issues (includes full details)
+python3 .beads/bf.py ready                  # PREFERRED: filtered, no epics, supplements capped
+bd ready --json                             # Raw: unblocked, actionable issues
 bd blocked --json                           # Blocked issues
 bd list --json                              # All issues
-bd show <id> --json                         # Full issue details (use only when ready output is insufficient)
+bd show <id> --json                         # Full issue details
 bd show <id1> <id2> --json                  # Batch show multiple issues
 ```
 
