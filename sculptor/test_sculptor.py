@@ -1006,6 +1006,139 @@ class TestGenerateGraphPlan:
         assert parsed["edges"] == graph["edges"]
 
 
+# ── Files annotation from subtasks Tests ────────────────────────
+
+
+class TestFilesAnnotation:
+    def _make_plan(self, text: str) -> dict:
+        from sculptor_mod import parse_plan
+        return parse_plan(textwrap.dedent(text))
+
+    def test_subtask_file_paths_added(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Config
+
+            ## Phase 1: Core [parallel]
+            - [ ] Task 1: Config loading (`internal/config/`)
+              - [ ] `config.go`: Load YAML config
+              - [ ] `defaults.go`: Default sync profiles
+              - [ ] `profiles.go`: SyncProfile type
+              - AC: config loads correctly
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "Build config")
+        task_node = next(n for n in graph["nodes"] if n["key"] == "1.1")
+        assert "Files (new):" in task_node["description"]
+        assert "internal/config/config.go" in task_node["description"]
+        assert "internal/config/defaults.go" in task_node["description"]
+        assert "internal/config/profiles.go" in task_node["description"]
+
+    def test_subtask_paths_with_slashes_kept_as_is(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: API
+
+            ## Phase 1: Core
+            - [ ] Task 1: API client
+              - [ ] `internal/api/client.go`: HTTP client
+              - [ ] `internal/api/auth.go`: Auth logic
+              - AC: client works
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "")
+        task_node = next(n for n in graph["nodes"] if n["key"] == "1.1")
+        assert "internal/api/client.go" in task_node["description"]
+        assert "internal/api/auth.go" in task_node["description"]
+
+    def test_no_subtasks_no_files_line(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Simple
+
+            ## Phase 1: Core
+            - [ ] Task 1: Init project
+              - AC: done
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "")
+        task_node = next(n for n in graph["nodes"] if n["key"] == "1.1")
+        assert "Files (new):" not in task_node["description"]
+
+    def test_no_backtick_paths_no_files_line(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Prose
+
+            ## Phase 1: Core
+            - [ ] Task 1: Build parser
+              - [ ] Parse JSON input
+              - [ ] Handle edge cases
+              - AC: parser works
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "")
+        task_node = next(n for n in graph["nodes"] if n["key"] == "1.1")
+        assert "Files (new):" not in task_node["description"]
+
+    def test_deduplicates_file_paths(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Dedup
+
+            ## Phase 1: Core
+            - [ ] Task 1: Config (`internal/config/`)
+              - [ ] `config.go`: Load config
+              - [ ] `config.go`: Validate config
+              - AC: config ready
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "")
+        task_node = next(n for n in graph["nodes"] if n["key"] == "1.1")
+        count = task_node["description"].count("internal/config/config.go")
+        assert count == 1
+
+
 # ── read_idea_description Tests ──────────────────────────────────
 
 

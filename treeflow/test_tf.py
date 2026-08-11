@@ -2036,6 +2036,48 @@ class TestWorkerPrompt:
         assert "Parses JSON input correctly" in out["prompt"]
         assert "Returns error on invalid input" in out["prompt"]
 
+    def test_includes_inline_ac_lines(self, workspace, bd_stub):
+        """worker-prompt should extract inline AC: lines from description text."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        desc = textwrap.dedent("""\
+            Build the config module.
+
+            Sub-tasks:
+            - `config.go`: Load YAML config
+              - AC: `config.Load('path')` returns populated Config struct
+            - `defaults.go`: Default profiles
+              - AC: 4 default sync profiles created
+        """)
+        resp = json.dumps({"id": "1", "title": "Config module", "description": desc})
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "1",
+        ], env={"BD_STUB_RESPONSE": resp})
+        assert out["ok"] is True
+        assert "Acceptance Criteria" in out["prompt"]
+        assert "populated Config struct" in out["prompt"]
+        assert "4 default sync profiles" in out["prompt"]
+
+    def test_inline_ac_merged_with_heading_ac(self, workspace, bd_stub):
+        """Inline AC: lines and ### Acceptance Criteria heading should both appear."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        desc = textwrap.dedent("""\
+            Build the parser.
+
+            ### Acceptance Criteria
+            - Handles UTF-8 input
+
+            Sub-tasks:
+            - `parser.go`: Main parser
+              - AC: Parses JSON and YAML
+        """)
+        resp = json.dumps({"id": "1", "title": "Parser", "description": desc})
+        out = tf(workspace, [
+            "worker-prompt", "--beads", "1",
+        ], env={"BD_STUB_RESPONSE": resp})
+        assert out["ok"] is True
+        assert "Handles UTF-8 input" in out["prompt"]
+        assert "Parses JSON and YAML" in out["prompt"]
+
     def test_includes_spec_sections(self, workspace, bd_stub):
         tf(workspace, ["init", "test", "--bd-path", bd_stub])
         spec = textwrap.dedent("""\
@@ -2359,6 +2401,42 @@ class TestNotifyAutoCloseParent:
         out = tf(workspace, ["notify", "w1", "bead-child-1", "--context-pct", "50"],
                  env={"BD_STUB_RESPONSE": json.dumps(children)})
         assert "parent_auto_closed" not in out
+
+    def test_phase_build_runs_on_all_closed(self, workspace, bd_stub):
+        """When all children close and build_cmd is set, auto-run build verification."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub, "--build-cmd", "true"])
+        tf(workspace, ["dispatch", "w1", "bead-child-1", "--skill", "code"])
+        bead = [{"id": "bead-child-1", "status": "closed", "parent": "epic-1"}]
+        children = [{"id": "bead-child-1", "status": "closed"}]
+        out = tf(workspace, ["notify", "w1", "bead-child-1", "--context-pct", "50"],
+                 env={"BD_STUB_RESPONSE": json.dumps(bead)})
+        # With single-response stub, the list call returns same as show.
+        # When bead has parent and list shows all closed, build should run.
+        assert out["bead_status"] == "closed"
+        # If parent_auto_closed was set, phase_build should also be set
+        if "parent_auto_closed" in out:
+            assert out["phase_build"] == "pass"
+            assert out["phase_complete_suggested"] is True
+
+    def test_phase_build_failure_includes_output(self, workspace, bd_stub):
+        """Failed build verification should include output in response."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub, "--build-cmd", "false"])
+        tf(workspace, ["dispatch", "w1", "bead-child-1", "--skill", "code"])
+        bead = [{"id": "bead-child-1", "status": "closed", "parent": "epic-1"}]
+        out = tf(workspace, ["notify", "w1", "bead-child-1", "--context-pct", "50"],
+                 env={"BD_STUB_RESPONSE": json.dumps(bead)})
+        assert out["bead_status"] == "closed"
+        if "parent_auto_closed" in out:
+            assert out["phase_build"] == "fail"
+
+    def test_no_phase_build_without_build_cmd(self, workspace, bd_stub):
+        """Without build_cmd in registry, no phase build verification."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "w1", "bead-child-1", "--skill", "code"])
+        bead = [{"id": "bead-child-1", "status": "closed", "parent": "epic-1"}]
+        out = tf(workspace, ["notify", "w1", "bead-child-1", "--context-pct", "50"],
+                 env={"BD_STUB_RESPONSE": json.dumps(bead)})
+        assert "phase_build" not in out
 
 
 # ── Worker-Prompt Phase Cap Tests ──────────────────────
@@ -2914,6 +2992,110 @@ class TestNotifyAgentId:
         if out.get("available", {}).get("code"):
             worker = out["available"]["code"][0]
             assert worker.get("agent_id") == "a123-456"
+
+
+# ── Phase-Complete Key Interfaces Tests ──────────────────
+
+
+class TestPhaseCompleteInterfaces:
+    def test_extracts_go_signatures(self, workspace, bd_stub):
+        """phase-complete should extract Go function/type signatures into Key Interfaces."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        # Create a Go source file that would appear in phase files
+        go_file = workspace / "internal" / "config" / "config.go"
+        go_file.parent.mkdir(parents=True, exist_ok=True)
+        go_file.write_text(textwrap.dedent("""\
+            package config
+
+            type Config struct {
+                Auth AuthConfig
+                DB   DBConfig
+            }
+
+            func Load(path string) (*Config, error) {
+                // implementation
+                return nil, nil
+            }
+
+            func (c *Config) Validate() error {
+                return nil
+            }
+        """))
+        beads = [{"id": "1", "status": "closed",
+                  "close_reason": f"done. FILES: {go_file}."}]
+        out = tf(workspace, ["phase-complete", "--epic", "10"],
+                 env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["pass"] is True
+        ctx = workspace / ".beads" / "context-test"
+        content = (ctx / "phase-1.md").read_text()
+        assert "Key Interfaces" in content
+        assert "func Load(path string) (*Config, error)" in content
+        assert "type Config struct" in content
+
+    def test_no_interfaces_for_nonexistent_files(self, workspace, bd_stub):
+        """Key Interfaces section should be absent when files don't exist."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = [{"id": "1", "status": "closed",
+                  "close_reason": "done. FILES: nonexistent.go."}]
+        out = tf(workspace, ["phase-complete", "--epic", "10"],
+                 env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["pass"] is True
+        ctx = workspace / ".beads" / "context-test"
+        content = (ctx / "phase-1.md").read_text()
+        assert "Key Interfaces" not in content
+
+
+class TestWorkerPromptPhaseInterfaces:
+    def test_includes_phase_interfaces(self, workspace, bd_stub):
+        """worker-prompt should include Key Interfaces from phase summary files."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        ctx = workspace / ".beads" / "context-test"
+        phase_content = textwrap.dedent("""\
+            # Phase 1 Summary
+
+            **Status:** Complete | **Build:** Pass
+
+            ## Files Created/Modified
+            - `internal/config/config.go`
+
+            ## Key Interfaces
+
+            ### `internal/config/config.go`
+            ```
+              func Load(path string) (*Config, error)
+              type Config struct
+            ```
+        """)
+        (ctx / "phase-1.md").write_text(phase_content)
+        resp = json.dumps({"id": "1", "title": "Task", "description": "Build sync"})
+        out = tf(workspace, ["worker-prompt", "--beads", "1"],
+                 env={"BD_STUB_RESPONSE": resp})
+        assert out["ok"] is True
+        assert "Key Interfaces" in out["prompt"]
+        assert "func Load(path string)" in out["prompt"]
+
+    def test_excludes_non_interface_phase_content(self, workspace, bd_stub):
+        """worker-prompt should NOT include general phase content, only Key Interfaces."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        ctx = workspace / ".beads" / "context-test"
+        phase_content = textwrap.dedent("""\
+            # Phase 1 Summary
+
+            **Status:** Complete | **Build:** Pass
+
+            ## Beads Closed
+            5 beads
+
+            ## Parallelism
+            - **Sequential:** 40%
+        """)
+        (ctx / "phase-1.md").write_text(phase_content)
+        resp = json.dumps({"id": "1", "title": "Task", "description": "Build sync"})
+        out = tf(workspace, ["worker-prompt", "--beads", "1"],
+                 env={"BD_STUB_RESPONSE": resp})
+        assert out["ok"] is True
+        assert "Sequential" not in out["prompt"]
+        assert "5 beads" not in out["prompt"]
 
 
 # ── Phase-Gate Worker Scoping Tests ──────────────────────

@@ -751,6 +751,40 @@ def read_idea_description(idea_dir: Path) -> str:
     return ''
 
 
+_SUBTASK_FILE_RE = re.compile(r'`([a-zA-Z0-9_/.=-]+\.[a-zA-Z0-9]{1,10})`')
+
+
+def _extract_file_paths_from_subtasks(task: dict) -> list[str]:
+    """Extract file paths from subtask descriptions for Files: annotation.
+
+    Looks for backtick-wrapped paths like `config.go`, `engine.go`,
+    `internal/config/config.go` in subtask description text.
+    Also checks the task description for a directory prefix like
+    `internal/config/` to qualify bare filenames.
+    """
+    dir_prefix = ''
+    desc = task.get('description', '')
+    m = re.search(r'`((?:[a-zA-Z0-9_-]+/)+)`', desc)
+    if m:
+        dir_prefix = m.group(1)
+
+    paths: list[str] = []
+    seen: set[str] = set()
+    for st in task.get('subtasks', []):
+        for fm in _SUBTASK_FILE_RE.finditer(st['description']):
+            p = fm.group(1)
+            if '/' in p:
+                qualified = p
+            elif dir_prefix:
+                qualified = dir_prefix + p
+            else:
+                qualified = p
+            if qualified not in seen:
+                seen.add(qualified)
+                paths.append(qualified)
+    return paths
+
+
 def generate_graph_plan(plan: dict, epic_description: str, deps_txt: str | None = None) -> dict:
     """Generate a bd create --graph JSON plan with symbolic keys and edges."""
     nodes: list[dict] = []
@@ -804,6 +838,12 @@ def generate_graph_plan(plan: dict, epic_description: str, deps_txt: str | None 
                         desc_parts.append(f'  {el}')
                     for bl in st.get('body_lines', []):
                         desc_parts.append(f'  {bl.strip()}')
+
+            # Synthesize Files: annotation from subtask paths
+            file_paths = _extract_file_paths_from_subtasks(task)
+            if file_paths:
+                desc_parts.append('')
+                desc_parts.append(f'Files (new): {", ".join(file_paths)}')
 
             ac_lines = list(task['ac'])
             for st in task['subtasks']:

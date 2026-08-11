@@ -763,7 +763,7 @@ def cmd_notify(args: argparse.Namespace) -> None:
         else:
             result["auto_closed"] = False
 
-    # Auto-close parent epic if all siblings are closed
+    # Auto-close parent epic if all siblings are closed + auto-build verification
     if result["bead_status"] == "closed" and isinstance(bead, dict):
         parent_id = bead.get("parent", "")
         if parent_id:
@@ -776,6 +776,16 @@ def cmd_notify(args: argparse.Namespace) -> None:
                 if all_closed:
                     _run(f'{bd} close {parent_id} --reason "all children closed" --json')
                     result["parent_auto_closed"] = parent_id
+                    # Phase gate: auto-run build verification when all phase beads close
+                    build_cmd = reg.get("build_cmd", "")
+                    if build_cmd:
+                        br = _run(build_cmd)
+                        build_ok = br.returncode == 0
+                        result["phase_build"] = "pass" if build_ok else "fail"
+                        if not build_ok:
+                            tail = br.stdout.strip().split("\n")[-20:]
+                            result["phase_build_output"] = "\n".join(tail)
+                        result["phase_complete_suggested"] = True
             except (json.JSONDecodeError, IndexError) as e:
                 sys.stderr.write(f"tf.py warning: auto-close parent epic: {e}\n")
 
@@ -1060,6 +1070,60 @@ def _infer_files_from_description(desc: str) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
+# Patterns for extracting exported interface signatures across languages
+_SIGNATURE_PATTERNS = [
+    # Go
+    re.compile(r'^(func \w+\(.*?\).*?)(?:\s*\{|$)'),
+    re.compile(r'^(func \(\w+ \*?\w+\) \w+\(.*?\).*?)(?:\s*\{|$)'),
+    re.compile(r'^(type \w+ (?:struct|interface)\b.*)'),
+    # Rust
+    re.compile(r'^(pub fn \w+.*?)(?:\s*\{|$)'),
+    re.compile(r'^(pub struct \w+.*)'),
+    re.compile(r'^(pub enum \w+.*)'),
+    re.compile(r'^(pub trait \w+.*)'),
+    # TypeScript / JavaScript
+    re.compile(r'^(export (?:function|class|interface|type|const|enum) \w+.*)'),
+    # Python
+    re.compile(r'^(def \w+\(.*?\).*)'),
+    re.compile(r'^(class \w+.*)'),
+]
+
+
+def _extract_signatures_from_files(file_paths: list[str]) -> str:
+    """Extract exported function/type signatures from source files.
+
+    Returns a markdown-formatted string grouped by file, with only
+    signature lines (no bodies). Used by phase-complete to build
+    interface summaries for next-phase workers.
+    """
+    sections: list[str] = []
+    for fpath in sorted(set(file_paths)):
+        p = Path(fpath)
+        if not p.exists():
+            continue
+        if p.suffix not in ('.go', '.rs', '.ts', '.tsx', '.js', '.jsx', '.py', '.ex', '.exs'):
+            continue
+        try:
+            content = p.read_text(errors='replace')
+        except OSError:
+            continue
+        sigs: list[str] = []
+        for line in content.splitlines():
+            stripped = line.rstrip()
+            if not stripped or stripped.startswith((' ', '\t', '//', '#', '/*', '*')):
+                continue
+            for pat in _SIGNATURE_PATTERNS:
+                m = pat.match(stripped)
+                if m:
+                    sig = m.group(1).rstrip(' {').strip()
+                    sigs.append(sig)
+                    break
+        if sigs:
+            sig_block = "\n".join(f"  {s}" for s in sigs)
+            sections.append(f"### `{fpath}`\n```\n{sig_block}\n```")
+    return "\n\n".join(sections)
+
+
 _SPEC_REF_RE = re.compile(
     r"(?:^|\s)Spec:\s*`?([^\s`]+)`?\s*(?:§|#)\s*(.+)",
     re.MULTILINE,
@@ -1067,10 +1131,17 @@ _SPEC_REF_RE = re.compile(
 
 
 def _extract_acceptance_criteria(desc: str) -> str:
-    """Extract the ### Acceptance Criteria section from a bead description."""
+    """Extract acceptance criteria from a bead description.
+
+    Finds criteria from two sources:
+    1. Content under a ### Acceptance Criteria heading
+    2. Inline lines starting with 'AC:' or '- AC:' anywhere in the description
+    Both are merged into a single result.
+    """
     lines = desc.split("\n")
     capture = False
-    result: list[str] = []
+    heading_lines: list[str] = []
+    inline_ac: list[str] = []
     for line in lines:
         stripped = line.strip()
         if stripped.lower().startswith("### acceptance criteria"):
@@ -1078,10 +1149,21 @@ def _extract_acceptance_criteria(desc: str) -> str:
             continue
         if capture:
             if stripped.startswith("### ") or stripped.startswith("## "):
-                break
-            result.append(line)
-    text = "\n".join(result).strip()
-    return text
+                capture = False
+            else:
+                heading_lines.append(line)
+                continue
+        # Inline AC: lines (with or without leading bullet)
+        m = re.match(r'^[\s-]*AC:\s*(.*)', line)
+        if m and m.group(1).strip():
+            inline_ac.append(f"- {m.group(1).strip()}")
+    parts: list[str] = []
+    heading_text = "\n".join(heading_lines).strip()
+    if heading_text:
+        parts.append(heading_text)
+    if inline_ac:
+        parts.append("\n".join(inline_ac))
+    return "\n".join(parts)
 
 
 def _extract_spec_sections(desc: str, project_root: Path) -> str:
@@ -1924,6 +2006,12 @@ def cmd_phase_complete(args: argparse.Namespace) -> None:
 
     phase_content += f"\n## Parallelism\n- **Sequential:** {parallelism['sequential_pct']}%\n- **Beads:** {parallelism['total_beads']}\n"
 
+    # 5. Extract interface signatures for next-phase workers
+    if all_files:
+        iface_text = _extract_signatures_from_files(all_files)
+        if iface_text:
+            phase_content += f"\n## Key Interfaces\n\n{iface_text}\n"
+
     (ctx / phase_file).write_text(phase_content)
 
     result: dict = {
@@ -1987,6 +2075,17 @@ def cmd_worker_prompt(args: argparse.Namespace) -> None:
                 dep_lines.append(f"- **{did}**: {title}{summary}")
         if dep_lines:
             project_context += "\n\n## Completed Dependencies\n" + "\n".join(dep_lines)
+
+    # Include Key Interfaces from completed phase summaries
+    for phase_file in sorted(ctx.glob("phase-*.md")):
+        try:
+            phase_text = phase_file.read_text()
+        except OSError:
+            continue
+        iface_section = _read_heading_section(phase_text, "Key Interfaces")
+        if iface_section:
+            phase_label = phase_file.stem.replace("-", " ").title()
+            project_context += f"\n\n## {phase_label} — Key Interfaces\n\n{iface_section}"
 
     # Determine epic context
     epic_context = "N/A"
