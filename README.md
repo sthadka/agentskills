@@ -95,7 +95,6 @@ Want to contribute a skill? Here's how:
 4. **Submit a pull request** with:
    - Your skill directory
    - Updated README.md (add to the appropriate table above)
-   - Updated AGENTS.md (add to the catalog)
 
 ### Skill Best Practices
 
@@ -158,4 +157,4 @@ See individual skill directories for their specific licenses. Skills without exp
 
 ---
 
-**For AI Agents**: See [AGENTS.md](./AGENTS.md) for the structured skill catalog and usage guidelines.
+**For AI Agents**: Skills are auto-discovered from `SKILL.md` files. See [CLAUDE.md](./CLAUDE.md) for project conventions.

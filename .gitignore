@@ -1,9 +1,13 @@
 __pycache__/
+.pytest_cache/
 
-# Beads / Dolt files (added by bd init)
+# Beads / Dolt (runtime state, not source)
 .dolt/
 *.db
 .beads-credential-key
-
-# TreeFlow context (auto-added)
 .beads/
+
+# Scratch / session artifacts
+scratch/
+*-feedback*.md
+bug-*.md
