@@ -57,6 +57,36 @@
 * When planning identifies technical friction (API shape mismatch, library constraints, ordering dependencies), write the obstacle and its resolution into the task description. Workers discovering obstacles mid-implementation defer; workers given the solution upfront implement it.
 * Each task should cite the spec section(s) it implements (e.g., `Spec: spec.md §Data Model — SQLite Schema, §Architecture — Package Layout`). A single task may cover multiple spec sections. Add a `## Spec Coverage` table mapping spec sections to tasks — any uncovered section is a gap.
 * Each phase should end with an **integration test task** that validates the phase's tasks compose correctly. Individual task ACs verify units; the integration test verifies they work together. The integration test task must explicitly list any inputs, accesses, data, or credentials it needs — surface these requirements upfront so they're available before implementation starts.
+* Integration test tasks should test against **live APIs, DBs, and services** whenever possible. Live testing is far more powerful than in-process mocking. If the feature talks to a Slack API, test against the real Slack API. If it writes to SQLite, test against a real SQLite DB (not mocks). AC lines should specify: "Test against live {service} — do not mock."
+* Every function, API, or type that crosses a task boundary must have a **`Contract:`** section in the producing task's description specifying: exact signature, preconditions, postconditions, and error behavior. Consumer tasks must reference the producer's preconditions. See `## Interface Contracts` below.
+* When a spec requirement uses quantifiers ("all commands must X", "every endpoint", "each module"), it is a **cross-cutting requirement** and must get its own dedicated bead with specific verification AC (e.g., "grep for `--local-only` in all command handlers"). Never rely on individual task workers to independently remember a cross-cutting rule.
+* For every command, API endpoint, or data query task, include **edge-case ACs**: empty-state behavior (no crash, no null where array expected), missing-parameter error handling, and empty-collection returns (not null). These are in addition to happy-path ACs.
+
+## Interface Contracts
+
+For every function/API/type that crosses a task boundary, add a row to this table. Each row maps to a blocking dependency in the beads graph (the consumer task depends on the producer task).
+
+```markdown
+## Interface Contracts
+
+| Producer Task | Consumer Task | Contract |
+|---|---|---|
+| Task 1: Store module | Task 3: Command handler | `add_subscription(channel_id)` — PRECONDITION: channel exists in `channels` table |
+| Task 2: Channel resolver | Task 3: Command handler | `resolve_channel_id(name) -> id` — POSTCONDITION: returns valid channel_id or ChannelNotFound error |
+```
+
+**In each task description**, the contract appears as:
+
+```markdown
+- [ ] Task 1: Implement store subscriptions
+  - Spec: spec.md §Subscriptions
+  - Contract: `fn add_subscription(channel_id: &str, ...) -> Result<()>`
+    - PRECONDITION: `channel_id` must exist in `channels` table (FK constraint)
+    - POSTCONDITION: Row exists in `subscriptions` with `channel_id` FK
+    - ERROR: Returns `ChannelNotFound` if FK constraint fails
+  - Consumed by: Task 3 (command handler) — caller must upsert channel first
+  - AC: `add_subscription` succeeds when channel exists; returns typed error when channel missing
+```
 
 ## Handoff to BeadFlow
 

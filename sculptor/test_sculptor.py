@@ -1561,3 +1561,353 @@ class TestPhaseRegex:
         assert PHASE_RE.match("## Dependencies") is None
         assert PHASE_RE.match("## Cross-worker Invariants") is None
         assert PHASE_RE.match("## Risks") is None
+
+
+# ── Contract Validation Tests ──────────────────────────────────
+
+
+class TestContractValidation:
+    PLAN_WITH_CONSUMER = textwrap.dedent("""\
+        # Implementation Plan: Test
+
+        ## Setup
+        - [ ] S1: Init
+          - AC: scaffold created
+
+        ## Phase 1: Core
+        - [ ] 1.1: Implement store subscriptions
+          Consumed by: Task 2 (command handler)
+          - AC: subscription works
+
+        ## Cross-worker Invariants
+        None
+
+        ## Dependencies
+        None
+
+        ## Risks
+        None
+    """)
+
+    def test_consumer_without_contract_warns(self, tmp_path):
+        f = tmp_path / "plan.md"
+        f.write_text(self.PLAN_WITH_CONSUMER)
+        r = sculptor(["lint-plan", str(f)])
+        assert r["returncode"] == 1
+        assert "consumer reference but no Contract:" in r["stdout"]
+
+    def test_consumer_with_contract_passes(self, tmp_path):
+        f = tmp_path / "plan.md"
+        plan = self.PLAN_WITH_CONSUMER.replace(
+            "Consumed by: Task 2 (command handler)",
+            "Contract: `add_subscription(channel_id)` — PRECONDITION: channel exists\n  Consumed by: Task 2 (command handler)"
+        )
+        f.write_text(plan)
+        r = sculptor(["lint-plan", str(f)])
+        # Should not have the contract warning (may still have other warnings)
+        assert "consumer reference but no Contract:" not in r["stdout"]
+
+
+# ── Cross-Cutting Requirement Detection Tests ──────────────────
+
+
+class TestCrossCuttingDetection:
+    GOOD_PLAN = textwrap.dedent("""\
+        # Implementation Plan: Test
+
+        ## Setup
+        - [ ] S1: Init
+          - AC: scaffold created
+
+        ## Phase 1: Core
+        - [ ] 1.1: Build it
+          - AC: it builds
+
+        ## Cross-worker Invariants
+        None
+
+        ## Dependencies
+        None
+
+        ## Risks
+        None
+    """)
+
+    def test_detects_uncovered_cross_cutting(self, tmp_path):
+        spec = tmp_path / "spec.md"
+        spec.write_text("# Spec\n## Commands\nAll commands must support the --verbose flag.\n")
+        plan = tmp_path / "plan.md"
+        plan.write_text(self.GOOD_PLAN)
+        r = sculptor(["lint-plan", str(plan), "--spec", str(spec)])
+        assert r["returncode"] == 1
+        assert "Cross-cutting requirement" in r["stdout"]
+        assert "--verbose" in r["stdout"] or "verbose" in r["stdout"]
+
+    def test_no_warning_when_dedicated_task_exists(self, tmp_path):
+        spec = tmp_path / "spec.md"
+        spec.write_text("# Spec\n## Commands\nAll commands must support the --verbose flag.\n")
+        plan = tmp_path / "plan.md"
+        plan_text = self.GOOD_PLAN.replace(
+            "- [ ] 1.1: Build it\n  - AC: it builds",
+            "- [ ] 1.1: Build it\n  - AC: it builds\n- [ ] 1.2: Add --verbose to all commands\n  - AC: every command supports --verbose"
+        )
+        plan.write_text(plan_text)
+        r = sculptor(["lint-plan", str(plan), "--spec", str(spec)])
+        assert "Cross-cutting requirement" not in r["stdout"]
+
+
+# ── Integration Test Bead Auto-Generation Tests ────────────────
+
+
+class TestIntegrationTestAutoGeneration:
+    def _make_plan(self, text: str) -> dict:
+        from sculptor_mod import parse_plan
+        return parse_plan(textwrap.dedent(text))
+
+    def test_auto_generates_integration_bead(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Test
+
+            ## Phase 1: Core [parallel]
+            - [ ] 1.1: Build A
+              - AC: A done
+            - [ ] 1.2: Build B
+              - AC: B done
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "")
+        integ_nodes = [n for n in graph["nodes"] if 'integration' in n.get('labels', [])]
+        assert len(integ_nodes) == 1
+        assert integ_nodes[0]["key"] == "1.integ"
+        assert "Integration test" in integ_nodes[0]["title"]
+
+        # Integration test should depend on all tasks in the phase
+        integ_edges = [e for e in graph["edges"] if e["from_key"] == "1.integ"]
+        dep_keys = {e["to_key"] for e in integ_edges}
+        assert "1.1" in dep_keys
+        assert "1.2" in dep_keys
+
+    def test_skips_when_manual_integration_exists(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Test
+
+            ## Phase 1: Core
+            - [ ] 1.1: Build A
+              - AC: A done
+            - [ ] 1.2: Build B
+              - AC: B done
+            - [ ] 1.3: Integration test — Phase 1
+              - AC: integration passes
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "")
+        integ_nodes = [n for n in graph["nodes"] if 'integration' in n.get('labels', [])]
+        assert len(integ_nodes) == 0
+
+    def test_skips_single_task_phase(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Test
+
+            ## Phase 1: Core
+            - [ ] 1.1: Build A
+              - AC: A done
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "")
+        integ_nodes = [n for n in graph["nodes"] if 'integration' in n.get('labels', [])]
+        assert len(integ_nodes) == 0
+
+    def test_skips_setup_phase(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Test
+
+            ## Setup
+            - [ ] S1: Init A
+              - AC: done
+            - [ ] S2: Init B
+              - AC: done
+
+            ## Phase 1: Core
+            - [ ] 1.1: Build
+              - AC: built
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "")
+        integ_nodes = [n for n in graph["nodes"] if 'integration' in n.get('labels', [])]
+        assert len(integ_nodes) == 0
+
+
+# ── Edge-Case AC Injection Tests ───────────────────────────────
+
+
+class TestEdgeCaseACInjection:
+    def _make_plan(self, text: str) -> dict:
+        from sculptor_mod import parse_plan
+        return parse_plan(textwrap.dedent(text))
+
+    def test_injects_edge_case_acs_for_command_tasks(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Test
+
+            ## Phase 1: Core
+            - [ ] 1.1: Implement store info command handler
+              - AC: store info displays channel count
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "")
+        node = next(n for n in graph["nodes"] if n["key"] == "1.1")
+        ac = node["acceptance_criteria"]
+        assert "empty" in ac.lower()
+        assert "error" in ac.lower() or "missing" in ac.lower()
+
+    def test_no_injection_for_non_command_tasks(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Test
+
+            ## Phase 1: Core
+            - [ ] 1.1: Write project README
+              - AC: README exists
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "")
+        node = next(n for n in graph["nodes"] if n["key"] == "1.1")
+        ac = node["acceptance_criteria"]
+        assert "empty collection" not in ac.lower()
+
+    def test_no_duplicate_injection(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Test
+
+            ## Phase 1: Core
+            - [ ] 1.1: Implement query endpoint
+              - AC: query returns results
+              - AC: Returns empty collection (not null) when no data matches
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "")
+        node = next(n for n in graph["nodes"] if n["key"] == "1.1")
+        ac = node["acceptance_criteria"]
+        count = ac.lower().count("empty collection")
+        assert count == 1
+
+
+# ── Spec Coverage in Graph Metadata Tests ──────────────────────
+
+
+class TestSpecCoverageInGraph:
+    def _make_plan(self, text: str) -> dict:
+        from sculptor_mod import parse_plan
+        return parse_plan(textwrap.dedent(text))
+
+    def test_spec_coverage_embedded_in_epic(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Test
+
+            ## Phase 1: Core
+            - [ ] 1.1: Build
+              - AC: built
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        coverage = [
+            {"spec_section": "Architecture", "task_ref": "1.1"},
+            {"spec_section": "Data Model", "task_ref": "1.2"},
+        ]
+        graph = generate_graph_plan(plan, "desc", spec_coverage=coverage)
+        epic = next(n for n in graph["nodes"] if n["key"] == "epic")
+        assert "notes" in epic
+        assert "Architecture" in epic["notes"]
+        assert "Data Model" in epic["notes"]
+
+    def test_no_coverage_no_notes(self):
+        from sculptor_mod import generate_graph_plan
+        plan = self._make_plan("""\
+            # Plan: Test
+
+            ## Phase 1: Core
+            - [ ] 1.1: Build
+              - AC: built
+
+            ## Cross-worker Invariants
+            None
+
+            ## Dependencies
+            None
+
+            ## Risks
+            None
+        """)
+        graph = generate_graph_plan(plan, "desc")
+        epic = next(n for n in graph["nodes"] if n["key"] == "epic")
+        assert "notes" not in epic

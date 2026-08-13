@@ -84,6 +84,25 @@ You are a worker agent executing a specific task. You do NOT plan, orchestrate, 
 - **Your task is NOT complete until `tf.py worker-close` returns `{"ok":true}`.** If it returns errors, you must fix them before you are done.
 - **Integration tasks** (marked `[integration]` in title): claim with `--expected-mins N` for a realistic time estimate, heartbeat before and after every operation >2 minutes, and call `tf.py block` if external services are unavailable rather than retrying indefinitely.
 
+## Worker State Machine
+
+For each bead, follow this strict sequence: **CLAIM → IMPLEMENT → TEST → VALIDATE-AC → CLOSE**
+
+1. **CLAIM** — `tf.py claim {bead_id}`. Must complete before writing any code.
+2. **IMPLEMENT** — Write the code described in the bead. Read existing code for actual signatures.
+3. **TEST** — Run the project's build command and test suite. Build must pass.
+4. **VALIDATE-AC** — Validate each acceptance criterion from the bead description:
+   - For command beads: run the actual command and check output
+   - For edge-case ACs: test with empty data, invalid input, missing dependencies
+   - For live-test ACs: hit the real API/DB/service
+   - Collect evidence: `[{"ac": "...", "passed": true/false, "evidence": "..."}]`
+5. **CLOSE** — `tf.py worker-close {bead_id} --ac-results '<json>' --context-pct N --files f1,f2 --summary "..."`
+
+You cannot skip states. If TEST fails, fix and re-test. If VALIDATE-AC fails, fix and re-validate.
+For batched tasks, run the full state machine for each bead sequentially.
+
+{platform_constraints}
+
 ## Context Budget
 
 If you are working on a batch of multiple tasks and estimate you may run out of context before finishing all of them:

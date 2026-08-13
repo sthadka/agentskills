@@ -3896,3 +3896,279 @@ class TestWorkerCloseFileValidation:
         warnings = out.get("warnings", [])
         assert not any("no target files were modified" in w for w in warnings), \
             f"No file modification warning expected with --force, got: {warnings}"
+
+
+# ── Init Mode & Context Cap Tests ─────────────────────────────
+
+
+class TestInitMode:
+    def test_default_mode_is_parallel(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        reg = load_registry(workspace)
+        assert reg["settings"]["dispatch_mode"] == "parallel"
+
+    def test_sequential_mode(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd", "--mode", "sequential"])
+        reg = load_registry(workspace)
+        assert reg["settings"]["dispatch_mode"] == "sequential"
+
+    def test_auto_mode(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd", "--mode", "auto"])
+        reg = load_registry(workspace)
+        assert reg["settings"]["dispatch_mode"] == "auto"
+
+    def test_context_cap_default(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        reg = load_registry(workspace)
+        assert reg["settings"]["context_cap"] == 120000
+
+    def test_context_cap_custom(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd", "--context-cap", "80000"])
+        reg = load_registry(workspace)
+        assert reg["settings"]["context_cap"] == 80000
+
+    def test_last_checkpoint_sha_initialized(self, workspace):
+        tf(workspace, ["init", "test", "--bd-path", "/usr/bin/bd"])
+        reg = load_registry(workspace)
+        assert reg["last_checkpoint_sha"] == ""
+
+
+# ── Wave Plan Sequential Mode Tests ───────────────────────────
+
+
+class TestWavePlanSequential:
+    def test_sequential_mode_single_bead_per_wave(self, workspace, bd_stub):
+        """In sequential mode, each bead gets its own wave."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub, "--mode", "sequential"])
+        bead = {"id": "b1", "title": "T1", "description": "Fix\n\nFiles: `src/a.rs`"}
+        out = tf(workspace, ["wave-plan", "--beads", "b1,b2"],
+                 env={"BD_STUB_RESPONSE": json.dumps(bead)})
+        assert out["ok"] is True
+        assert out["mode"] == "sequential"
+        assert out["total_waves"] == 2
+        # Each wave has exactly one bead
+        for wave in out["waves"]:
+            assert len(wave["beads"]) == 1
+
+    def test_parallel_mode_groups_independent_beads(self, workspace, bd_stub):
+        """In parallel mode (default), independent beads are in the same wave."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        bead = {"id": "b1", "title": "T1", "description": "Fix\n\nFiles: `src/a.rs`"}
+        out = tf(workspace, ["wave-plan", "--beads", "b1"],
+                 env={"BD_STUB_RESPONSE": json.dumps(bead)})
+        assert out["ok"] is True
+        assert "mode" not in out  # parallel mode doesn't add mode field
+
+
+# ── AC Results Tests ──────────────────────────────────────────
+
+
+class TestACResults:
+    def _make_stateful_stub(self, workspace):
+        stub = workspace / ".beads" / "bd-ac-stub"
+        stub.write_text(textwrap.dedent("""\
+            #!/usr/bin/env python3
+            import json, sys, os
+            args = sys.argv[1:]
+            state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bd-ac-state.json")
+            state = {}
+            if os.path.exists(state_file):
+                with open(state_file) as f:
+                    state = json.load(f)
+            if "close" in args:
+                state["closed"] = True
+                with open(state_file, "w") as f:
+                    json.dump(state, f)
+                print(json.dumps([{"id": "bead-abc", "status": "closed"}]))
+            elif "show" in args:
+                if state.get("closed"):
+                    print(json.dumps([{"id": "bead-abc", "status": "closed", "title": "Test"}]))
+                else:
+                    print(json.dumps([{"id": "bead-abc", "status": "in_progress", "title": "Test"}]))
+            elif "update" in args:
+                print(json.dumps({"ok": True}))
+            else:
+                print("{}")
+        """))
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        return str(stub)
+
+    def _setup(self, workspace):
+        stub = self._make_stateful_stub(workspace)
+        tf(workspace, ["init", "test", "--bd-path", stub])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: init", "-q"], cwd=workspace, check=True)
+        f = workspace / "src" / "foo.py"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("print('hello')")
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: add foo"], cwd=workspace, check=True)
+
+    def test_ac_results_all_pass(self, workspace):
+        """worker-close with all ACs passing should succeed."""
+        self._setup(workspace)
+        ac_json = json.dumps([
+            {"ac": "widget renders", "passed": True, "evidence": "screenshot taken"},
+            {"ac": "widget responds", "passed": True, "evidence": "click test passed"},
+        ])
+        out = tf(workspace, [
+            "worker-close", "bead-abc",
+            "--context-pct", "50",
+            "--files", "src/foo.py",
+            "--summary", "AC: all passed",
+            "--ac-results", ac_json,
+        ], env={"CLAUDE_AGENT_NAME": "rust-1"})
+        assert out["ok"] is True
+
+    def test_ac_results_with_failure_blocks_close(self, workspace):
+        """worker-close with a failed AC should be rejected."""
+        self._setup(workspace)
+        ac_json = json.dumps([
+            {"ac": "widget renders", "passed": True, "evidence": "ok"},
+            {"ac": "widget handles empty state", "passed": False, "evidence": "crashes on empty"},
+        ])
+        out = tf(workspace, [
+            "worker-close", "bead-abc",
+            "--context-pct", "50",
+            "--files", "src/foo.py",
+            "--summary", "AC: partial",
+            "--ac-results", ac_json,
+        ], env={"CLAUDE_AGENT_NAME": "rust-1"})
+        assert out["ok"] is False
+        assert any("AC failed" in e for e in out.get("errors", []))
+
+    def test_ac_results_invalid_json(self, workspace):
+        """worker-close with invalid AC JSON should be rejected."""
+        self._setup(workspace)
+        out = tf(workspace, [
+            "worker-close", "bead-abc",
+            "--context-pct", "50",
+            "--files", "src/foo.py",
+            "--summary", "AC: done",
+            "--ac-results", "not-json",
+        ], env={"CLAUDE_AGENT_NAME": "rust-1"})
+        assert out["ok"] is False
+        assert any("invalid JSON" in e for e in out.get("errors", []))
+
+
+# ── Claim State Tracking Tests ────────────────────────────────
+
+
+class TestClaimState:
+    def test_claim_sets_state(self, workspace, bd_stub):
+        """claim should record state: 'claimed' and claimed_at timestamp."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+        out = tf(workspace, ["claim", "bead-abc"],
+                 env={"CLAUDE_AGENT_NAME": "rust-1"})
+        assert out["ok"] is True
+        reg = load_registry(workspace)
+        w = reg["workers"]["rust-1"]
+        assert w["state"] == "claimed"
+        assert "claimed_at" in w
+
+    def test_claim_context_cap_warning(self, workspace, bd_stub):
+        """claim should warn when context_pct approaches cap."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub, "--context-cap", "100000"])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+        reg = load_registry(workspace)
+        reg["workers"]["rust-1"]["context_pct"] = 85
+        save_registry(workspace, reg)
+        out = tf(workspace, ["claim", "bead-abc"],
+                 env={"CLAUDE_AGENT_NAME": "rust-1"})
+        assert out["ok"] is True
+        assert "warning" in out
+        assert "cap" in out["warning"]
+
+
+# ── Architect Checkpoint Tests ────────────────────────────────
+
+
+class TestArchitectCheckpoint:
+    def test_generates_prompt(self, workspace, bd_stub):
+        """architect-checkpoint should generate a prompt file."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        # Make an initial commit so git diff works
+        f = workspace / "src" / "foo.py"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("print('hello')")
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True)
+
+        bead_resp = json.dumps({"id": "bead-abc", "title": "Build store", "description": "Implement store module"})
+        out = tf(workspace, [
+            "architect-checkpoint",
+            "--bead", "bead-abc",
+            "--write-file",
+        ], env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
+        assert "prompt_file" in out
+        prompt_content = Path(out["prompt_file"]).read_text()
+        assert "Architect Checkpoint" in prompt_content
+        assert "Build store" in prompt_content
+
+    def test_updates_checkpoint_sha(self, workspace, bd_stub):
+        """architect-checkpoint should update last_checkpoint_sha in registry."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        f = workspace / "src" / "foo.py"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("print('hello')")
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True)
+
+        bead_resp = json.dumps({"id": "bead-abc", "title": "T", "description": "D"})
+        tf(workspace, [
+            "architect-checkpoint", "--bead", "bead-abc", "--write-file",
+        ], env={"BD_STUB_RESPONSE": bead_resp})
+        reg = load_registry(workspace)
+        assert reg["last_checkpoint_sha"] != ""
+
+    def test_includes_pending_beads(self, workspace, bd_stub):
+        """architect-checkpoint with --pending should include pending bead info in prompt."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        f = workspace / "src" / "foo.py"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("print('hello')")
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True)
+
+        bead_resp = json.dumps({"id": "bead-abc", "title": "Pending Task", "description": "Do something next", "acceptance_criteria": "it works"})
+        out = tf(workspace, [
+            "architect-checkpoint",
+            "--bead", "bead-abc",
+            "--pending", "bead-xyz",
+            "--write-file",
+        ], env={"BD_STUB_RESPONSE": bead_resp})
+        assert out["ok"] is True
+        assert out["pending_count"] == 1
+
+
+# ── Spec Trace Tests ──────────────────────────────────────────
+
+
+class TestSpecTrace:
+    def test_basic_spec_trace(self, workspace, bd_stub):
+        """spec-trace should find identifiers from spec in codebase."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        # Create a spec with identifiers
+        spec = workspace / "spec.md"
+        spec.write_text("# Spec\n## Commands\n`store info` command\n`--local-only` flag\n")
+        # Create source files with some identifiers
+        src = workspace / "src" / "commands.py"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text('def store_info():\n    pass\n\nLOCAL_ONLY = "--local-only"\n')
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=workspace, check=True)
+
+        out = tf(workspace, ["spec-trace", "--spec", str(spec)])
+        assert out["ok"] is True
+        assert "counts" in out
+        assert "covered" in out or "partial" in out or "missing" in out
+
+    def test_spec_trace_missing_file(self, workspace, bd_stub):
+        """spec-trace with nonexistent spec should return error."""
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["spec-trace", "--spec", "/nonexistent/spec.md"])
+        assert out["ok"] is False
+        assert "not found" in out.get("error", "")

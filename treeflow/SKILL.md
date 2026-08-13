@@ -59,7 +59,13 @@ After running `/sculptor export-beads <idea-dir>`:
 ### Mode Detection
 - Bead management only (create/list/triage) → Quick Paths above. STOP.
 - Sculptor import (input has `plan.md`, `spec.md`, `idea.md`) → Run `/sculptor export-beads`, then Sculptor Import above
+- Raw plan.md without sculptor artifacts → invoke `/sculptor` to generate contract-first plan, spec coverage matrix, and beads graph. Then import and proceed.
 - Worker dispatch needed → Read [SKILL-DISPATCH.md](SKILL-DISPATCH.md) for full orchestration loop
+
+### Dispatch Modes
+- `--mode parallel` (default): Workers dispatch in parallel waves via `tf.py wave-plan`. Up to 6 concurrent workers.
+- `--mode sequential`: One worker (or one verified-safe batch) at a time. After each worker completes, an architect checkpoint verifies coherence and refines pending tasks. Use when quality > speed.
+- `--mode auto`: Sequential within a phase, parallel across truly independent phases (frontend + backend with no shared code).
 
 ### Scope Detection
 If the user's request is purely about creating, listing, updating, or closing beads — and does NOT mention implementing, building, or dispatching work — use the Quick Paths above. Do not initialize `tf.py`, worker context, or the full orchestration loop. Use `bd` commands directly.
@@ -265,6 +271,14 @@ After all beads close and tests pass, verify the feature actually works — test
 - If the plan doesn't have verification steps, at minimum confirm: build succeeds, one happy-path invocation works, tests pass
 
 Do not skip this step. If verification reveals issues, dispatch a fix-up worker before pushing.
+
+### Independent Verification (Recommended)
+The orchestrator does NOT perform final acceptance verification itself — it has optimistic bias from the session. For high-stakes features, recommend the user run an independent verification session:
+- A separate invocation with no knowledge of beads, worker summaries, or orchestrator state
+- Adversarially prompted: "Your job is to find bugs. Assume the implementation is wrong until proven otherwise."
+- Execution-based: must run the actual binary/tests against live APIs, DBs, and services
+
+The orchestrator's continuous verification (architect checkpoints + code review at phase gates) catches most issues. Independent verification catches anything that slipped through.
 
 ## Error Handling
 

@@ -185,17 +185,35 @@ When a `<task-notification>` arrives:
 6. **Discard the full `<result>` content** — it's now captured in registry and context files
 7. **Ignore transient LSP diagnostics** — during active worker runs, `go.sum` missing entries, `could not import` errors, build-tag exclusion warnings, and `undefined: <symbol>` in partially-written files are almost always transient. Do not act on these until the responsible worker completes.
 8. Check for newly ready beads: `python3 .beads/tf.py ready`
-9. **Phase transition** — if all beads for a phase are done, run the combined gate + smoke test + summary:
+9. **Architect checkpoint (sequential mode)** — after each worker completes in sequential mode, spawn an architect agent:
    ```bash
-   python3 .beads/tf.py phase-complete --epic {epic-id} [--build-cmd "{build}"] [--phase-num {N}]
+   python3 .beads/tf.py architect-checkpoint --bead {completed-bead} --pending {pending-bead1},{pending-bead2} --write-file
+   ```
+   The architect:
+   - Has full tool access (reads code, runs smoke tests, checks interfaces)
+   - Verifies coherence between completed work and spec/idea
+   - Refines pending task descriptions via `bd update` (actual signatures, preconditions, anti-patterns)
+   - Creates fix beads via `bd create` if issues need code changes
+   - Returns structured summary: `{status, beads_refined, issues_found, fix_beads_created, notes}`
+   
+   If `fix_beads_created` is non-empty, dispatch fix-up workers before proceeding to the next task.
+
+10. **Phase transition** — if all beads for a phase are done, run the combined gate + smoke test + summary:
+   ```bash
+   python3 .beads/tf.py phase-complete --epic {epic-id} [--build-cmd "{build}"] [--phase-num {N}] [--review]
    ```
    - If `pass: false` → wait for `blocking` items to resolve
    - If `pass: true`:
-     a. **Spec-trace verification (mandatory)** — run targeted grep checks against the spec for the completed phase. For each CLI command: verify every flag name exists in the code. For each data model: verify every JSON field name matches. For each package: verify the import path exists. If any spec reference can't be grepped, create a fix task before proceeding. A `phase-complete` that returns `beads_closed: 0` without running grep verification is a failed spec-trace.
-     b. Phase summary is already written to `phase-{N}.md` by the command
-     c. Check `build` field: if `"fail"` → dispatch integration worker to fix
-     d. If clean → proceed to next phase
-10. Loop back to step 2
+     a. **Code review agent** (if `--review` was passed) — spawn a code review agent using the prompt at `review_prompt_file`. The review agent reads the full git diff for the phase and checks: function call/signature mismatches, unhandled error paths, platform-specific issues, null/empty-state bugs. If findings are returned, dispatch fix-up workers.
+     b. **Spec-trace verification (mandatory)** — run the automated spec-trace:
+        ```bash
+        python3 .beads/tf.py spec-trace --spec {spec-path} --phase {N}
+        ```
+        Review the `missing` list. For each missing spec identifier, create a fix task before proceeding.
+     c. Phase summary is already written to `phase-{N}.md` by the command
+     d. Check `build` field: if `"fail"` → dispatch integration worker to fix
+     e. If clean → proceed to next phase
+11. Loop back to step 2
 
 ### Proactive Compaction Between Waves
 

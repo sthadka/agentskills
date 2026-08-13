@@ -447,7 +447,54 @@ def cmd_lint_plan(args: list[str]) -> int:
                     'a `## Spec Coverage` table or `Spec: spec.md §N` citations'
                 )
 
-    # 7. Remaining annotations
+    # 7. Contract validation — producer tasks that cross task boundaries should have Contract: sections
+    plan_data = None
+    if 'Contract:' in text or 'Consumed by:' in text or 'consumed by' in text.lower():
+        plan_data = parse_plan(text)
+    if plan_data is None:
+        plan_data = parse_plan(text)
+
+    _consumer_re = re.compile(r'consumed\s+by|used\s+by\s+task|called\s+from\s+task', re.IGNORECASE)
+    for phase in plan_data['phases']:
+        for task in phase['tasks']:
+            full_desc = '\n'.join([task['description']] + task.get('body_lines', []) + task.get('extra_lines', []))
+            if _consumer_re.search(full_desc) and 'Contract:' not in full_desc and 'contract:' not in full_desc.lower():
+                slug = make_task_slug(task['description'])[:60]
+                issues.append(f'Task `{slug}` has consumer reference but no Contract: section')
+
+    # 8. Cross-cutting requirement detection
+    if spec_path and spec_path.exists():
+        spec_text_for_cc = spec_path.read_text()
+        _quantifier_re = re.compile(
+            r'\b(all\s+(?:commands?|endpoints?|handlers?|modules?|queries|routes?))\s+'
+            r'(?:must|should|shall|need\s+to|have\s+to)\s+(.{10,80})',
+            re.IGNORECASE,
+        )
+        for m in _quantifier_re.finditer(spec_text_for_cc):
+            requirement = m.group(0).strip()[:80]
+            scope_word = m.group(1).strip().lower()  # e.g. "all commands"
+            action_text = m.group(2).strip().lower()
+            # Extract key terms (identifiers like --verbose, flag names, etc.)
+            key_terms = re.findall(r'--[\w-]+|`[^`]+`|\b\w{4,}\b', action_text)
+            key_terms = [t.strip('`').lower() for t in key_terms[:5]]
+
+            has_dedicated = False
+            for phase in plan_data['phases']:
+                for task in phase['tasks']:
+                    task_text = (task['description'] + ' ' + ' '.join(task.get('body_lines', []))).lower()
+                    # Match if task references the scope ("all commands", "every") AND
+                    # mentions at least one key term from the requirement
+                    scope_match = any(w in task_text for w in ('all ', 'every ', 'cross-cutting', 'each '))
+                    term_match = any(t in task_text for t in key_terms) if key_terms else False
+                    if scope_match and term_match:
+                        has_dedicated = True
+                        break
+                if has_dedicated:
+                    break
+            if not has_dedicated:
+                issues.append(f'Cross-cutting requirement has no dedicated task: "{requirement}"')
+
+    # 9. Remaining annotations
     annotations = parse_annotations(filepath)
     if annotations:
         issues.append(f'{len(annotations)} unaddressed annotation(s) remaining')
@@ -785,7 +832,23 @@ def _extract_file_paths_from_subtasks(task: dict) -> list[str]:
     return paths
 
 
-def generate_graph_plan(plan: dict, epic_description: str, deps_txt: str | None = None) -> dict:
+_EDGE_CASE_ACS = [
+    'Command/query returns valid output when the store/database is empty (no crash, no null where array expected)',
+    'Returns appropriate error when required parameters are missing',
+    'Returns empty collection (not null) when no data matches',
+]
+
+_COMMAND_INDICATORS = re.compile(
+    r'\b(command|CLI|endpoint|handler|route|query|api)\b', re.IGNORECASE
+)
+
+
+def generate_graph_plan(
+    plan: dict,
+    epic_description: str,
+    deps_txt: str | None = None,
+    spec_coverage: list[dict] | None = None,
+) -> dict:
     """Generate a bd create --graph JSON plan with symbolic keys and edges."""
     nodes: list[dict] = []
     edges: list[dict] = []
@@ -800,6 +863,10 @@ def generate_graph_plan(plan: dict, epic_description: str, deps_txt: str | None 
         epic_node['description'] = epic_description
     if plan['risks']:
         epic_node['design'] = f'**Risks:**\n{plan["risks"]}'
+    if spec_coverage:
+        epic_node['notes'] = 'Spec Coverage:\n' + '\n'.join(
+            f'- {row["spec_section"]} → {row["task_ref"]}' for row in spec_coverage
+        )
     nodes.append(epic_node)
 
     slug_to_key: dict[str, str] = {}
@@ -849,6 +916,15 @@ def generate_graph_plan(plan: dict, epic_description: str, deps_txt: str | None 
             for st in task['subtasks']:
                 ac_lines.extend(st['ac'])
 
+            # Edge-case AC injection for command/API/query tasks
+            full_task_text = task['description'] + ' ' + ' '.join(task.get('body_lines', []))
+            is_integration = 'integration test' in task['description'].lower() or '[integration]' in task['description'].lower()
+            if _COMMAND_INDICATORS.search(full_task_text) and not is_integration:
+                existing_ac_text = ' '.join(ac_lines).lower()
+                for edge_ac in _EDGE_CASE_ACS:
+                    if edge_ac.split('(')[0].lower().strip() not in existing_ac_text:
+                        ac_lines.append(edge_ac)
+
             labels = []
             if phase['is_parallel']:
                 labels.append('parallel')
@@ -870,6 +946,59 @@ def generate_graph_plan(plan: dict, epic_description: str, deps_txt: str | None 
             if labels:
                 node['labels'] = labels
             nodes.append(node)
+
+    # Auto-generate integration test beads at phase boundaries
+    phase_task_keys: dict[int, list[str]] = {}
+    for pi, phase in enumerate(plan['phases']):
+        if phase['is_setup']:
+            continue
+        keys_in_phase = []
+        for ti, task in enumerate(phase['tasks']):
+            key = f'{phase_num[pi]}.{ti + 1}'
+            keys_in_phase.append(key)
+        phase_task_keys[pi] = keys_in_phase
+
+    for pi, phase in enumerate(plan['phases']):
+        if phase['is_setup']:
+            continue
+        # Skip if phase already has an integration test task
+        has_integration = any(
+            'integration test' in t['description'].lower() or '[integration]' in t['description'].lower()
+            for t in phase['tasks']
+        )
+        if has_integration:
+            continue
+        keys_in_phase = phase_task_keys.get(pi, [])
+        if len(keys_in_phase) < 2:
+            continue
+
+        pnum = phase_num[pi]
+        integ_key = f'{pnum}.integ'
+        task_titles = [make_task_slug(t['description']) for t in phase['tasks']]
+        integ_desc = (
+            f'Integration test for {phase["name"]}.\n'
+            f'Verify that tasks in this phase compose correctly:\n'
+            + '\n'.join(f'- {t}' for t in task_titles)
+        )
+        integ_ac = (
+            f'- Integration test exercises cross-task interactions from {phase["name"]}\n'
+            f'- Test against live APIs/DBs/services — do not mock'
+        )
+        integ_node = {
+            'key': integ_key,
+            'title': f'Integration test — {phase["name"]}',
+            'type': 'task',
+            'priority': 2,
+            'parent_key': 'epic',
+            'description': integ_desc,
+            'acceptance_criteria': integ_ac,
+            'labels': ['integration'],
+        }
+        nodes.append(integ_node)
+        slug_to_key[f'Integration test — {phase["name"]}'] = integ_key
+        # Integration test depends on all tasks in its phase
+        for dep_key in keys_in_phase:
+            edges.append({'from_key': integ_key, 'to_key': dep_key, 'type': 'blocks'})
 
     # Build edges — use deps_txt when available, otherwise fall back to phase-level inference
     if deps_txt is not None:
@@ -1098,7 +1227,14 @@ def cmd_export_beads(args: list[str]) -> int:
             print(f'Using deps from {deps_candidate.relative_to(idea_dir)}')
             break
 
-    graph = generate_graph_plan(plan, epic_desc, deps_txt=deps_txt)
+    # Parse spec coverage matrix if spec.md exists
+    spec_cov = None
+    spec_path = idea_dir / 'spec.md'
+    if spec_path.exists():
+        plan_text = plan_path.read_text()
+        spec_cov = parse_spec_coverage_table(plan_text) or None
+
+    graph = generate_graph_plan(plan, epic_desc, deps_txt=deps_txt, spec_coverage=spec_cov)
 
     beads_dir = idea_dir / '.beads'
     beads_dir.mkdir(exist_ok=True)

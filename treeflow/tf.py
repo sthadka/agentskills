@@ -279,6 +279,8 @@ def cmd_init(args: argparse.Namespace) -> None:
     bd_path = getattr(args, "bd_path", "") or _resolve_bd()
     worker_model = getattr(args, "worker_model", "") or ""
     build_cmd = getattr(args, "build_cmd", "") or ""
+    dispatch_mode = getattr(args, "dispatch_mode", "") or "parallel"
+    context_cap = getattr(args, "context_cap", 0) or 120000
     data = {
         "plan_name": args.plan_name,
         "bd_path": bd_path,
@@ -288,10 +290,13 @@ def cmd_init(args: argparse.Namespace) -> None:
         "settings": {
             "stall_threshold_mins": 20,
             "idle_timeout_mins": getattr(args, "idle_timeout", 0) or 8,
+            "dispatch_mode": dispatch_mode,
+            "context_cap": context_cap,
         },
         "workers": {},
         "routing": {},
         "phases": {},
+        "last_checkpoint_sha": "",
     }
     _save_registry(data, reg)
 
@@ -431,6 +436,26 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
             for line in r.stdout.strip().split("\n")[:10]:
                 warnings.append(f"dead-code marker: {line.strip()}")
 
+    # Validate AC results if provided — reject close if any AC failed
+    ac_results_data = None
+    ac_results_str = getattr(args, "ac_results", "")
+    if ac_results_str:
+        try:
+            ac_results_data = json.loads(ac_results_str)
+            if not isinstance(ac_results_data, list):
+                errors.append("--ac-results must be a JSON array")
+            else:
+                failed_acs = [r for r in ac_results_data if not r.get("passed", False)]
+                if failed_acs:
+                    for fa in failed_acs:
+                        errors.append(f"AC failed: {fa.get('ac', '?')} — {fa.get('evidence', 'no evidence')}")
+        except json.JSONDecodeError as e:
+            errors.append(f"--ac-results invalid JSON: {e}")
+
+    if errors:
+        _out({"ok": False, "errors": errors})
+        return
+
     # Warn if summary doesn't mention acceptance criteria status
     if args.summary and "AC:" not in args.summary and "acceptance" not in args.summary.lower():
         warnings.append("summary missing AC status — include 'AC: <status>' to confirm all criteria met")
@@ -529,21 +554,35 @@ def cmd_claim(args: argparse.Namespace) -> None:
         _out({"ok": False, "error": f"bd update failed: {r.stderr.strip()[:100]}"})
         return
 
-    # Update registry: bead reference + heartbeat
+    # Update registry: bead reference + state tracking + heartbeat
+    now = _now()
     try:
         reg, reg_path = _load_registry(rp)
         worker_name = os.environ.get("CLAUDE_AGENT_NAME", "")
         if worker_name and worker_name in reg.get("workers", {}):
-            reg["workers"][worker_name]["bead"] = args.bead_id
+            w = reg["workers"][worker_name]
+            w["bead"] = args.bead_id
+            w["state"] = "claimed"
+            w["claimed_at"] = now
             expected_mins = getattr(args, "expected_mins", 0)
             if expected_mins:
                 deadline = datetime.now(timezone.utc) + timedelta(minutes=expected_mins)
-                reg["workers"][worker_name]["expected_completion_at"] = deadline.strftime("%Y-%m-%dT%H:%M:%SZ")
+                w["expected_completion_at"] = deadline.strftime("%Y-%m-%dT%H:%M:%SZ")
+            # Context cap warning
+            ctx_cap = reg.get("settings", {}).get("context_cap", 120000)
+            ctx_pct = w.get("context_pct", 0)
+            cap_warning = ""
+            if ctx_pct >= 80 and ctx_cap:
+                cap_warning = f"context at {ctx_pct}% — approaching cap of {ctx_cap} tokens, consider wrapping up"
             _update_heartbeat(reg, reg_path, f"claimed {args.bead_id}", worker_name)
     except (OSError, json.JSONDecodeError, KeyError) as e:
         sys.stderr.write(f"tf.py warning: registry update in claim: {e}\n")
+        cap_warning = ""
 
-    _out({"ok": True, "bead": args.bead_id, "status": "in_progress"})
+    result: dict = {"ok": True, "bead": args.bead_id, "status": "in_progress"}
+    if cap_warning:
+        result["warning"] = cap_warning
+    _out(result)
 
 
 def cmd_block(args: argparse.Namespace) -> None:
@@ -1413,6 +1452,49 @@ def cmd_wave_plan(args: argparse.Namespace) -> None:
                 return True
         return False
 
+    # In sequential mode, each bead gets its own wave (no parallelism)
+    dispatch_mode = reg.get("settings", {}).get("dispatch_mode", "parallel")
+    if dispatch_mode == "sequential":
+        waves_seq: list[list[str]] = []
+        assigned_seq: dict[str, int] = {}
+        blocked_seq: list[dict] = []
+        for bid in bead_ids:
+            if bid not in bead_files and bid in [b for b in bead_ids]:
+                pass  # still assign even without file info
+            # Check active worker conflicts
+            bid_file_set = set(bead_files.get(bid, []))
+            active_conflict = None
+            for f in bid_file_set:
+                if f in active_files:
+                    active_conflict = active_files[f]
+                    break
+            if active_conflict:
+                blocked_seq.append({"bead": bid, "blocked_by_worker": active_conflict})
+                continue
+            waves_seq.append([bid])
+            assigned_seq[bid] = len(waves_seq) - 1
+
+        already_dispatched_seq = []
+        for bid in bead_ids:
+            for wname, w in reg.get("workers", {}).items():
+                if w.get("status") == STATUS_ACTIVE and w.get("bead") == bid:
+                    already_dispatched_seq.append({"bead": bid, "worker": wname})
+                    break
+
+        result_seq: dict = {
+            "ok": True,
+            "waves": [{"group": i + 1, "beads": w} for i, w in enumerate(waves_seq)],
+            "total_waves": len(waves_seq),
+            "total_beads": len(assigned_seq),
+            "mode": "sequential",
+        }
+        if already_dispatched_seq:
+            result_seq["already_dispatched"] = already_dispatched_seq
+        if blocked_seq:
+            result_seq["blocked_by_active"] = blocked_seq
+        _out(result_seq)
+        return
+
     # Graph coloring: assign each bead to the earliest wave where it has no conflicts
     waves: list[list[str]] = []
     assigned: dict[str, int] = {}  # bid → wave index
@@ -2014,6 +2096,59 @@ def cmd_phase_complete(args: argparse.Namespace) -> None:
 
     (ctx / phase_file).write_text(phase_content)
 
+    # 6. Generate code review prompt if --review is set
+    review_prompt_file = ""
+    if getattr(args, "review", False) and all_files:
+        # Find the earliest dispatch SHA for this phase to get a full diff
+        phase_workers = [
+            w for w in reg.get("workers", {}).values()
+            if w.get("bead", "") in phase_bead_ids or (isinstance(w.get("bead"), list) and set(w["bead"]) & phase_bead_ids)
+        ]
+        earliest_sha = ""
+        for pw in phase_workers:
+            sha = pw.get("dispatch_sha", "")
+            if sha and (not earliest_sha or sha < earliest_sha):
+                earliest_sha = sha
+
+        diff_cmd = f"git diff {earliest_sha} HEAD" if earliest_sha else "git diff HEAD~10 HEAD"
+        r_diff = _run(diff_cmd)
+        diff_text = r_diff.stdout[:8000] if r_diff.returncode == 0 else "(diff unavailable)"
+
+        review_prompt = f"""# Code Review — Phase {phase_num}
+
+You are a code reviewer. Your job is to find bugs in the completed phase.
+
+## Files Modified
+{files_list}
+
+## Git Diff
+```
+{diff_text}
+```
+
+## Review Checklist
+1. Do function calls match function signatures across modules?
+2. Are error paths handled (missing DB, API errors, missing params)?
+3. Do features work end-to-end (trace from entry to output)?
+4. Platform-specific patterns that don't work on target platform?
+5. Null/empty-state issues (queries returning null instead of empty arrays)?
+6. Contract violations (preconditions not checked, postconditions not met)?
+
+## Return Format
+```json
+{{
+  "findings": [
+    {{"file": "path", "line": N, "severity": "high|medium|low", "issue": "description", "fix_suggestion": "how to fix"}}
+  ],
+  "summary": "overall assessment"
+}}
+```
+If no issues found, return {{"findings": [], "summary": "clean"}}
+"""
+        review_file = ctx / f"review-prompt-phase-{phase_num}.md"
+        review_file.write_text(review_prompt)
+        review_prompt_file = str(review_file)
+
     result: dict = {
         "pass": True,
         "build": build_status,
@@ -2022,6 +2157,8 @@ def cmd_phase_complete(args: argparse.Namespace) -> None:
         "files": sorted(set(all_files)),
         "parallelism": parallelism,
     }
+    if review_prompt_file:
+        result["review_prompt_file"] = review_prompt_file
     _out(result)
 
 
@@ -2515,6 +2652,193 @@ def cmd_status(args: argparse.Namespace) -> None:
 # ── CLI ──────────────────────────────────────────────────────
 
 
+def cmd_architect_checkpoint(args: argparse.Namespace) -> None:
+    """Generate architect agent prompt for post-task verification and task refinement."""
+    rp = _registry_path()
+    bd_bin = _bd(rp)
+    reg, reg_path = _load_registry(rp)
+    ctx = _context_dir()
+
+    # Get the completed bead info
+    completed_bead = _fetch_bead(bd_bin, args.bead_id)
+    if not completed_bead:
+        _out({"ok": False, "error": f"bead {args.bead_id} not found"})
+        return
+
+    # Compute git diff since last checkpoint
+    last_sha = reg.get("last_checkpoint_sha", "")
+    diff_cmd = f"git diff {last_sha} HEAD --stat" if last_sha else "git diff HEAD~3 HEAD --stat"
+    r_diff = _run(diff_cmd)
+    diff_summary = r_diff.stdout.strip()[:2000] if r_diff.returncode == 0 else "(diff unavailable)"
+
+    # Gather pending beads
+    pending_beads_data: list[dict] = []
+    if args.pending:
+        for pid in [p.strip() for p in args.pending.split(",") if p.strip()]:
+            pb = _fetch_bead(bd_bin, pid)
+            if pb:
+                pending_beads_data.append({
+                    "id": pid,
+                    "title": pb.get("title", ""),
+                    "description": pb.get("description", "")[:500],
+                    "acceptance_criteria": pb.get("acceptance_criteria", ""),
+                })
+
+    # Find spec/idea paths
+    project_root = _beads_dir().parent
+    spec_path = ""
+    idea_path = ""
+    for candidate in project_root.glob("**/spec.md"):
+        spec_path = str(candidate)
+        break
+    for candidate in project_root.glob("**/idea.md"):
+        idea_path = str(candidate)
+        break
+
+    prompt = f"""# Architect Checkpoint
+
+You are the architect agent. Your job is to verify coherence between completed work and the spec/idea, and to refine pending tasks based on what was actually built.
+
+## Completed Bead
+- **ID:** {args.bead_id}
+- **Title:** {completed_bead.get('title', '')}
+- **Description:** {completed_bead.get('description', '')[:500]}
+
+## Recent Changes (git diff --stat)
+```
+{diff_summary}
+```
+
+## Spec Path
+{spec_path if spec_path else '(not found — search for it)'}
+
+## Idea Path
+{idea_path if idea_path else '(not found)'}
+
+## Your Autonomous Investigation
+You have full tool access. Decide what to inspect:
+1. **Check interfaces and coherence** — read function signatures, module exports. Do pieces fit together?
+2. **Run smoke tests** — execute basic commands/API calls for happy path
+3. **Check contracts** — verify preconditions from bead descriptions are enforced in code
+4. **Read git diff** — scan changes for platform-specific code, hardcoded values, missing error handling
+5. **Verify spec alignment** — does what was built match the spec? If deviation, is it justified?
+6. **Refine pending tasks** — update bead descriptions with actual function signatures, preconditions, anti-patterns
+
+## Pending Beads to Potentially Refine
+"""
+    for pb in pending_beads_data:
+        prompt += f"\n### {pb['id']}: {pb['title']}\n{pb['description']}\n"
+        if pb.get("acceptance_criteria"):
+            prompt += f"AC: {pb['acceptance_criteria']}\n"
+
+    prompt += """
+## How to Apply Updates
+- Use `bd update <bead_id> --notes "..."` to add discovered context to pending beads
+- Use `bd update <bead_id> --description "..."` to refine task descriptions
+- Use `bd create --title="Fix: ..." --description="..." --type=bug --priority=1` for issues needing code fixes
+- Use `bd dep add <new-fix-bead> <next-task-bead>` to block next task on fix
+
+## Return Format
+After completing your review, output this JSON:
+```json
+{
+  "status": "pass" or "issues_found",
+  "beads_refined": ["bead-id", ...],
+  "issues_found": ["description of issue", ...],
+  "fix_beads_created": ["bead-id", ...],
+  "notes": "brief summary of what you found and changed"
+}
+```
+"""
+
+    # Update checkpoint SHA
+    r_head = _run("git rev-parse HEAD")
+    if r_head.returncode == 0:
+        reg["last_checkpoint_sha"] = r_head.stdout.strip()
+        _save_registry(reg, reg_path)
+
+    if getattr(args, "write_file", False):
+        prompt_file = ctx / f"architect-prompt-{args.bead_id}.md"
+        prompt_file.write_text(prompt)
+        _out({"ok": True, "prompt_file": str(prompt_file), "pending_count": len(pending_beads_data)})
+    else:
+        print(prompt)
+        _out({"ok": True, "pending_count": len(pending_beads_data)})
+
+
+def cmd_spec_trace(args: argparse.Namespace) -> None:
+    """Trace spec identifiers in the codebase — verify spec items are implemented."""
+    spec_path = Path(args.spec)
+    if not spec_path.exists():
+        _out({"ok": False, "error": f"spec not found: {args.spec}"})
+        return
+
+    spec_text = spec_path.read_text()
+
+    # Extract greppable identifiers from spec
+    identifiers: list[dict] = []
+
+    # Flag names (--flag-name)
+    for m in re.finditer(r'`(--[\w-]+)`', spec_text):
+        identifiers.append({"type": "flag", "value": m.group(1), "raw": m.group(0)})
+
+    # Command names (multi-word like "store sub add")
+    for m in re.finditer(r'`([\w-]+(?:\s+[\w-]+){1,3})`', spec_text):
+        val = m.group(1)
+        if not val.startswith("--") and not any(c in val for c in "(){}="):
+            identifiers.append({"type": "command", "value": val, "raw": m.group(0)})
+
+    # Field/key names ("field_name": or "field-name":)
+    for m in re.finditer(r'"([\w_-]+)":\s', spec_text):
+        identifiers.append({"type": "field", "value": m.group(1), "raw": m.group(0)})
+
+    # Function signatures (fn_name( or def fn_name)
+    for m in re.finditer(r'\b([\w_]+)\s*\(', spec_text):
+        name = m.group(1)
+        if len(name) > 3 and name[0].islower() and name not in ("the", "for", "and", "not", "this", "that", "with"):
+            identifiers.append({"type": "function", "value": name, "raw": m.group(0)})
+
+    # Deduplicate by value
+    seen: set[str] = set()
+    unique_ids: list[dict] = []
+    for ident in identifiers:
+        if ident["value"] not in seen:
+            seen.add(ident["value"])
+            unique_ids.append(ident)
+
+    # Grep codebase for each identifier
+    covered: list[dict] = []
+    missing: list[dict] = []
+    partial: list[dict] = []
+
+    project_root = _beads_dir().parent
+    for ident in unique_ids:
+        value = ident["value"]
+        escaped = shlex.quote(value)
+        r = _run(f"grep -rl {escaped} {project_root} --include='*.py' --include='*.rs' --include='*.go' --include='*.ts' --include='*.tsx' --include='*.js' 2>/dev/null | head -5")
+        matches = [f for f in r.stdout.strip().split("\n") if f and not f.endswith("spec.md") and ".beads/" not in f]
+        if not matches:
+            # Try without quotes for flag names
+            if value.startswith("--"):
+                r2 = _run(f"grep -rl -- {escaped} {project_root} --include='*.py' --include='*.rs' --include='*.go' --include='*.ts' 2>/dev/null | head -5")
+                matches = [f for f in r2.stdout.strip().split("\n") if f and not f.endswith("spec.md") and ".beads/" not in f]
+
+        if len(matches) >= 2:
+            covered.append({**ident, "files": matches[:3]})
+        elif len(matches) == 1:
+            partial.append({**ident, "files": matches})
+        else:
+            missing.append(ident)
+
+    _out({
+        "ok": True,
+        "covered": [{"type": c["type"], "value": c["value"]} for c in covered],
+        "missing": [{"type": m["type"], "value": m["value"]} for m in missing],
+        "partial": [{"type": p["type"], "value": p["value"]} for p in partial],
+        "counts": {"covered": len(covered), "missing": len(missing), "partial": len(partial)},
+    })
+
+
 def main() -> None:
     p = argparse.ArgumentParser(prog="tf", description="TreeFlow state manager")
     sub = p.add_subparsers(dest="cmd")
@@ -2526,6 +2850,8 @@ def main() -> None:
     s.add_argument("--worker-model", default="", dest="worker_model")
     s.add_argument("--idle-timeout", type=int, default=0, dest="idle_timeout")
     s.add_argument("--build-cmd", default="", dest="build_cmd")
+    s.add_argument("--mode", choices=["sequential", "parallel", "auto"], default="parallel", dest="dispatch_mode")
+    s.add_argument("--context-cap", type=int, default=120000, dest="context_cap")
 
     # dispatch
     s = sub.add_parser("dispatch")
@@ -2543,6 +2869,7 @@ def main() -> None:
     s.add_argument("--files", default="")
     s.add_argument("--summary", default="")
     s.add_argument("--force", action="store_true", default=False)
+    s.add_argument("--ac-results", default="", dest="ac_results")
 
     # claim
     s = sub.add_parser("claim")
@@ -2682,6 +3009,7 @@ def main() -> None:
     s.add_argument("--epic", required=True, dest="epic_id")
     s.add_argument("--build-cmd", default="", dest="build_cmd")
     s.add_argument("--phase-num", default="", dest="phase_num")
+    s.add_argument("--review", action="store_true", default=False)
 
     # worker-prompt
     s = sub.add_parser("worker-prompt")
@@ -2692,6 +3020,17 @@ def main() -> None:
     s.add_argument("--write-file", action="store_true", dest="write_file")
     s.add_argument("--inline-context", action="store_true", dest="inline_context")
     s.add_argument("--parallel-with", default="", dest="parallel_with")
+
+    # architect-checkpoint
+    s = sub.add_parser("architect-checkpoint")
+    s.add_argument("--bead", required=True, dest="bead_id")
+    s.add_argument("--pending", default="")
+    s.add_argument("--write-file", action="store_true", dest="write_file")
+
+    # spec-trace
+    s = sub.add_parser("spec-trace")
+    s.add_argument("--spec", required=True)
+    s.add_argument("--phase", default="", dest="phase_num")
 
     args = p.parse_args()
     if not args.cmd:
@@ -2730,6 +3069,8 @@ def main() -> None:
         "phase-summary": cmd_phase_summary,
         "phase-complete": cmd_phase_complete,
         "worker-prompt": cmd_worker_prompt,
+        "architect-checkpoint": cmd_architect_checkpoint,
+        "spec-trace": cmd_spec_trace,
     }
     cmds[args.cmd](args)
 
