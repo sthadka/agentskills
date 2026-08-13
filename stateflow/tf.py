@@ -3,6 +3,7 @@
 
 All output is compact single-line JSON for token efficiency.
 """
+from __future__ import annotations
 import argparse
 import json
 import os

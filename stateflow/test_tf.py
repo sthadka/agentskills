@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Comprehensive tests for tf.py — StateFlow state manager.
 
 Runs against the real tf.py CLI via subprocess, using isolated temp directories
