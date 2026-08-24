@@ -215,6 +215,44 @@ When a `<task-notification>` arrives:
      e. If clean → proceed to next phase
 11. Loop back to step 2
 
+### `close` vs `notify` — When to Use Which
+
+| Scenario | Command |
+|----------|---------|
+| Worker completed a task | `tf.py notify {worker} --auto --context-pct {N}` |
+| Orchestrator verified/closed directly (no worker) | `tf.py close {bead}` |
+| Worker failed, orchestrator fixes manually | `tf.py close {bead} --reason "fixed manually"` |
+| Trivial setup/verification task (no worker needed) | `tf.py close {bead} --reason "verified directly"` |
+
+**Rule of thumb:** If a worker touched the bead, use `notify` (it records worker metadata, updates registry, and auto-closes). If the orchestrator handled it without dispatching, use `close`.
+
+### Sequential Mode — Quick Loop
+
+When `--mode sequential` is set, the orchestration loop simplifies to:
+
+```
+ready → pick highest priority → write prompt → dispatch → wait → notify → verify build → repeat
+```
+
+**Key differences from parallel mode:**
+- **One worker at a time** — no wave planning, conflict checking, or stall management needed
+- **The orchestrator IS the architect checkpoint** — run `build && test` between every dispatch
+- **Build verification between dispatches:**
+  ```bash
+  python3 .beads/tf.py verify --build-cmd "go build ./..." --test-cmd "go test ./..."
+  ```
+- **No phase summary files needed** — each worker sees the latest codebase directly
+- **Trivial tasks (version checks, infrastructure verification) should be closed directly** — don't spawn workers for `go version` checks
+
+**When to use sequential:**
+- Codebase with cascading dependencies between tasks in the same phase
+- Fork/adaptation projects where every task builds on prior deletions/renames
+- Projects with heavy cross-package imports within a phase
+
+**When to use parallel:**
+- Tasks write to completely independent packages with no cross-imports
+- Large projects where wall-clock time matters more than conflict risk
+
 ### Proactive Compaction Between Waves
 
 After every 2-3 completed waves, write a compaction checkpoint using the existing `phase-summary` command:

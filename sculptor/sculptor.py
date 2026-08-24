@@ -682,6 +682,7 @@ def parse_plan(text: str) -> dict:
                 'ac': [],
                 'subtasks': [],
                 'is_tdd': is_tdd,
+                'is_parallel': '[parallel]' in desc.lower(),
                 'extra_lines': [],
                 'body_lines': [],
             }
@@ -826,9 +827,12 @@ def _extract_file_paths_from_subtasks(task: dict) -> list[str]:
                 qualified = dir_prefix + p
             else:
                 qualified = p
-            if qualified not in seen:
-                seen.add(qualified)
-                paths.append(qualified)
+            if qualified in seen:
+                continue
+            if re.match(r'^[a-z0-9-]+\.[a-z]{2,}/', qualified):
+                continue
+            seen.add(qualified)
+            paths.append(qualified)
     return paths
 
 
@@ -870,6 +874,7 @@ def generate_graph_plan(
     nodes.append(epic_node)
 
     slug_to_key: dict[str, str] = {}
+    task_parallel: dict[str, bool] = {}
     all_tasks: list[tuple[int, int, str, dict]] = []
 
     # Map phase list index → user-facing phase number (non-setup phases count from 1)
@@ -887,6 +892,7 @@ def generate_graph_plan(
             key = f'setup.{ti + 1}' if phase['is_setup'] else f'{phase_num[pi]}.{ti + 1}'
             slug = make_task_slug(task['description'])
             slug_to_key[slug] = key
+            task_parallel[slug] = task.get('is_parallel', False)
             all_tasks.append((pi, ti, slug, phase))
 
             desc_parts = [task['description']]
@@ -992,7 +998,7 @@ def generate_graph_plan(
             'parent_key': 'epic',
             'description': integ_desc,
             'acceptance_criteria': integ_ac,
-            'labels': ['integration'],
+            'labels': ['integration', 'optional'],
         }
         nodes.append(integ_node)
         slug_to_key[f'Integration test — {phase["name"]}'] = integ_key
@@ -1065,10 +1071,24 @@ def generate_graph_plan(
                     _add_cross_edges(prev_phase_last_slugs, _first_slugs_for_phase(phase_tasks, is_par))
 
             if not phase['is_parallel'] and len(phase_tasks) > 1:
-                for i in range(len(phase_tasks) - 1):
-                    s1, s2 = phase_tasks[i][1], phase_tasks[i + 1][1]
-                    if s1 in slug_to_key and s2 in slug_to_key:
-                        edges.append({'from_key': slug_to_key[s2], 'to_key': slug_to_key[s1], 'type': 'blocks'})
+                last_seq_slug = None
+                pending_parallel: list[str] = []
+                for i in range(len(phase_tasks)):
+                    slug = phase_tasks[i][1]
+                    if task_parallel.get(slug, False):
+                        dep = last_seq_slug or (phase_tasks[0][1] if i > 0 else None)
+                        if dep and dep in slug_to_key and slug in slug_to_key:
+                            edges.append({'from_key': slug_to_key[slug], 'to_key': slug_to_key[dep], 'type': 'blocks'})
+                        pending_parallel.append(slug)
+                    else:
+                        if pending_parallel:
+                            for par_slug in pending_parallel:
+                                if par_slug in slug_to_key and slug in slug_to_key:
+                                    edges.append({'from_key': slug_to_key[slug], 'to_key': slug_to_key[par_slug], 'type': 'blocks'})
+                            pending_parallel = []
+                        elif last_seq_slug and last_seq_slug in slug_to_key and slug in slug_to_key:
+                            edges.append({'from_key': slug_to_key[slug], 'to_key': slug_to_key[last_seq_slug], 'type': 'blocks'})
+                        last_seq_slug = slug
 
             prev_phase_idx = pi
             if phase['is_parallel']:

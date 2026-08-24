@@ -767,6 +767,12 @@ def cmd_notify(args: argparse.Namespace) -> None:
         worker["agent_id"] = agent_id
     if args.summary:
         worker["summary"] = args.summary[:200]
+    tokens = getattr(args, "tokens", 0) or 0
+    duration = getattr(args, "duration_ms", 0) or 0
+    if tokens:
+        worker["tokens"] = tokens
+    if duration:
+        worker["duration_ms"] = duration
 
     _save_registry(reg, rp)
     result: dict = {"ok": True, "worker": args.worker, "ctx": args.context_pct}
@@ -2043,15 +2049,28 @@ def cmd_phase_complete(args: argparse.Namespace) -> None:
     phase_num = args.phase_num or "1"
     phase_file = f"phase-{phase_num}.md"
     files_list = "\n".join(f"- `{f}`" for f in sorted(set(all_files))) if all_files else "- (none extracted)"
+    # Collect worker summaries for phase beads
+    worker_summaries = []
+    for wname, w in reg.get("workers", {}).items():
+        w_bead = w.get("bead", "")
+        bead_match = w_bead in phase_bead_ids if isinstance(w_bead, str) else bool(set(w_bead) & phase_bead_ids)
+        if bead_match and w.get("summary"):
+            tokens_str = f" ({w['tokens']}tok)" if w.get("tokens") else ""
+            worker_summaries.append(f"- **{wname}** [{w_bead}]: {w['summary']}{tokens_str}")
+    summaries_block = "\n".join(worker_summaries) if worker_summaries else "- (no worker summaries recorded)"
+
     phase_content = f"""# Phase {phase_num} Summary
 
 **Status:** Complete | **Build:** {build_status.title()}
 
-## Files Created/Modified
-{files_list}
-
 ## Beads Closed
 {len([b for b in beads if b.get('status') == 'closed'])} beads
+
+## Worker Summaries
+{summaries_block}
+
+## Files Created/Modified
+{files_list}
 """
     if build_output:
         phase_content += f"\n## Build Output\n```\n{build_output}\n```\n"
@@ -2224,7 +2243,7 @@ def cmd_worker_prompt(args: argparse.Namespace) -> None:
             phase_label = phase_file.stem.replace("-", " ").title()
             project_context += f"\n\n## {phase_label} — Key Interfaces\n\n{iface_section}"
 
-    # Determine epic context
+    # Determine epic context — prefer file, fall back to parent bead description
     epic_context = "N/A"
     feature_context = "N/A"
     if bead_data:
@@ -2235,6 +2254,19 @@ def cmd_worker_prompt(args: argparse.Namespace) -> None:
             epic_file = ctx / f"epic-{slug}.md"
             if epic_file.exists():
                 epic_context = epic_file.read_text()
+            elif parent:
+                parent_desc = parent.get("description", "")
+                parent_title = parent.get("title", parent.get("name", parent_id))
+                parts = []
+                if parent_title:
+                    parts.append(f"**{parent_title}**")
+                if parent_desc:
+                    parts.append(parent_desc[:1000])
+                parent_notes = parent.get("notes", "")
+                if parent_notes:
+                    parts.append(parent_notes[:500])
+                if parts:
+                    epic_context = "\n\n".join(parts)
             feat_file = ctx / f"feature-{slug}.md"
             if feat_file.exists():
                 feature_context = feat_file.read_text()
@@ -2363,8 +2395,15 @@ Complete each in order — claim, implement, commit, close — before starting t
             if spec_content:
                 prompt += f"\n### Spec Reference\n\n{spec_content}\n"
 
-    # Append build verification step if build_cmd is configured
+    # Append build verification step — from registry or worker-context.md
     build_cmd = reg.get("build_cmd", "")
+    if not build_cmd and wc_path.exists():
+        wc_text = wc_path.read_text()
+        for heading in ("Build", "Build Commands", "Test", "Test Commands", "Verification"):
+            section = _read_heading_section(wc_text, heading)
+            if section:
+                build_cmd = section.strip().split("\n")[0].strip("`").strip()
+                break
     if build_cmd:
         prompt += f"\n\n## Build Verification\nAfter implementing, run `{build_cmd}` to verify. If it fails, fix compilation errors before closing."
 
@@ -2397,6 +2436,20 @@ Complete each in order — claim, implement, commit, close — before starting t
             prompt += "The following files are owned by parallel workers. Do NOT modify them.\n"
             prompt += "If you need any of these files, call `tf.py block` instead.\n\n"
             prompt += "\n".join(parallel_files)
+
+    # Append "When done" section with pre-filled commands
+    if not (args.reuse and args.prior_bead):
+        all_bead_ids = [bd_item["id"] for bd_item in bead_data]
+        if len(all_bead_ids) == 1:
+            bid = all_bead_ids[0]
+            prompt += f"""\n\n## When Done
+
+1. Commit your changes: `git add <files> && git commit -m "feat: <description>"`
+2. Close the bead:
+```bash
+python3 .beads/tf.py worker-close {bid} --context-pct <estimate 0-100> --files "<file1>,<file2>" --summary "<1-line summary of what you did>"
+```
+3. Fix any errors `worker-close` reports. Done when it returns `ok: true`."""
 
     if getattr(args, "prompt_only", False):
         print(prompt)
@@ -2634,12 +2687,20 @@ def cmd_status(args: argparse.Namespace) -> None:
     except (json.JSONDecodeError, TypeError) as e:
         sys.stderr.write(f"tf.py warning: parsing bd list JSON in status: {e}\n")
 
+    # Aggregate token usage across all workers
+    total_tokens = sum(w.get("tokens", 0) for w in workers.values())
+    total_duration = sum(w.get("duration_ms", 0) for w in workers.values())
+
     # Remove zero counts for non-essential statuses
     w_counts = {k: v for k, v in counts.items() if v > 0 or k in (STATUS_ACTIVE, STATUS_IDLE)}
     result: dict = {
         "w": w_counts,
         "beads": {"open": open_beads, "blocked": blocked, "closed": closed},
     }
+    if total_tokens:
+        result["total_tokens"] = total_tokens
+    if total_duration:
+        result["total_duration_ms"] = total_duration
     if active_workers:
         result["active"] = active_workers
     if stalled_workers:
@@ -2647,6 +2708,50 @@ def cmd_status(args: argparse.Namespace) -> None:
     if pending_from:
         result["pending_notif"] = pending_from
     _out(result)
+
+
+def cmd_git_cleanup(args: argparse.Namespace) -> None:
+    """List or commit uncommitted files attributed to a worker."""
+    reg, rp = _load_registry()
+    worker = reg["workers"].get(args.worker)
+    if not worker:
+        _out({"ok": False, "error": f"worker '{args.worker}' not in registry"})
+        return
+    dispatch_sha = worker.get("dispatch_sha", "")
+    changed: list[str] = []
+    if dispatch_sha:
+        r = _run(f"git diff --name-only {shlex.quote(dispatch_sha)} HEAD 2>/dev/null")
+        if r.returncode == 0 and r.stdout.strip():
+            changed = [f.strip() for f in r.stdout.strip().split("\n") if f.strip()]
+    r2 = _run("git status --porcelain 2>/dev/null")
+    uncommitted = [line[3:].strip() for line in r2.stdout.strip().split("\n") if line.strip()] if r2.returncode == 0 and r2.stdout.strip() else []
+    result: dict = {"ok": True, "worker": args.worker, "dispatch_sha": dispatch_sha, "changed_since_dispatch": changed, "uncommitted": uncommitted}
+    if getattr(args, "commit", False) and uncommitted:
+        file_args = " ".join(shlex.quote(f) for f in uncommitted)
+        _run(f"git add {file_args}")
+        _run(f'git commit -m "cleanup: uncommitted files from worker {args.worker}"')
+        result["committed"] = True
+    _out(result)
+
+
+def cmd_verify(args: argparse.Namespace) -> None:
+    """Run build/test commands and log results in registry."""
+    results: dict = {"ok": True}
+    if args.build_cmd:
+        r = _run(args.build_cmd)
+        results["build"] = "pass" if r.returncode == 0 else "fail"
+        if r.returncode != 0:
+            results["build_output"] = "\n".join(r.stdout.strip().split("\n")[-20:])
+    if args.test_cmd:
+        r = _run(args.test_cmd)
+        results["test"] = "pass" if r.returncode == 0 else "fail"
+        if r.returncode != 0:
+            results["test_output"] = "\n".join(r.stdout.strip().split("\n")[-20:])
+    reg, rp = _load_registry()
+    verifications = reg.setdefault("verifications", [])
+    verifications.append({"timestamp": _now(), "build": results.get("build", "skip"), "test": results.get("test", "skip")})
+    _save_registry(reg, rp)
+    _out(results)
 
 
 # ── CLI ──────────────────────────────────────────────────────
@@ -2912,6 +3017,8 @@ def main() -> None:
     s.add_argument("--agent-id", default="", dest="agent_id")
     s.add_argument("--files", default="")
     s.add_argument("--gotcha", default="")
+    s.add_argument("--tokens", type=int, default=0)
+    s.add_argument("--duration-ms", type=int, default=0, dest="duration_ms")
 
     # batch-notify
     s = sub.add_parser("batch-notify")
@@ -3032,6 +3139,16 @@ def main() -> None:
     s.add_argument("--spec", required=True)
     s.add_argument("--phase", default="", dest="phase_num")
 
+    # git-cleanup
+    s = sub.add_parser("git-cleanup")
+    s.add_argument("worker")
+    s.add_argument("--commit", action="store_true", default=False)
+
+    # verify
+    s = sub.add_parser("verify")
+    s.add_argument("--build-cmd", default="", dest="build_cmd")
+    s.add_argument("--test-cmd", default="", dest="test_cmd")
+
     args = p.parse_args()
     if not args.cmd:
         p.print_help()
@@ -3071,6 +3188,8 @@ def main() -> None:
         "worker-prompt": cmd_worker_prompt,
         "architect-checkpoint": cmd_architect_checkpoint,
         "spec-trace": cmd_spec_trace,
+        "git-cleanup": cmd_git_cleanup,
+        "verify": cmd_verify,
     }
     cmds[args.cmd](args)
 

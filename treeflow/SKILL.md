@@ -156,9 +156,9 @@ State management commands — all output compact JSON:
 
 ```bash
 # Orchestrator commands
-python3 .beads/tf.py init {plan-name} --bd-path "$(which bd 2>/dev/null || echo bd)" [--worker-model MODEL] [--idle-timeout N]  # Create context dir + registry + gitignore (idle-timeout: minutes before auto-retire, default 8)
+python3 .beads/tf.py init {plan-name} [--bd-path PATH] [--worker-model MODEL] [--idle-timeout N]  # Create context dir + registry + gitignore (--bd-path auto-detected via shutil.which; idle-timeout: minutes before auto-retire, default 8)
 python3 .beads/tf.py dispatch {worker} {bead-id}[,bead-id2] --skill {domain} [--output-file path] [--agent-id ID]  # Record dispatch (agent-id stores the Agent tool's runtime ID for compaction resilience)
-python3 .beads/tf.py notify {worker} [bead] --context-pct N [--auto] [--summary "..."] [--skill domain] [--agent-id ID] [--files "f1,f2"] [--gotcha "..."]  # Record completion (--auto infers bead/files/skill from registry + git)
+python3 .beads/tf.py notify {worker} [bead] --context-pct N [--auto] [--summary "..."] [--skill domain] [--agent-id ID] [--files "f1,f2"] [--gotcha "..."] [--tokens N] [--duration-ms N]  # Record completion (--auto infers bead/files/skill from registry + git; --tokens/--duration-ms track cost)
 python3 .beads/tf.py batch-notify --pairs "w1:bead1,w2:bead2" --context-pct N [--summary "..."] [--files "f1,f2"] [--gotcha "..."]  # Batch completion for multiple worker:bead pairs
 python3 .beads/tf.py phase-gate {epic-id}                # Check phase complete
 python3 .beads/tf.py smoke-test --build-cmd "cmd" --beads a,b  # Build + wiring check
@@ -180,7 +180,9 @@ python3 .beads/tf.py import-graph {file}                                # Import
 python3 .beads/tf.py worker-prompt --beads {id}[,id2,id3] [--reuse --prior-bead {prev}] [--parallel-with bead1,bead2] [--prompt-only] [--write-file] [--inline-context]  # Assemble worker prompt
 # --prompt-only: print raw prompt to stdout (no JSON). --write-file: write prompt to temp file, return {"prompt_file": path} instead of inline prompt
 python3 .beads/tf.py update-context --bead {id} --worker {name} --summary "..." --files "..." [--gotcha "..."]  # Append to context
-python3 .beads/tf.py phase-complete --epic {id} [--build-cmd "cmd"] [--phase-num N]  # Gate + smoke test + summary
+python3 .beads/tf.py phase-complete --epic {id} [--build-cmd "cmd"] [--phase-num N]  # Gate + smoke test + summary (includes worker summaries)
+python3 .beads/tf.py verify --build-cmd "cmd" [--test-cmd "cmd"]                   # Run build/test and log result in registry
+python3 .beads/tf.py git-cleanup {worker} [--commit]                               # List/commit uncommitted files from a worker's dispatch
 python3 .beads/tf.py bd-path                                           # Print resolved bd binary path
 
 # Worker commands (workers call these — no direct bd usage)
@@ -198,6 +200,12 @@ For sculptor-generated plans, use `beads-graph.jsonl` (produced by `/sculptor ex
 python3 .beads/tf.py import-graph .beads/beads-graph.jsonl
 ```
 This calls `bd create --graph` which handles issues, parent-child hierarchy, and blocking deps atomically.
+
+**Post-import validation** — sculptor-generated graphs may linearize tasks that the plan marks as parallel. After import, verify the dependency structure:
+```bash
+bd show <sample-bead-id> --json | jq -c '.[0].dependencies'
+```
+Check that parallel tasks within a phase don't have unnecessary serial dependencies on each other. If edges are wrong, use `bd dep remove` / `bd dep add` to correct before dispatching.
 
 For manual batch creation, use `bd create -f plan.md --json` directly.
 
@@ -306,7 +314,7 @@ The orchestrator's continuous verification (architect checkpoints + code review 
 - Running `git stash -u` or `git stash --include-untracked` — stashes `.beads/context-*/` files, breaking all state tracking
 - Accumulating full `<task-notification>` results in context (extract summary, discard rest)
 - Editing `registry.json` manually (always use `tf.py`)
-- Spawning workers for trivial tasks (batch them)
+- Spawning workers for trivial tasks (batch them, or close directly with `tf.py close` for pure verification tasks like version checks or infrastructure confirmation)
 
 **Worker management:**
 - Spawning workers without `name` parameter (can't reuse unnamed workers)
