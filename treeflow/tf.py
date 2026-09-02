@@ -171,6 +171,7 @@ def _write_context_update(bd: str, ctx: Path, bead: Optional[dict], bead_id: str
     if gotcha:
         wc = ctx / "worker-context.md"
         _append_to_section(wc, "## Known Gotchas", f"- {gotcha}")
+        _cap_section(wc, "## Known Gotchas")
 
 
 def _update_heartbeat(reg: dict, rp: Path, note: str, worker_name: Optional[str] = None) -> None:
@@ -385,9 +386,12 @@ def cmd_worker_close(args: argparse.Namespace) -> None:
     files = [f.strip() for f in args.files.split(",")] if args.files else []
 
     if dispatch_sha:
-        r_wt = _run(f"git diff {dispatch_sha} --name-only")
-        r_ci = _run(f"git diff {dispatch_sha} HEAD --name-only")
-        r_ut = _run("git ls-files --others --exclude-standard")
+        # Scope the diff to the worker's own declared files so a concurrent worker's
+        # uncommitted changes don't block this worker's close (FEEDBACK-2026-09-02 Issue 4).
+        pathspec = (" -- " + " ".join(shlex.quote(f) for f in files)) if files else ""
+        r_wt = _run(f"git diff {dispatch_sha} --name-only{pathspec}")
+        r_ci = _run(f"git diff {dispatch_sha} HEAD --name-only{pathspec}")
+        r_ut = _run(f"git ls-files --others --exclude-standard{pathspec}")
 
         wt_changed = {f for f in r_wt.stdout.strip().split("\n") if f and not f.startswith(".beads/")}
         committed = {f for f in r_ci.stdout.strip().split("\n") if f}
@@ -556,10 +560,13 @@ def cmd_claim(args: argparse.Namespace) -> None:
 
     # Update registry: bead reference + state tracking + heartbeat
     now = _now()
+    # Hoisted so it stays bound even when CLAUDE_AGENT_NAME is unset (FEEDBACK-2026-09-02 Issue 3).
+    cap_warning = ""
     try:
         reg, reg_path = _load_registry(rp)
-        worker_name = os.environ.get("CLAUDE_AGENT_NAME", "")
-        if worker_name and worker_name in reg.get("workers", {}):
+        # Default an unset agent name to "orchestrator" so the command never crashes on env leakage.
+        worker_name = os.environ.get("CLAUDE_AGENT_NAME") or "orchestrator"
+        if worker_name in reg.get("workers", {}):
             w = reg["workers"][worker_name]
             w["bead"] = args.bead_id
             w["state"] = "claimed"
@@ -571,13 +578,11 @@ def cmd_claim(args: argparse.Namespace) -> None:
             # Context cap warning
             ctx_cap = reg.get("settings", {}).get("context_cap", 120000)
             ctx_pct = w.get("context_pct", 0)
-            cap_warning = ""
             if ctx_pct >= 80 and ctx_cap:
                 cap_warning = f"context at {ctx_pct}% — approaching cap of {ctx_cap} tokens, consider wrapping up"
             _update_heartbeat(reg, reg_path, f"claimed {args.bead_id}", worker_name)
     except (OSError, json.JSONDecodeError, KeyError) as e:
         sys.stderr.write(f"tf.py warning: registry update in claim: {e}\n")
-        cap_warning = ""
 
     result: dict = {"ok": True, "bead": args.bead_id, "status": "in_progress"}
     if cap_warning:
@@ -1566,9 +1571,24 @@ def cmd_wave_plan(args: argparse.Namespace) -> None:
 
 
 def cmd_dep(args: argparse.Namespace) -> None:
-    """Add a dependency idempotently — UNIQUE constraint errors are treated as success."""
+    """Add (or with --remove, delete) a dependency, always emitting JSON.
+
+    ``bd dep remove`` prints no JSON, which breaks ``jq`` in orchestrator pipelines
+    (FEEDBACK-2026-09-02 Issue 2); this wrapper normalizes both directions."""
     rp = _registry_path()
     bd = _bd(rp)
+    if getattr(args, "remove", False):
+        r = _run(f"{bd} dep remove {args.blocker} --blocks {args.blocked}")
+        if r.returncode == 0:
+            _out({"ok": True, "blocker": args.blocker, "blocked": args.blocked, "removed": True})
+            return
+        combined = (r.stderr + r.stdout).lower()
+        if "not found" in combined or "no such" in combined or "does not exist" in combined:
+            # Idempotent: removing an edge that isn't there is success.
+            _out({"ok": True, "blocker": args.blocker, "blocked": args.blocked, "removed": False})
+            return
+        _out({"ok": False, "error": f"bd dep remove failed: {r.stderr.strip()[:200]}"})
+        return
     r = _run(f"{bd} dep {args.blocker} --blocks {args.blocked}")
     if r.returncode == 0:
         _out({"ok": True, "blocker": args.blocker, "blocked": args.blocked, "already_existed": False})
@@ -1578,6 +1598,90 @@ def cmd_dep(args: argparse.Namespace) -> None:
         _out({"ok": True, "blocker": args.blocker, "blocked": args.blocked, "already_existed": True})
         return
     _out({"ok": False, "error": f"bd dep failed: {r.stderr.strip()[:200]}"})
+
+
+def cmd_validate_graph(args: argparse.Namespace) -> None:
+    """Detect suspected sculptor over-linearization: long serial chains in the bead
+    graph that likely should run in parallel (FEEDBACK-2026-09-02 Issue 2, recurring).
+
+    Heuristic and read-only — it flags chains of >=3 beads where each link has exactly
+    one blocker and one dependent (the linearization signature) for the orchestrator to
+    review. With --plan, cross-checks whether the plan declares [parallel] the graph
+    doesn't reflect."""
+    reg, rp = _load_registry()
+    bd = _bd(rp)
+    r = _run(f"{bd} list --limit {BD_LIST_LIMIT} --json 2>/dev/null")
+    try:
+        beads = json.loads(r.stdout)
+        if isinstance(beads, dict):
+            beads = beads.get("issues", [])
+    except (json.JSONDecodeError, TypeError) as e:
+        _out({"ok": False, "error": f"could not parse bd list JSON: {e}"})
+        return
+
+    by_id = {b.get("id"): b for b in beads if b.get("id")}
+    blockers: dict = {}    # bead -> set of beads it depends on
+    dependents: dict = {}  # bead -> set of beads that depend on it
+    for b in beads:
+        bid = b.get("id")
+        for dep in b.get("dependencies", []) or []:
+            if isinstance(dep, dict) and dep.get("dependency_type") == "blocks":
+                dep_on = dep.get("depends_on")
+                if dep_on:
+                    blockers.setdefault(bid, set()).add(dep_on)
+                    dependents.setdefault(dep_on, set()).add(bid)
+
+    # Walk maximal serial chains starting at each chain head.
+    chains: list = []
+    visited: set = set()
+    for b in beads:
+        bid = b.get("id")
+        if bid in visited:
+            continue
+        blk = blockers.get(bid, set())
+        is_head = len(blk) != 1 or any(len(dependents.get(x, set())) > 1 for x in blk)
+        if not is_head:
+            continue
+        chain = [bid]
+        visited.add(bid)
+        cur = bid
+        while True:
+            deps = dependents.get(cur, set())
+            if len(deps) != 1:
+                break
+            nxt = next(iter(deps))
+            if nxt in visited or len(blockers.get(nxt, set())) != 1:
+                break
+            chain.append(nxt)
+            visited.add(nxt)
+            cur = nxt
+        if len(chain) >= 3:
+            chains.append(chain)
+
+    suspects = [
+        {"length": len(c), "beads": c, "titles": [by_id.get(x, {}).get("title", x) for x in c]}
+        for c in sorted(chains, key=len, reverse=True)
+    ]
+    result: dict = {"ok": True, "suspected_serial_chains": suspects, "chain_count": len(suspects)}
+
+    plan_path = getattr(args, "plan", "") or ""
+    if plan_path:
+        p = Path(plan_path)
+        if p.exists():
+            plan_text = p.read_text()
+            parallel_markers = plan_text.lower().count("[parallel]")
+            result["plan_parallel_markers"] = parallel_markers
+            if parallel_markers and suspects:
+                result["mismatch"] = (
+                    f"plan declares {parallel_markers} [parallel] marker(s) but the graph has "
+                    f"{len(suspects)} serial chain(s) — the import likely linearized parallel work"
+                )
+        else:
+            result["plan_warning"] = f"plan file not found: {plan_path}"
+
+    if suspects:
+        result["hint"] = "review each chain; break false edges with `tf.py dep <blocker> <blocked> --remove`"
+    _out(result)
 
 
 def cmd_close(args: argparse.Namespace) -> None:
@@ -1887,6 +1991,117 @@ def _append_to_section(filepath: Path, section_heading: str, content: str) -> No
     filepath.write_text(text)
 
 
+# ── Context sizing (FEEDBACK-2026-09-02 Issue 1) ──────────────
+# Context files accumulate one summary/gotcha block per completion and are
+# read wholesale into later worker prompts. Left unbounded they balloon (byte
+# size, not line count), so every late worker ingests the entire run history.
+# These helpers cap what a prompt ingests and let the orchestrator archive.
+
+CONTEXT_ARCHIVE_BYTES = 48000  # archive-context trigger; matches SKILL.md guidance
+EPIC_CONTEXT_MAX_BYTES = 12000  # cap on epic history inlined into a worker prompt
+GOTCHA_SECTION_MAX = 30  # max bullets kept in worker-context.md "## Known Gotchas"
+
+
+def _truncate_epic_context(text: str, max_bytes: int = EPIC_CONTEXT_MAX_BYTES, max_blocks: int = 8) -> str:
+    """Keep the epic preamble + the most-recent completed-task blocks so late workers
+    don't ingest the entire accumulated epic history. Blocks are appended newest-first
+    (see ``_append_to_section``), so the first N blocks are the most recent."""
+    if len(text) <= max_bytes:
+        return text
+    marker = "## Completed Tasks"
+    if marker in text:
+        head, _, rest = text.partition(marker)
+        blocks = rest.split("\n### ")
+        preamble = blocks[0]
+        entries = ["### " + b for b in blocks[1:]]
+        kept = entries[:max_blocks]
+        elided = len(entries) - len(kept)
+        body = head + marker + preamble + "\n".join(kept)
+        if elided > 0:
+            body += f"\n\n_({elided} earlier task summaries elided — run `tf.py archive-context` to condense)_\n"
+        if len(body) > max_bytes:
+            body = body[:max_bytes] + "\n\n_(truncated)_\n"
+        return body
+    return text[:max_bytes] + "\n\n_(truncated)_\n"
+
+
+def _condense_context(text: str, name: str, version: int,
+                      max_lines: int = 70, max_bytes: int = EPIC_CONTEXT_MAX_BYTES) -> str:
+    """Deterministic digest: keep the most-recent content (newest is prepended) up to both a
+    line and a byte budget, plus a pointer to the archived full copy. The byte cap matters
+    for files that are few-but-huge lines — the exact shape that balloons context."""
+    lines = text.split("\n")
+    truncated = len(lines) > max_lines
+    kept = "\n".join(lines[:max_lines]) if truncated else text
+    kept = kept.rstrip()
+    if len(kept) > max_bytes:
+        kept = kept[:max_bytes].rstrip()
+        truncated = True
+    if not truncated:
+        return text
+    return f"{kept}\n\n_(condensed: older content archived to archive/{Path(name).stem}-v{version}.md)_\n"
+
+
+def _cap_section(filepath: Path, section_heading: str, max_bullets: int = GOTCHA_SECTION_MAX) -> None:
+    """Trim a bulleted markdown section to its most-recent ``max_bullets`` entries
+    (newest are prepended). Keeps ``worker-context.md`` gotchas from growing unbounded."""
+    if not filepath.exists():
+        return
+    text = filepath.read_text()
+    if section_heading not in text:
+        return
+    start = text.index(section_heading)
+    after = text.find("\n## ", start + len(section_heading))
+    end = after if after != -1 else len(text)
+    section = text[start:end]
+    seclines = section.split("\n")
+    heading_line = seclines[0]
+    bullets = [ln for ln in seclines[1:] if ln.strip().startswith("- ")]
+    if len(bullets) <= max_bullets:
+        return
+    dropped = len(bullets) - max_bullets
+    new_section = heading_line + "\n\n" + "\n".join(bullets[:max_bullets]) + f"\n\n_({dropped} older entries trimmed)_\n"
+    filepath.write_text(text[:start] + new_section + text[end:])
+
+
+def cmd_archive_context(args: argparse.Namespace) -> None:
+    """Archive oversized context files (by BYTE size) and replace them with a digest.
+
+    Triggers on byte size, not line count — completion summaries and gotchas are few
+    but very long, so a line-count trigger never fires (FEEDBACK-2026-09-02 Issue 1)."""
+    ctx = _context_dir()
+    threshold = getattr(args, "max_bytes", 0) or CONTEXT_ARCHIVE_BYTES
+    force = getattr(args, "force", False)
+    single = getattr(args, "file", "") or ""
+    if single:
+        candidates = [ctx / single]
+    else:
+        candidates = sorted(ctx.glob("epic-*.md")) + [ctx / "task-summaries.md", ctx / "worker-context.md"]
+    archive_dir = ctx / "archive"
+    archived = []
+    for f in candidates:
+        if not f.exists():
+            continue
+        size = f.stat().st_size
+        if size <= threshold and not force:
+            continue
+        text = f.read_text()
+        archive_dir.mkdir(exist_ok=True)
+        n = 1
+        while (archive_dir / f"{f.stem}-v{n}.md").exists():
+            n += 1
+        (archive_dir / f"{f.stem}-v{n}.md").write_text(text)
+        digest = _condense_context(text, f.name, n)
+        f.write_text(digest)
+        archived.append({
+            "file": f.name,
+            "was_bytes": size,
+            "now_bytes": len(digest),
+            "archive": f"archive/{f.stem}-v{n}.md",
+        })
+    _out({"ok": True, "threshold_bytes": threshold, "archived": archived})
+
+
 def cmd_update_context(args: argparse.Namespace) -> None:
     """Append completion summary to epic context files and optional gotcha to worker-context."""
     rp = _registry_path()
@@ -1928,6 +2143,7 @@ def cmd_update_context(args: argparse.Namespace) -> None:
     if args.gotcha:
         wc = ctx / "worker-context.md"
         _append_to_section(wc, "## Known Gotchas", f"- {args.gotcha}")
+        _cap_section(wc, "## Known Gotchas")
         gotcha_added = True
         updated.append("worker-context.md")
 
@@ -2253,7 +2469,9 @@ def cmd_worker_prompt(args: argparse.Namespace) -> None:
             slug = _slugify(parent.get("title", parent.get("name", parent_id))) if parent else _slugify(parent_id)
             epic_file = ctx / f"epic-{slug}.md"
             if epic_file.exists():
-                epic_context = epic_file.read_text()
+                # Truncate to recent history so late workers don't ingest the whole
+                # accumulated epic (FEEDBACK-2026-09-02 Issue 1).
+                epic_context = _truncate_epic_context(epic_file.read_text())
             elif parent:
                 parent_desc = parent.get("description", "")
                 parent_title = parent.get("title", parent.get("name", parent_id))
@@ -2669,23 +2887,38 @@ def cmd_status(args: argparse.Namespace) -> None:
             if _is_stalled(w, threshold):
                 stalled_workers.append(_stalled_info(wname, w))
 
-    # Get bead counts
-    r = _run(f"{bd} list --limit {BD_LIST_LIMIT} --json 2>/dev/null")
+    # Get bead counts. Prefer `bd stats --json` (authoritative) — `bd list` EXCLUDES
+    # closed issues by default, so counting it silently reports closed=0
+    # (FEEDBACK-2026-09-02 Issue 8, recurring). Fall back to counting `bd list --all`.
     open_beads = blocked = closed = 0
-    try:
-        beads = json.loads(r.stdout)
-        if isinstance(beads, dict):
-            beads = beads.get("issues", [])
-        for b in beads:
-            st = b.get("status", "")
-            if st == "closed":
-                closed += 1
-            elif st == "blocked":
-                blocked += 1
-            else:
-                open_beads += 1
-    except (json.JSONDecodeError, TypeError) as e:
-        sys.stderr.write(f"tf.py warning: parsing bd list JSON in status: {e}\n")
+    counted = False
+    r_stats = _run(f"{bd} stats --json 2>/dev/null")
+    if r_stats.returncode == 0 and r_stats.stdout.strip():
+        try:
+            summary = json.loads(r_stats.stdout).get("summary", {})
+            if summary:
+                open_beads = summary.get("open_issues", 0) + summary.get("in_progress_issues", 0)
+                blocked = summary.get("blocked_issues", 0)
+                closed = summary.get("closed_issues", 0)
+                counted = True
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            counted = False
+    if not counted:
+        r = _run(f"{bd} list --all --limit {BD_LIST_LIMIT} --json 2>/dev/null")
+        try:
+            beads = json.loads(r.stdout)
+            if isinstance(beads, dict):
+                beads = beads.get("issues", [])
+            for b in beads:
+                st = b.get("status", "")
+                if st == "closed":
+                    closed += 1
+                elif st == "blocked":
+                    blocked += 1
+                else:
+                    open_beads += 1
+        except (json.JSONDecodeError, TypeError) as e:
+            sys.stderr.write(f"tf.py warning: parsing bd list JSON in status: {e}\n")
 
     # Aggregate token usage across all workers
     total_tokens = sum(w.get("tokens", 0) for w in workers.values())
@@ -2735,7 +2968,13 @@ def cmd_git_cleanup(args: argparse.Namespace) -> None:
 
 
 def cmd_verify(args: argparse.Namespace) -> None:
-    """Run build/test commands and log results in registry."""
+    """Run build/test commands and log results in registry.
+
+    Build-only by default. ``--test-cmd`` is SKIPPED unless ``--live`` is passed,
+    because cloud env vars (GOOGLE_CLOUD_PROJECT, etc.) can silently turn a test run
+    into a slow, costly live suite (FEEDBACK-2026-09-02 Issue 5). Never chain this
+    command's ``--test-cmd`` behind a fast state op (notify/ready) in one Bash call.
+    """
     results: dict = {"ok": True}
     if args.build_cmd:
         r = _run(args.build_cmd)
@@ -2743,10 +2982,21 @@ def cmd_verify(args: argparse.Namespace) -> None:
         if r.returncode != 0:
             results["build_output"] = "\n".join(r.stdout.strip().split("\n")[-20:])
     if args.test_cmd:
-        r = _run(args.test_cmd)
-        results["test"] = "pass" if r.returncode == 0 else "fail"
-        if r.returncode != 0:
-            results["test_output"] = "\n".join(r.stdout.strip().split("\n")[-20:])
+        if not getattr(args, "live", False):
+            results["test"] = "skipped"
+            results["test_note"] = "tests skipped (build-only default); re-run with --live to execute --test-cmd"
+        else:
+            cloud_vars = [
+                v for v in ("GOOGLE_CLOUD_PROJECT", "GOOGLE_APPLICATION_CREDENTIALS",
+                            "ANTHROPIC_VERTEX_PROJECT_ID", "AWS_PROFILE", "OPENAI_API_KEY")
+                if os.environ.get(v)
+            ]
+            r = _run(args.test_cmd)
+            results["test"] = "pass" if r.returncode == 0 else "fail"
+            if cloud_vars:
+                results["test_warning"] = f"cloud env set ({','.join(cloud_vars)}) — tests may have run live and incurred real cost"
+            if r.returncode != 0:
+                results["test_output"] = "\n".join(r.stdout.strip().split("\n")[-20:])
     reg, rp = _load_registry()
     verifications = reg.setdefault("verifications", [])
     verifications.append({"timestamp": _now(), "build": results.get("build", "skip"), "test": results.get("test", "skip")})
@@ -3085,10 +3335,21 @@ def main() -> None:
     s.add_argument("--worker", required=True)
     s.add_argument("--skill", default="general")
 
-    # dep (idempotent bd dep wrapper)
+    # dep (idempotent bd dep wrapper; --remove deletes the edge, still emitting JSON)
     s = sub.add_parser("dep")
     s.add_argument("blocker")
     s.add_argument("blocked")
+    s.add_argument("--remove", action="store_true", default=False)
+
+    # validate-graph (detect suspected sculptor over-linearization)
+    s = sub.add_parser("validate-graph")
+    s.add_argument("--plan", default="")
+
+    # archive-context (byte-size-triggered context condensation)
+    s = sub.add_parser("archive-context")
+    s.add_argument("--file", default="", help="archive one named context file instead of all")
+    s.add_argument("--max-bytes", type=int, default=0, dest="max_bytes")
+    s.add_argument("--force", action="store_true", default=False, help="archive regardless of size")
 
     # close (normalized bd close wrapper)
     s = sub.add_parser("close")
@@ -3144,10 +3405,12 @@ def main() -> None:
     s.add_argument("worker")
     s.add_argument("--commit", action="store_true", default=False)
 
-    # verify
+    # verify (build-only by default; --live runs --test-cmd)
     s = sub.add_parser("verify")
     s.add_argument("--build-cmd", default="", dest="build_cmd")
     s.add_argument("--test-cmd", default="", dest="test_cmd")
+    s.add_argument("--live", action="store_true", default=False,
+                   help="actually run --test-cmd (may trigger slow/costly live tests)")
 
     args = p.parse_args()
     if not args.cmd:
@@ -3180,6 +3443,8 @@ def main() -> None:
         "dedup": cmd_dedup,
         "ad-hoc": cmd_ad_hoc,
         "dep": cmd_dep,
+        "validate-graph": cmd_validate_graph,
+        "archive-context": cmd_archive_context,
         "close": cmd_close,
         "import-graph": cmd_import_graph,
         "update-context": cmd_update_context,

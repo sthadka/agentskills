@@ -494,6 +494,20 @@ def cmd_lint_plan(args: list[str]) -> int:
             if not has_dedicated:
                 issues.append(f'Cross-cutting requirement has no dedicated task: "{requirement}"')
 
+    # 8b. Parallelism annotation nudge — a non-setup phase with several tasks but no
+    #     [parallel] markers gets serialized on export, forcing graph surgery downstream
+    #     (treeflow FEEDBACK-2026-09-02 Issue 2, recurring). Nudge the author to annotate.
+    for phase in plan_data['phases']:
+        if phase.get('is_setup'):
+            continue
+        tasks = phase.get('tasks', [])
+        if len(tasks) >= 3 and not phase.get('is_parallel') and not any(t.get('is_parallel') for t in tasks):
+            name = phase.get('name', 'phase')
+            issues.append(
+                f'Phase "{name}" has {len(tasks)} tasks but no [parallel] markers — '
+                f'export will serialize them; mark independent tasks [parallel]'
+            )
+
     # 9. Remaining annotations
     annotations = parse_annotations(filepath)
     if annotations:

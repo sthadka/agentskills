@@ -4172,3 +4172,252 @@ class TestSpecTrace:
         out = tf(workspace, ["spec-trace", "--spec", "/nonexistent/spec.md"])
         assert out["ok"] is False
         assert "not found" in out.get("error", "")
+
+
+# ── FEEDBACK-2026-09-02 acs-planning-service fixes ────────────
+
+
+class TestClaimNoAgentName:
+    """Issue 3: claim must not crash with UnboundLocalError when CLAUDE_AGENT_NAME is unset."""
+
+    def test_claim_without_agent_name_does_not_crash(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+        # tf() strips CLAUDE_AGENT_NAME from the env, reproducing the reported condition.
+        out = tf(workspace, ["claim", "bead-abc"])
+        assert out.get("ok") is True
+        assert out.get("bead") == "bead-abc"
+        assert "warning" not in out  # no worker entry matched → no cap warning, no crash
+
+    def test_claim_with_agent_name_still_records_state(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        tf(workspace, ["dispatch", "rust-1", "bead-abc", "--skill", "rust"])
+        out = tf(workspace, ["claim", "bead-abc"], env={"CLAUDE_AGENT_NAME": "rust-1"})
+        assert out.get("ok") is True
+        reg = load_registry(workspace)
+        assert reg["workers"]["rust-1"]["state"] == "claimed"
+
+
+class TestWorkerCloseScopedDiff:
+    """Issue 4: worker-close scoped to --files must ignore a concurrent worker's files."""
+
+    def _init_with_commit_and_dispatch(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        # Initial commit so dispatch records a real SHA (activates the dispatch_sha path).
+        subprocess.run(["git", "add", ".gitignore"], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: gitignore", "-q"], cwd=workspace, check=True)
+        tf(workspace, ["dispatch", "worker-a", "bead-a", "--skill", "go"])
+
+    def test_concurrent_worker_files_do_not_block_close(self, workspace, bd_stub):
+        self._init_with_commit_and_dispatch(workspace, bd_stub)
+        # Worker A commits its own file.
+        (workspace / "a.py").write_text("print('a')\n")
+        subprocess.run(["git", "add", "a.py"], cwd=workspace, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: add a", "-q"], cwd=workspace, check=True)
+        # Concurrent worker B leaves an uncommitted file.
+        (workspace / "b.py").write_text("print('b')\n")
+        out = tf(workspace, ["worker-close", "bead-a", "--context-pct", "40",
+                             "--files", "a.py", "--summary", "did a"],
+                 env={"BD_STUB_RESPONSE": json.dumps([{"status": "in_progress"}]),
+                      "CLAUDE_AGENT_NAME": "worker-a"})
+        assert not any("uncommitted" in e for e in out.get("errors", [])), out
+
+    def test_unscoped_close_still_flags_stray_files(self, workspace, bd_stub):
+        # Without --files the whole-tree safety net is retained.
+        self._init_with_commit_and_dispatch(workspace, bd_stub)
+        (workspace / "b.py").write_text("print('b')\n")
+        out = tf(workspace, ["worker-close", "bead-a", "--context-pct", "40"],
+                 env={"BD_STUB_RESPONSE": json.dumps([{"status": "in_progress"}]),
+                      "CLAUDE_AGENT_NAME": "worker-a"})
+        assert out.get("ok") is False
+        assert any("uncommitted" in e for e in out.get("errors", []))
+
+
+class TestVerifyLiveGate:
+    """Issue 5: verify is build-only by default; --test-cmd runs only with --live."""
+
+    def test_test_cmd_skipped_by_default(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["verify", "--test-cmd", "exit 1"])
+        assert out["ok"] is True
+        assert out["test"] == "skipped"
+        assert "test_output" not in out  # never ran, so no failure output
+
+    def test_test_cmd_runs_with_live(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["verify", "--test-cmd", "true", "--live"])
+        assert out["test"] == "pass"
+
+    def test_build_cmd_always_runs(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["verify", "--build-cmd", "true"])
+        assert out["build"] == "pass"
+
+    def test_live_cloud_env_warns(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["verify", "--test-cmd", "true", "--live"],
+                 env={"GOOGLE_CLOUD_PROJECT": "my-proj"})
+        assert out["test"] == "pass"
+        assert "test_warning" in out
+        assert "GOOGLE_CLOUD_PROJECT" in out["test_warning"]
+
+
+class TestDepRemove:
+    """Issue 2: `tf.py dep --remove` emits JSON where `bd dep remove` does not."""
+
+    def test_dep_remove_emits_json(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["dep", "bead-a", "bead-b", "--remove"])
+        assert out["ok"] is True
+        assert out["removed"] is True
+
+    def test_dep_remove_idempotent_when_missing(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["dep", "bead-a", "bead-b", "--remove"],
+                 env={"BD_STUB_EXIT": "1", "BD_STUB_STDERR": "dependency not found"})
+        assert out["ok"] is True
+        assert out["removed"] is False
+
+    def test_dep_add_still_works(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        out = tf(workspace, ["dep", "bead-a", "bead-b"])
+        assert out["ok"] is True
+        assert out["already_existed"] is False
+
+
+class TestValidateGraph:
+    """Issue 2: detect sculptor over-linearization (serial chains)."""
+
+    def test_detects_serial_chain(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = [
+            {"id": "a", "title": "A", "dependencies": []},
+            {"id": "b", "title": "B", "dependencies": [{"dependency_type": "blocks", "depends_on": "a"}]},
+            {"id": "c", "title": "C", "dependencies": [{"dependency_type": "blocks", "depends_on": "b"}]},
+            {"id": "d", "title": "D", "dependencies": [{"dependency_type": "blocks", "depends_on": "c"}]},
+        ]
+        out = tf(workspace, ["validate-graph"], env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["ok"] is True
+        assert out["chain_count"] == 1
+        assert out["suspected_serial_chains"][0]["beads"] == ["a", "b", "c", "d"]
+
+    def test_parallel_graph_has_no_chains(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = [
+            {"id": "root", "title": "R", "dependencies": []},
+            {"id": "a", "title": "A", "dependencies": [{"dependency_type": "blocks", "depends_on": "root"}]},
+            {"id": "b", "title": "B", "dependencies": [{"dependency_type": "blocks", "depends_on": "root"}]},
+            {"id": "c", "title": "C", "dependencies": [{"dependency_type": "blocks", "depends_on": "root"}]},
+        ]
+        out = tf(workspace, ["validate-graph"], env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["chain_count"] == 0
+
+    def test_plan_mismatch_flagged(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        plan = workspace / "plan.md"
+        plan.write_text("## Phase 1 [parallel]\n- [ ] task one\n- [ ] task two\n")
+        beads = [
+            {"id": "a", "title": "A", "dependencies": []},
+            {"id": "b", "title": "B", "dependencies": [{"dependency_type": "blocks", "depends_on": "a"}]},
+            {"id": "c", "title": "C", "dependencies": [{"dependency_type": "blocks", "depends_on": "b"}]},
+        ]
+        out = tf(workspace, ["validate-graph", "--plan", str(plan)],
+                 env={"BD_STUB_RESPONSE": json.dumps(beads)})
+        assert out["plan_parallel_markers"] == 1
+        assert "mismatch" in out
+
+
+class TestArchiveContext:
+    """Issue 1: byte-size-triggered context archiving + condensation."""
+
+    def _ctx(self, workspace):
+        return workspace / ".beads" / "context-test"
+
+    def test_archives_oversized_file(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        ctx = self._ctx(workspace)
+        big = ctx / "epic-foo.md"
+        big.write_text("## Completed Tasks\n\n" + "".join(
+            f"### BD-{i}: T\n**Worker**: w | **Files**: f\nsummary {'y' * 400}\n\n" for i in range(150)
+        ))
+        assert big.stat().st_size > 48000
+        out = tf(workspace, ["archive-context"])
+        assert out["ok"] is True
+        assert any(a["file"] == "epic-foo.md" for a in out["archived"])
+        assert (ctx / "archive").exists()
+        assert list((ctx / "archive").glob("epic-foo-v*.md"))
+        assert big.stat().st_size < 48000  # replaced with a digest
+
+    def test_skips_small_file(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        (self._ctx(workspace) / "task-summaries.md").write_text("small\n")
+        out = tf(workspace, ["archive-context"])
+        assert out["archived"] == []
+
+    def test_force_archives_small_file(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        ctx = self._ctx(workspace)
+        (ctx / "worker-context.md").write_text("\n".join(f"- line {i}" for i in range(200)))
+        out = tf(workspace, ["archive-context", "--file", "worker-context.md", "--force"])
+        assert any(a["file"] == "worker-context.md" for a in out["archived"])
+
+
+class TestStatusClosedCount:
+    """Issue 8: status must report an accurate closed count (bd list excludes closed)."""
+
+    def test_status_reports_closed_from_stats(self, workspace, bd_stub):
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        stats = json.dumps({"summary": {
+            "open_issues": 2, "in_progress_issues": 1, "blocked_issues": 1, "closed_issues": 5,
+        }})
+        out = tf(workspace, ["status"], env={"BD_STUB_RESPONSE": stats})
+        assert out["beads"]["closed"] == 5
+        assert out["beads"]["blocked"] == 1
+        assert out["beads"]["open"] == 3  # open + in_progress
+
+    def test_status_falls_back_to_list_all(self, workspace, bd_stub):
+        # A non-stats response (bare list) forces the fallback path, which must still count closed.
+        tf(workspace, ["init", "test", "--bd-path", bd_stub])
+        beads = json.dumps([{"status": "closed"}, {"status": "closed"}, {"status": "open"}])
+        out = tf(workspace, ["status"], env={"BD_STUB_RESPONSE": beads})
+        assert out["beads"]["closed"] == 2
+        assert out["beads"]["open"] == 1
+
+
+class TestContextHelpers:
+    """Issue 1: helper-level tests for truncation/condense/cap."""
+
+    def test_truncate_epic_keeps_recent_blocks(self):
+        tf_mod = _load_tf()
+        text = "# Epic\n\n## Completed Tasks\n\n" + "".join(
+            f"### BD-{i}: task {i}\nbody {'x' * 300}\n\n" for i in range(60)
+        )
+        out = tf_mod._truncate_epic_context(text, max_bytes=4000, max_blocks=5)
+        assert len(out) <= 4200
+        assert "BD-0:" in out  # newest is prepended → block 0 kept
+        assert "elided" in out
+        assert "BD-59:" not in out  # oldest dropped
+
+    def test_truncate_epic_noop_when_small(self):
+        tf_mod = _load_tf()
+        text = "## Completed Tasks\n\n### BD-1: t\nshort\n"
+        assert tf_mod._truncate_epic_context(text) == text
+
+    def test_condense_handles_few_huge_lines(self):
+        # The exact ballooning shape: few lines, each enormous — the byte cap must shrink it.
+        tf_mod = _load_tf()
+        text = "\n".join("x" * 5000 for _ in range(10))  # 10 lines, ~50KB
+        out = tf_mod._condense_context(text, "epic-foo.md", 1, max_lines=70, max_bytes=8000)
+        assert len(out) < len(text)
+        assert "condensed" in out
+
+    def test_cap_section_trims_bullets(self, tmp_path):
+        tf_mod = _load_tf()
+        f = tmp_path / "worker-context.md"
+        bullets = "\n".join(f"- gotcha {i}" for i in range(50))
+        f.write_text(f"# Worker Context\n\n## Known Gotchas\n\n{bullets}\n\n## Tech Stack\n\nkeep me\n")
+        tf_mod._cap_section(f, "## Known Gotchas", max_bullets=10)
+        result = f.read_text()
+        assert result.count("- gotcha") == 10
+        assert "trimmed" in result
+        assert "keep me" in result  # later section preserved

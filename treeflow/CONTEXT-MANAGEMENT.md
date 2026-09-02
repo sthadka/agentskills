@@ -128,16 +128,36 @@ When a worker completes and closes its bead:
 
 ## Archival
 
-When any context file exceeds **500 lines**:
+Trigger archival on **byte size, not line count**. Completion summaries and gotchas
+are few but very long (200–500 chars each, stored as single blocks), so a line-count
+threshold never fires while the file balloons to hundreds of KB — and `worker-prompt`
+reads the whole epic file into every later worker's prompt. Archive when any context
+file exceeds **~48 KB** (`tf.py archive-context` uses this default):
 
-1. Move current file to `archive/{filename}-v{N}.md`
-2. Create fresh file with condensed summary:
+```bash
+# Archive all oversized context files (epic-*.md, task-summaries.md, worker-context.md):
+python3 .beads/tf.py archive-context
+# Force-archive one file regardless of size, or override the threshold:
+python3 .beads/tf.py archive-context --file epic-foo.md --force
+python3 .beads/tf.py archive-context --max-bytes 32000
+```
+
+`archive-context` moves the full file to `archive/{filename}-v{N}.md` and replaces it
+with a byte-bounded digest (most-recent entries kept — newest are prepended). For a
+richer semantic condense, regenerate via `tf.py phase-summary`. Guidance per layer:
+
+1. Move current file to `archive/{filename}-v{N}.md` (done automatically)
+2. Condensed digest replaces it:
    - **Worker context**: 50-80 lines covering current state, key decisions, active conventions, skill routing
    - **Epic context**: 30-50 lines covering goal, architecture, completed work summary
    - **Feature context**: 20-30 lines covering spec, interfaces, completed tasks
    - **Phase files**: do not archive — they are fixed-size summaries, not accumulating logs
 3. New workers receive only the current (condensed) version
 4. Orchestrator can archive proactively if context is growing fast
+
+Independently, `worker-prompt` truncates the inlined epic history to the most-recent
+task blocks (~12 KB) so late workers never ingest the whole run, and `notify --gotcha`
+caps the `## Known Gotchas` section to its 30 most-recent entries automatically.
 
 ## What Goes In vs Out
 

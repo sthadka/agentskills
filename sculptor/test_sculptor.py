@@ -392,6 +392,43 @@ class TestLintPlan:
         assert r["returncode"] == 1
         assert "Risks" in r["stdout"]
 
+    # Parallelism nudge (treeflow FEEDBACK-2026-09-02 Issue 2)
+
+    _MULTI_TASK_PHASE = (
+        "## Phase 1: Core\n"
+        "- [ ] 1.1: Build a\n  - AC: a\n"
+        "- [ ] 1.2: Build b\n  - AC: b\n"
+        "- [ ] 1.3: Build c\n  - AC: c\n"
+    )
+
+    def test_parallel_nudge_when_serial_tasks(self, tmp_path):
+        f = tmp_path / "plan.md"
+        plan = self.GOOD_PLAN.replace(
+            "## Phase 1: Core\n- [ ] 1.1: Build it\n  - AC: it builds\n",
+            self._MULTI_TASK_PHASE,
+        )
+        f.write_text(plan)
+        r = sculptor(["lint-plan", str(f)])
+        assert r["returncode"] == 1
+        assert "no [parallel] markers" in r["stdout"]
+
+    def test_no_parallel_nudge_when_marked(self, tmp_path):
+        f = tmp_path / "plan.md"
+        plan = self.GOOD_PLAN.replace(
+            "## Phase 1: Core\n- [ ] 1.1: Build it\n  - AC: it builds\n",
+            self._MULTI_TASK_PHASE.replace("## Phase 1: Core\n", "## Phase 1: Core [parallel]\n"),
+        )
+        f.write_text(plan)
+        r = sculptor(["lint-plan", str(f)])
+        assert "no [parallel] markers" not in r["stdout"]
+
+    def test_no_parallel_nudge_for_single_task_phase(self, tmp_path):
+        # The default GOOD_PLAN has a one-task phase — must not trigger the nudge.
+        f = tmp_path / "plan.md"
+        f.write_text(self.GOOD_PLAN)
+        r = sculptor(["lint-plan", str(f)])
+        assert "no [parallel] markers" not in r["stdout"]
+
     def test_spec_coverage_table_validated(self, tmp_path):
         spec = tmp_path / "spec.md"
         spec.write_text("# Spec\n## Architecture\nArch\n## Data Model\nModel\n## API\nAPI\n")

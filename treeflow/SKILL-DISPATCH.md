@@ -10,6 +10,10 @@ Run continuously until all beads are closed or user input is needed.
 
 When working from existing beads with no epic hierarchy, skip `phase-gate` and `phase-complete`. Phase files, epic context files, and phase-complete are not needed.
 
+**When an epic + phase hierarchy DOES exist but you gate phases with dedicated integration beads instead of `phase-complete`** (a valid, often-stronger pattern for live-verification builds), you still owe two things the phase machinery would have done for you:
+- **Run `tf.py spec-trace --spec {spec} --phase {N}` at each gate.** Integration beads verify behavior, but only spec-trace machine-checks spec coverage. Skipping it means coverage is never verified.
+- **Emit a concise `phase-{N}.md` with a `## Key Interfaces` section** (or run `tf.py phase-summary`). `worker-prompt` reads these for downstream workers; without them it falls back to inlining the raw (ballooning) epic file — directly feeding the context-bloat problem. A short interfaces summary per phase keeps later prompts lean.
+
 **Wave-based orchestration pattern:**
 1. `tf.py ready` → get all dispatchable beads
 2. `tf.py wave-plan --beads id1,id2,...` → compute parallel dispatch groups
@@ -19,7 +23,9 @@ When working from existing beads with no epic hierarchy, skip `phase-gate` and `
 
 **Build verification in flat-task mode:** Without phase gates, builds can silently diverge. Run the project's build command (`tf.py init --build-cmd "..."` stores it in registry) after Wave 1 completes and every 2-3 waves thereafter. If the build fails, fix before dispatching the next wave.
 
-`wave-plan` handles file conflict analysis and active worker awareness automatically. Use section annotations (`Files (modifies): src/config.rs [StorageConfig]`) to enable fine-grained parallelism — beads modifying different sections of the same file are classified as `low_risk` and grouped into the same wave.
+**Default wave gating to build-only (or `-short`), never a full test run.** A bare test command (`go test ./...`, `pytest`, etc.) turns into a slow, costly **live** run when cloud env vars are set (`GOOGLE_CLOUD_PROJECT`, `ANTHROPIC_VERTEX_PROJECT_ID`, `AWS_PROFILE`, `OPENAI_API_KEY`) — minutes and real spend, easily blowing a 2-minute Bash timeout. `tf.py verify` is build-only by default and skips `--test-cmd` unless you pass `--live` (which also warns when cloud env is present). **Never chain a fast state op with a potentially multi-minute test in one Bash call** — e.g. do NOT run `notify … && verify --test-cmd "go test ./..." && ready`; the test can hang and take down the whole chain after `notify` already succeeded. Keep gates fast: `verify --build-cmd "go build ./..."` (or `--test-cmd "go test -short ./..." --live` when you deliberately want the short suite).
+
+`wave-plan` handles file conflict analysis and active worker awareness automatically. Use section annotations (`Files (modifies): src/config.rs [StorageConfig]`) to enable fine-grained parallelism — beads modifying different sections of the same file are classified as `low_risk` and grouped into the same wave. If `wave-plan` feels heavyweight for a small ready set, `tf.py conflict-check --beads …` is the lighter path — it returns the same file-overlap classification without full wave grouping; either is acceptable.
 
 **Tracer-bullet first wave:** Prefer dispatching one complete vertical slice first (e.g., a single API endpoint with handler, service, and test) that validates the architecture. Run build + tests after Wave 1 before fanning out. This catches foundational mistakes before subsequent workers build on them.
 
@@ -154,7 +160,7 @@ python3 .beads/tf.py dispatch {worker-name} {bead-id} --skill {domain} [--output
 
 After dispatching, DO NOT poll `git log`, `git status`, or `wc -l` in a loop. You will receive `<task-notification>` events automatically when workers complete. Only run `tf.py stalled --threshold-mins 20` every 5-10 minutes as a safety net. Between dispatches, use the idle time to prepare prompts for the next wave.
 
-When `late: true` appears in a `tf.py notify` response, skip entirely — no action, no logging, no context update.
+When `late: true` appears in a `tf.py notify` response, skip entirely — **no action, no logging, no context update, and no narration**. Do not write a sentence acknowledging the duplicate (not even "Duplicate — skipping"); produce zero output and move on. `<task-notification>` re-fires on compaction/re-render, so duplicates are normal and their per-event cost (a full wake-up + any narration) **scales with worker count** — at 30+ workers, narrating each duplicate can burn ~10 turns. Treat a `late`/duplicate notification as a silent no-op.
 
 ### 6. Process Completions
 
@@ -237,9 +243,11 @@ ready → pick highest priority → write prompt → dispatch → wait → notif
 **Key differences from parallel mode:**
 - **One worker at a time** — no wave planning, conflict checking, or stall management needed
 - **The orchestrator IS the architect checkpoint** — run `build && test` between every dispatch
-- **Build verification between dispatches:**
+- **Build verification between dispatches** (build-only by default; add `--live` only when you deliberately want tests, and prefer `-short`):
   ```bash
-  python3 .beads/tf.py verify --build-cmd "go build ./..." --test-cmd "go test ./..."
+  python3 .beads/tf.py verify --build-cmd "go build ./..."
+  # deliberate short test run (note: cloud env vars can make even this run live/costly):
+  python3 .beads/tf.py verify --build-cmd "go build ./..." --test-cmd "go test -short ./..." --live
   ```
 - **No phase summary files needed** — each worker sees the latest codebase directly
 - **Trivial tasks (version checks, infrastructure verification) should be closed directly** — don't spawn workers for `go version` checks

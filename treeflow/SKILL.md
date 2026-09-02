@@ -175,13 +175,15 @@ python3 .beads/tf.py close {bead_id} --reason "..."                    # Close b
 python3 .beads/tf.py ready                                             # Dispatchable tasks (filtered epics, supplemented from bd list)
 python3 .beads/tf.py recover                                           # Find orphaned in-progress beads (post-compaction recovery)
 python3 .beads/tf.py ad-hoc --name {name} --worker {worker} [--skill domain]  # Register informal task for stall detection
-python3 .beads/tf.py dep {blocker} {blocked}                           # Add dep idempotently (UNIQUE errors = success)
+python3 .beads/tf.py dep {blocker} {blocked} [--remove]                # Add (or --remove) dep idempotently; always emits JSON (bd dep remove does not)
+python3 .beads/tf.py validate-graph [--plan plan.md]                    # Detect suspected sculptor over-linearization (serial chains); cross-check plan [parallel] markers
+python3 .beads/tf.py archive-context [--file NAME] [--max-bytes N] [--force]  # Archive context files > ~48KB by BYTE size, replace with digest
 python3 .beads/tf.py import-graph {file}                                # Import beads-graph.jsonl via bd create --graph
 python3 .beads/tf.py worker-prompt --beads {id}[,id2,id3] [--reuse --prior-bead {prev}] [--parallel-with bead1,bead2] [--prompt-only] [--write-file] [--inline-context]  # Assemble worker prompt
 # --prompt-only: print raw prompt to stdout (no JSON). --write-file: write prompt to temp file, return {"prompt_file": path} instead of inline prompt
 python3 .beads/tf.py update-context --bead {id} --worker {name} --summary "..." --files "..." [--gotcha "..."]  # Append to context
 python3 .beads/tf.py phase-complete --epic {id} [--build-cmd "cmd"] [--phase-num N]  # Gate + smoke test + summary (includes worker summaries)
-python3 .beads/tf.py verify --build-cmd "cmd" [--test-cmd "cmd"]                   # Run build/test and log result in registry
+python3 .beads/tf.py verify --build-cmd "cmd" [--test-cmd "cmd"] [--live]           # Build-only by default; --test-cmd runs ONLY with --live (guards costly live tests). Log result in registry
 python3 .beads/tf.py git-cleanup {worker} [--commit]                               # List/commit uncommitted files from a worker's dispatch
 python3 .beads/tf.py bd-path                                           # Print resolved bd binary path
 
@@ -201,11 +203,16 @@ python3 .beads/tf.py import-graph .beads/beads-graph.jsonl
 ```
 This calls `bd create --graph` which handles issues, parent-child hierarchy, and blocking deps atomically.
 
-**Post-import validation** — sculptor-generated graphs may linearize tasks that the plan marks as parallel. After import, verify the dependency structure:
+**Post-import validation is EXPECTED, not optional** — sculptor emits a conservative serial chain whenever the plan's tasks lack `[parallel]` markers, so graph correction after import is the norm (this has recurred across many sessions). Run the automated detector before dispatching:
 ```bash
-bd show <sample-bead-id> --json | jq -c '.[0].dependencies'
+python3 .beads/tf.py validate-graph --plan plan.md
 ```
-Check that parallel tasks within a phase don't have unnecessary serial dependencies on each other. If edges are wrong, use `bd dep remove` / `bd dep add` to correct before dispatching.
+It flags suspected over-linearization (serial chains of ≥3 beads where each link has exactly one blocker and one dependent) and, with `--plan`, reports when the plan declares `[parallel]` the graph doesn't reflect. Review each flagged chain and break the false edges:
+```bash
+python3 .beads/tf.py dep <blocker> <blocked> --remove   # emits JSON (bd dep remove does not)
+python3 .beads/tf.py dep <blocker> <blocked>            # add a real edge (idempotent)
+```
+Keep genuinely-required ordering (e.g. `go mod init` before `go build`); only remove edges between independent tasks.
 
 For manual batch creation, use `bd create -f plan.md --json` directly.
 
@@ -257,7 +264,7 @@ See [CONTEXT-MANAGEMENT.md](CONTEXT-MANAGEMENT.md) for full details.
 - Context stored in `.beads/context-{plan-name}/` with separate files per layer
 - State tracked in `registry.json` via `tf.py` (replaces `worker-registry.md`)
 - Only orchestrator writes context files (workers never touch them)
-- Archive when any file exceeds 500 lines → condense to 50-80 lines
+- Archive by **byte size** (not line count): run `tf.py archive-context` when a context file exceeds ~48 KB — completion summaries are few but huge, so a line trigger never fires while the file balloons and gets inlined into every later worker prompt
 - Include: summaries, decisions, file lists, contracts
 - Exclude: source code, diffs, build output, debug logs
 
@@ -320,9 +327,10 @@ The orchestrator's continuous verification (architect checkpoints + code review 
 - Spawning workers without `name` parameter (can't reuse unnamed workers)
 - Spawning more workers than independent ready tasks
 - Killing workers — let them complete or self-report
-- **Spawning fresh workers without running `tf.py sync` at session start** — sync auto-retires stale workers and shows available reuse candidates. Required before first dispatch and after anomalies; optional during normal completion→dispatch flow
+- **Resuming an existing session without running `tf.py sync`** — sync auto-retires stale workers and shows reuse candidates. Required when resuming a session (workers may already exist) and after anomalies. **Not required for a brand-new plan** with no prior workers/registry — a first-ever dispatch can skip it. (This resolves the earlier doc contradiction with SKILL-DISPATCH.)
 - Reusing workers when remaining context is too small (sync handles this automatically)
 - Spawning N workers for N near-identical small tasks (batch into one worker)
+- **Routing a discovered fix worker-to-worker via `SendMessage` instead of through the orchestrator** — if a worker finds a bug and messages a peer to fix it while the orchestrator independently files+dispatches the same fix, both converge on duplicate work. Prefer reporting discovered fixes back to the orchestrator, which owns dedup and dispatch.
 
 **Planning:**
 - Tasks without target file paths in descriptions

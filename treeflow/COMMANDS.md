@@ -58,6 +58,7 @@ bd dep <id1> --blocks <id2> && bd dep <id3> --blocks <id4>     # chain multiple 
 
 # Preferred: idempotent tf.py wrapper (handles UNIQUE constraint errors gracefully)
 python3 .beads/tf.py dep <blocker-id> <blocked-id>             # blocker blocks blocked
+python3 .beads/tf.py dep <blocker-id> <blocked-id> --remove    # remove edge; emits JSON (bd dep remove does not)
 ```
 
 **Argument order reference:**
@@ -112,4 +113,16 @@ python3 .beads/tf.py ad-hoc --name "refactor-tests" --worker refactor-1 --skill 
 
 # Record completion with agent ID for reliable reuse
 python3 .beads/tf.py notify {worker} {bead} --context-pct N --summary "..." --agent-id {id}
+
+# Detect sculptor over-linearization before dispatch (serial chains that should be parallel)
+python3 .beads/tf.py validate-graph --plan plan.md
+
+# Archive oversized context files by BYTE size (not line count) and replace with a digest
+python3 .beads/tf.py archive-context                          # all files > ~48KB
+python3 .beads/tf.py archive-context --file epic-foo.md --force
+
+# Build/test gate — build-only by default; tests run ONLY with --live (guards against
+# slow/costly live test runs triggered by cloud env vars). Never chain with notify.
+python3 .beads/tf.py verify --build-cmd "go build ./..."
+python3 .beads/tf.py verify --build-cmd "go build ./..." --test-cmd "go test -short ./..." --live
 ```
