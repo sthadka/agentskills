@@ -9,6 +9,7 @@ A collection of Claude Code skills: reusable workflow packages (sculptor, treefl
 python3 -m pytest sculptor/test_sculptor.py -x -q
 python3 -m pytest treeflow/test_tf.py -x -q
 python3 -m pytest stateflow/test_tf.py -x -q
+python3 -m pytest session-viewer/test_session_viewer.py -x -q
 
 # Run a specific test class
 python3 -m pytest treeflow/test_tf.py::TestWorkerPrompt -x -q

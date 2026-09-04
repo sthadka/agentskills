@@ -34,6 +34,12 @@ Conversation messages.
 | `permissionMode` | string? | e.g. `bypassPermissions` (first user msg) |
 | `agentId` | string? | Set on subagent messages |
 | `teamName` | string? | Team name for spawned agents |
+| `isMeta` | bool? | Injected/synthetic turn (system-reminders, hook/command output). Excluded from genuine user prompts unless `--include-meta`. |
+| `isSidechain` | bool? | Part of a subagent conversation interleaved in the main log |
+
+Genuine user prompts (used to key the session map's sections) are `user` messages
+that are not `isMeta` and whose text does not begin with an injected wrapper
+(`<system-reminder>`, `<command-name>`, `<local-command-stdout>`, …).
 
 #### `message.usage`
 
@@ -58,9 +64,9 @@ System events. Identified by `subtype`:
 |---------|------------|-------------|
 | `turn_duration` | `durationMs`, `budgetTokens`, `budgetLimit`, `budgetNudges`, `messageCount` | Turn completion stats |
 | `informational` | `text` | User-facing info (budget warnings) |
-| `api_error` | | API error details |
+| `api_error` | `text`/`error` | API error details — surfaced in `--errors` and JSON `api_errors` |
 | `api_metrics` | | API performance |
-| `compact_boundary` | | Context compaction marker |
+| `compact_boundary` | `timestamp` | Context compaction marker — surfaced in the map, `--summary`, and JSON `compaction_points` (records `after_message`) |
 | `local_command` | | Hook command output |
 | `memory_saved` | | Auto-memory save |
 
@@ -91,7 +97,11 @@ These are stored but not relevant for session viewing:
 | `marble-origami-snapshot` | Context collapse queue state |
 | `speculation-accept` | Thinking speculation stats |
 | `worktree-state` | Worktree session state |
+| `queue-operation` | Queued-message operations |
 | `agent-name`, `agent-color`, `agent-setting` | Agent appearance/config |
+
+Any type not recognized above is counted in the JSON `unknown_types` map (and
+shown in `--summary`) so schema drift is observable without changing behavior.
 
 ## Content Block Types
 
