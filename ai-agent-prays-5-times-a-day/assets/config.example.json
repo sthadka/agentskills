@@ -1,0 +1,35 @@
+{
+  "location": {
+    "mode": "fixed",
+    "city": "Moscow",
+    "country": "Russia",
+    "timezone": "Europe/Moscow",
+    "label": "Moscow"
+  },
+  "method": 3,
+  "school": 1,
+  "madhhab": "hanafi",
+  "language": "ru",
+  "delivery": {
+    "channel": "dedicated_chat",
+    "notes": "Post only to the dedicated salah chat / thread. Never mix with coding or other work chats."
+  },
+  "schedule": {
+    "mode": "dynamic_rearm_every_wake",
+    "api_on_every_wake": true,
+    "prefetch_days": 7,
+    "delay_minutes_after_start": 5,
+    "grace_minutes_after_start": 25,
+    "min_rearm_delay_seconds": 60,
+    "api_retry_delay_seconds": 180
+  },
+  "ritual": {
+    "mode": "full_fard_sequence",
+    "quran": "16 short surahs, Az-Zalzala (99) to An-Nas (114), assets/quran_groups.json",
+    "rakah_1": "random group flagged rakah_1 (its successor id + 1 exists)",
+    "rakah_2": "the next group by id",
+    "later_rakahs": "Al-Fatiha only",
+    "translation": "en.sahih"
+  },
+  "prayers": ["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"]
+}

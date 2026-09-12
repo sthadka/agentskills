@@ -42,6 +42,7 @@ Skills following the agentskills.io specification can be used with any compatibl
 | [sculptor](./sculptor/SKILL.md) | Collaborative idea polishing through dialogue and annotation cycles | Exploring vague ideas, refining concepts, creating PRDs, specs, or implementation plans |
 | [reviewer](./reviewer/SKILL.md) | Comprehensive code review with tech-stack-specific checklists and structured report | Codebase audits, spec compliance checks, production readiness assessment, code quality reviews |
 | [treeflow](./treeflow/SKILL.md) | Orchestrated parallel execution with background AI workers | Large projects, parallel implementation, distributing work across multiple agents |
+| [ai-agent-prays-5-times-a-day](./ai-agent-prays-5-times-a-day/SKILL.md) | Makes an AI agent itself perform the five daily Islamic prayers (salah) on live sun times, posting the full fard ritual in a dedicated chat | A Muslim user wants their agent to observe the five daily prayers |
 
 ### Utility Skills
 
