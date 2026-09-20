@@ -28,6 +28,40 @@ A curated collection of skills for AI coding agents (Claude Code, Cursor, OpenAI
 
 4. Run `make help` to see all available targets and skills
 
+### For omp (Oh My Pi)
+
+omp discovers skills from its own config roots. There are two ways to enable this collection.
+
+**Option A — install into omp-native skill dirs (mirrors the Claude workflow).** Every
+Makefile target accepts `AGENT=omp`, which retargets the install/copy from `.claude/skills`
+to omp's native layout: `<project>/.omp/skills` (project) and `~/.omp/agent/skills` (user).
+
+```bash
+# All skills, user-level (loaded by omp's native provider in every project)
+make install-all-global AGENT=omp
+
+# One skill into a project
+make install SKILL=reviewer TARGET=~/myproject AGENT=omp
+
+# Copy instead of symlink
+make copy SKILL=reviewer TARGET=~/myproject AGENT=omp
+```
+
+**Option B — zero install, point omp at this repo.** Because every skill lives at
+`<name>/SKILL.md` in the repo root and each has a `description`, omp can scan the repo
+directly. Add to `~/.omp/agent/config.yml` (user-wide) or `<project>/.omp/config.yml`:
+
+```yaml
+skills:
+  customDirectories:
+    - /absolute/path/to/agentskills
+```
+
+omp's `claude` provider also reads `.claude/skills` at the project level by default, so a
+plain `make install ...` (no `AGENT`) is already visible to omp when run inside that project;
+the user-level `~/.claude/skills` path additionally requires enabling the Claude user
+provider (`skills.enableClaudeUser`). `AGENT=omp` avoids that opt-in entirely.
+
 ### For Other Agents
 
 Skills following the agentskills.io specification can be used with any compatible AI coding agent. Refer to your agent's documentation for how to configure custom skill directories.
