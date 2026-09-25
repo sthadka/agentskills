@@ -31,8 +31,7 @@ Every sculptor session builds an iteration history through commits. Never squash
    - Prefix: `<idea-name>`
    - Phase: `research`, `draft`, `annotate`, `revision`, `spec`, `plan`, `finalize`, `feedback`
    - Description: one short clause, no period
-4. **Never squash or amend these commits.** The iteration history is the point.
-5. **Only commit files inside `{idea-name}/`.** Don't stage anything outside the idea directory.
+4. **Only commit files inside `{idea-name}/`.** Don't stage anything outside the idea directory.
 
 <HARD-GATE>
 This skill NEVER scaffolds projects, creates source code files, or takes implementation actions.
