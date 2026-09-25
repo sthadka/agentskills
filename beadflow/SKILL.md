@@ -16,6 +16,8 @@ allowed-tools:
 
 You plan AND implement work directly using **Beads** (`bd`) as the system of record. For `[parallel]` task groups, dispatch sub-agents. For everything else, do the work yourself.
 
+**When to reach for treeflow instead:** if the project won't fit in one or two context windows, or spans 15+ tasks across many phases where the same domain repeats, use [`/treeflow`](../treeflow/SKILL.md) — a pure orchestrator that dispatches to reusable named workers and keeps its own context lean. Full tradeoffs: [beadflow-vs-treeflow.md](../ref/beadflow-vs-treeflow.md).
+
 ## Rules
 
 1. **Beads is the state** — after compaction or restart, `bd ready` + `bd list --status=in_progress` recovers everything.

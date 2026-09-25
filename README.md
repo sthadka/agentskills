@@ -34,20 +34,33 @@ Skills following the agentskills.io specification can be used with any compatibl
 
 ## Available Skills
 
-### Workflow Skills
+Start with **[router](./router/SKILL.md)** (`/router`) — it maps the skills and the flows between them. Each skill is tagged **model** (the agent can auto-reach it; you can also type it) or **user** (only you type it).
 
-| Name | Description | When to Use |
-|------|-------------|-------------|
-| [beadflow](./beadflow/SKILL.md) | Autonomous task management using Beads issue tracker | Multi-step projects, breaking down PRDs, managing complex implementations with dependency tracking |
-| [sculptor](./sculptor/SKILL.md) | Collaborative idea polishing through dialogue and annotation cycles | Exploring vague ideas, refining concepts, creating PRDs, specs, or implementation plans |
-| [reviewer](./reviewer/SKILL.md) | Comprehensive code review with tech-stack-specific checklists and structured report | Codebase audits, spec compliance checks, production readiness assessment, code quality reviews |
-| [treeflow](./treeflow/SKILL.md) | Orchestrated parallel execution with background AI workers | Large projects, parallel implementation, distributing work across multiple agents |
+### The main flow: idea → ship
 
-### Utility Skills
+`/sculptor` → `/beadflow` or `/treeflow` → `/reviewer`
 
-| Name | Description | When to Use |
-|------|-------------|-------------|
-| [session-viewer](./session-viewer/SKILL.md) | Parse and display Claude Code session JSONL files in multiple formats | Viewing, inspecting, analyzing, or debugging Claude Code sessions |
+| Skill | Role | When to use | Invocation |
+|-------|------|-------------|------------|
+| [sculptor](./sculptor/SKILL.md) | Idea → spec + plan + beads graph via annotation cycles (writes only markdown) | Exploring, refining, or formalizing ideas into specs, PRDs, or plans | model |
+| [beadflow](./beadflow/SKILL.md) | Single-agent, bead-by-bead execution, low overhead | Builds that fit in 1-2 context windows (~5-15 tasks) | model |
+| [treeflow](./treeflow/SKILL.md) | Pure orchestrator dispatching parallel named workers | Large multi-phase builds (15-50+ tasks) or work too big for one window | model |
+| [reviewer](./reviewer/SKILL.md) | Adversarial code review with tech-stack checklists + report | Audits, spec compliance, production-readiness | model |
+
+beadflow vs treeflow tradeoffs: [ref/beadflow-vs-treeflow.md](./ref/beadflow-vs-treeflow.md).
+
+### Utility & routing
+
+| Skill | Role | Invocation |
+|-------|------|------------|
+| [router](./router/SKILL.md) | Maps every skill and the flows between them | user |
+| [session-viewer](./session-viewer/SKILL.md) | Parse/inspect Claude Code session JSONL | model |
+
+### Deprecated
+
+| Skill | Status |
+|-------|--------|
+| [stateflow](./stateflow/SKILL.md) | Superseded by treeflow — do not use for new work |
 
 ## How Skills Work
 
