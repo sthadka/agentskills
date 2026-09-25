@@ -49,16 +49,22 @@ When the user presents an idea:
 Map the idea as a **design tree**: every decision branches into the decisions that hang off it. Work the tree in **rounds**. The **frontier** is every decision whose prerequisites are already settled — the questions you can ask now without guessing at answers you haven't heard yet. Ask the whole frontier in one round: number each question and give your **recommended answer**. Then wait for the user's answers before the next round.
 
 ```
-❓ **Q1** — **<title>**: <question body, may include options>
+❓ **Q1** - **<title>**: <question body, may span paragraphs, may list options>
+
+➡️ <your recommended answer>
+
+---
+
+❓ **Q2** - **<title>**: <question body>
 
 ➡️ <your recommended answer>
 ```
 
-**Facts are your job; decisions are the user's.** Anything you could look up — the codebase, the web, prior art, what a system actually sends or receives — you find yourself (dispatch a research agent per Phase 2); never ask the user for a fact. Put only genuine decisions to them. A running exploration is an unsettled prerequisite: ask the rest of the frontier now, and let only the questions downstream of it wait.
+**Facts are your job; decisions are the user's.** Anything you could look up — the codebase, the web, prior art, what a system actually sends or receives — you find yourself (dispatch a research agent per Phase 2); never ask the user for a fact. Put only genuine decisions to them. A running exploration is an unsettled prerequisite: ask the rest of the frontier now, and let only the questions downstream of it wait. For each substantive exploration, capture its details and findings in an appendix file (see [APPENDIX-TEMPLATE.md](APPENDIX-TEMPLATE.md)) and reference it from the node it informs in the decision tree.
 
 Seed the first frontier with: the problem and who it's for, what success looks like, constraints (time, tech, team, budget), how similar tools architect this, shared design surfaces to exploit early, the non-goals ("what this is NOT"), and the session's desired output (polished idea? PRD? spec? plan?).
 
-The interview is done when the frontier is empty — every branch visited, nothing silently assumed. Confirm shared understanding with the user before moving on.
+The interview is done when the frontier is empty — every branch visited, nothing silently assumed. Confirm shared understanding with the user before moving on. Then **capture the design tree itself** as an artifact: the decisions, the options weighed at each node, and how the final shape emerged. Write it to `{idea-name}/decision-tree.md` (see [DECISION-TREE-TEMPLATE.md](DECISION-TREE-TEMPLATE.md)) — like the glossary, the tree is valuable downstream and travels with the handoff.
 
 **Leave a paper trail as you go** — run the interview and the domain model together. As terms crystallize, capture the idea's ubiquitous language in `{idea-name}/glossary.md` right then, not in a batch at the end. Be opinionated: when the user reaches for a vague or overloaded term ("account" doing three jobs), propose one precise canonical name and list the rejected synonyms; when a term conflicts with what the glossary already says, call it out. When a decision is **hard to reverse, surprising without context, and a genuine trade-off**, record it with the alternatives you weighed so the "why" survives. See [GLOSSARY-TEMPLATE.md](GLOSSARY-TEMPLATE.md) for the format.
 
@@ -214,7 +220,8 @@ When the user approves the document:
    - Technical spec
    - Implementation plan
    - Glossary (if one was built)
-3. **Export beads plan** — Run `sculptor.py export-beads {idea-name}/` to generate `.beads/beads-graph.jsonl`, `invariants.md`, and (when a `glossary.md` exists) `.beads/glossary.md`. These files are the handoff artifact for implementation — they travel with the idea directory when copied to a new project, and treeflow imports the glossary as a shared worker context layer.
+   - Decision tree (if one was captured)
+3. **Export beads plan** — Run `sculptor.py export-beads {idea-name}/` to generate `.beads/beads-graph.jsonl` and `invariants.md`, and to copy `glossary.md` and `decision-tree.md` (when present) into `.beads/`. These files are the handoff artifact for implementation — they travel with the idea directory when copied to a new project, and treeflow imports the glossary as a shared worker context layer.
 4. **Commit**: `<idea-name>: finalize — polished artifacts and beads export`
 
 Proceed to Phase 7 once user approves.

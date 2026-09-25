@@ -1304,6 +1304,32 @@ class TestExportBeads:
         assert r["returncode"] == 0
         assert not (idea_dir / ".beads" / "glossary.md").exists()
 
+    def test_copies_decision_tree_when_present(self, idea_dir):
+        write_file(idea_dir / "plan.md", """\
+            # Implementation Plan: Decision Tree Test
+
+            ## Phase 1: Build
+            - [ ] 1.1: A
+              - AC: A done
+        """)
+        write_file(idea_dir / "decision-tree.md", """\
+            # Decision Tree
+
+            ## Tree
+
+            ### 1. Storage engine
+            - **Chosen**: SQLite
+            - **Why**: single-file, zero-ops
+        """)
+
+        r = sculptor(["export-beads", str(idea_dir)])
+        assert r["returncode"] == 0
+
+        tree_out = idea_dir / ".beads" / "decision-tree.md"
+        assert tree_out.exists()
+        assert "SQLite" in tree_out.read_text()
+        assert ".beads/decision-tree.md" in r["stdout"]
+
     def test_no_plan_file(self, idea_dir):
         r = sculptor(["export-beads", str(idea_dir)])
         assert r["returncode"] == 1

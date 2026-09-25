@@ -1280,11 +1280,12 @@ def cmd_export_beads(args: list[str]) -> int:
         inv_out = beads_dir / 'invariants.md'
         inv_out.write_text(f'# Cross-worker Invariants\n\n{plan["invariants"]}\n')
 
-    glossary_src = idea_dir / 'glossary.md'
-    glossary_copied = False
-    if glossary_src.exists():
-        (beads_dir / 'glossary.md').write_text(glossary_src.read_text())
-        glossary_copied = True
+    travel_files = []
+    for name in ('glossary.md', 'decision-tree.md'):
+        src = idea_dir / name
+        if src.exists():
+            (beads_dir / name).write_text(src.read_text())
+            travel_files.append(name)
 
     task_count = sum(len(ph['tasks']) for ph in plan['phases'])
     subtask_count = sum(
@@ -1298,8 +1299,10 @@ def cmd_export_beads(args: list[str]) -> int:
     print(f'  {graph_out.relative_to(idea_dir)}  — bd create --graph input')
     if plan['invariants']:
         print(f'  .beads/invariants.md — cross-worker invariants')
-    if glossary_copied:
-        print(f'  .beads/glossary.md — shared domain glossary')
+    travel_labels = {'glossary.md': 'shared domain glossary',
+                     'decision-tree.md': 'design decisions and rationale'}
+    for name in travel_files:
+        print(f'  .beads/{name} — {travel_labels[name]}')
 
     if not run_mode:
         print(f'\nNext steps:')
