@@ -7,6 +7,13 @@
 
 {1-2 sentence description of what is being built and why}
 
+## Domain Glossary
+
+<!-- Imported from sculptor's glossary.md (.beads/glossary.md when present). The shared ubiquitous language for this work. -->
+<!-- Use these exact terms in code, tests, and commit messages so parallel workers don't silently diverge on naming. -->
+
+{Paste .beads/glossary.md here, or "N/A — no glossary from planning."}
+
 ## Tech Stack
 
 - **Language/Runtime**: {e.g., TypeScript, Go, Python}

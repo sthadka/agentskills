@@ -16,7 +16,7 @@ python3 ~/.claude/skills/sculptor/sculptor.py <command> [args]
 | `lint-spec <spec.md>` | Before asking user to annotate spec | Dead types, path consistency, TODOs, untagged code blocks |
 | `lint-plan <plan.md> --spec <spec.md>` | Before asking user to annotate plan | Missing AC lines, missing sections, spec coverage table validation |
 | `lint-cross <dir>` | After writing spec + plan | Appendix link resolution, spec type coverage in plan, cross-reference consistency |
-| `export-beads <dir>` | Phase 6 (finalize) | Generates `.beads/beads-graph.jsonl` and `invariants.md`. Add `--run` to execute `bd create --graph` atomically |
+| `export-beads <dir>` | Phase 6 (finalize) | Generates `.beads/beads-graph.jsonl` and `invariants.md`, and copies `glossary.md` (if present) to `.beads/glossary.md`. Add `--run` to execute `bd create --graph` atomically |
 
 ### Required integration points
 
