@@ -154,50 +154,20 @@ bd close <id> --reason "Done" --suggest-next --json | jq -c '.[0]'
 
 > **CRITICAL: For blocking deps, use `tf.py dep <blocker> <blocked>` (idempotent) — NOT `bd dep add A B`**
 
-## `tf.py` Reference
+## `tf.py` Core Commands
 
-State management commands — all output compact JSON:
+The happy-path commands the core loop uses (all output compact JSON):
 
 ```bash
-# Orchestrator commands
-python3 .beads/tf.py init {plan-name} [--bd-path PATH] [--worker-model MODEL] [--idle-timeout N]  # Create context dir + registry + gitignore (--bd-path auto-detected via shutil.which; idle-timeout: minutes before auto-retire, default 8)
-python3 .beads/tf.py dispatch {worker} {bead-id}[,bead-id2] --skill {domain} [--output-file path] [--agent-id ID]  # Record dispatch (agent-id stores the Agent tool's runtime ID for compaction resilience)
-python3 .beads/tf.py notify {worker} [bead] --context-pct N [--auto] [--summary "..."] [--skill domain] [--agent-id ID] [--files "f1,f2"] [--gotcha "..."] [--tokens N] [--duration-ms N]  # Record completion (--auto infers bead/files/skill from registry + git; --tokens/--duration-ms track cost)
-python3 .beads/tf.py batch-notify --pairs "w1:bead1,w2:bead2" --context-pct N [--summary "..."] [--files "f1,f2"] [--gotcha "..."]  # Batch completion for multiple worker:bead pairs
-python3 .beads/tf.py phase-gate {epic-id}                # Check phase complete
-python3 .beads/tf.py smoke-test --build-cmd "cmd" --beads a,b  # Build + wiring check
-python3 .beads/tf.py conflict-check --beads a,b,c                     # File-conflict analysis (section-aware: [section] annotations → low_risk)
-python3 .beads/tf.py wave-plan --beads a,b,c                          # Compute dispatch waves from ready beads (uses conflict-check + active worker files)
-python3 .beads/tf.py sync [--ready-count N]                           # Pre-dispatch: retire stale, flag stalled, return reusable workers
-python3 .beads/tf.py stalled [--threshold-mins N]              # List stalled active workers (default 20 min)
-python3 .beads/tf.py registry [--status idle] [--skill domain]  # Query workers
-python3 .beads/tf.py registry --worker-model              # Print configured worker model
-python3 .beads/tf.py retire {worker}                     # Mark worker retired
-python3 .beads/tf.py routing --add "pattern:domain:prefix"  # Add routing entry
-python3 .beads/tf.py status                              # One-line overview
-python3 .beads/tf.py close {bead_id} --reason "..."                    # Close bead with normalized JSON output
+python3 .beads/tf.py init {plan-name} [--bd-path PATH] [--worker-model MODEL] [--idle-timeout N]  # Create context dir + registry + gitignore
 python3 .beads/tf.py ready                                             # Dispatchable tasks (filtered epics, supplemented from bd list)
-python3 .beads/tf.py recover                                           # Find orphaned in-progress beads (post-compaction recovery)
-python3 .beads/tf.py ad-hoc --name {name} --worker {worker} [--skill domain]  # Register informal task for stall detection
-python3 .beads/tf.py dep {blocker} {blocked} [--remove]                # Add (or --remove) dep idempotently; always emits JSON (bd dep remove does not)
-python3 .beads/tf.py validate-graph [--plan plan.md]                    # Detect suspected sculptor over-linearization (serial chains); cross-check plan [parallel] markers
-python3 .beads/tf.py archive-context [--file NAME] [--max-bytes N] [--force]  # Archive context files > ~48KB by BYTE size, replace with digest
-python3 .beads/tf.py import-graph {file}                                # Import beads-graph.jsonl via bd create --graph
-python3 .beads/tf.py worker-prompt --beads {id}[,id2,id3] [--reuse --prior-bead {prev}] [--parallel-with bead1,bead2] [--prompt-only] [--write-file] [--inline-context]  # Assemble worker prompt
-# --prompt-only: print raw prompt to stdout (no JSON). --write-file: write prompt to temp file, return {"prompt_file": path} instead of inline prompt
-python3 .beads/tf.py update-context --bead {id} --worker {name} --summary "..." --files "..." [--gotcha "..."]  # Append to context
-python3 .beads/tf.py phase-complete --epic {id} [--build-cmd "cmd"] [--phase-num N]  # Gate + smoke test + summary (includes worker summaries)
-python3 .beads/tf.py verify --build-cmd "cmd" [--test-cmd "cmd"] [--live]           # Build-only by default; --test-cmd runs ONLY with --live (guards costly live tests). Log result in registry
-python3 .beads/tf.py git-cleanup {worker} [--commit]                               # List/commit uncommitted files from a worker's dispatch
-python3 .beads/tf.py bd-path                                           # Print resolved bd binary path
-
-# Worker commands (workers call these — no direct bd usage)
-python3 .beads/tf.py claim {bead_id} [--expected-mins N] # Claim task (with optional time estimate for stall detection)
-python3 .beads/tf.py block {bead_id} --question "..." [--context "..."]  # Mark blocked + create question
-python3 .beads/tf.py discover {bead_id} --title "..." [--description "..."]  # Create discovered work
-python3 .beads/tf.py heartbeat {bead_id} [--note "..."]  # Explicit heartbeat for long-running ops
-python3 .beads/tf.py worker-close {bead_id} --context-pct N --files f1,f2 --summary "..." [--force]  # Validate + close (--force skips target file modification check)
+python3 .beads/tf.py dispatch {worker} {bead-id}[,bead-id2] --skill {domain} [--output-file path] [--agent-id ID]  # Record dispatch
+python3 .beads/tf.py notify {worker} [bead] --context-pct N [--auto] [--summary "..."]  # Record completion
+python3 .beads/tf.py phase-complete --epic {id} [--build-cmd "cmd"] [--phase-num N]  # Gate + smoke test + summary
+python3 .beads/tf.py worker-close {bead_id} --context-pct N --files f1,f2 --summary "..." [--force]  # Worker validates + closes
 ```
+
+Full command reference: [COMMANDS.md](COMMANDS.md).
 
 ## Graph Import Format
 
@@ -221,27 +191,14 @@ For manual batch creation, use `bd create -f plan.md --json` directly.
 
 Follow sculptor's planning process or write a plan file directly, then import via `bd create --graph` or `bd create -f`.
 
-**Additional treeflow requirements for task descriptions:**
+**Additional treeflow requirements for task descriptions (rules that fire on every plan):**
 
 1. **Include target file paths** — every task MUST include a `Files:` line listing all files it will create or modify. Use `Files (new):` and `Files (modifies):` to distinguish. Without it, `conflict-check` cannot detect file-level parallelism conflicts.
 2. **Mark parallel groups** — add `[parallel]` for tasks within a phase that have no cross-dependencies.
-3. **Add skill hints** — when obvious, note the skill domain (e.g., "Go implementation", "React component", "test suite", "CI/CD setup").
-4. **Right-size tasks** — batch tasks that would take < 5 min into larger worker assignments.
-5. **Create orchestration bead** — track the orchestrator's own planning/coordination work in a bead.
-6. **Batch near-identical tasks** — when 3+ tasks share identical structure (same pattern, same file domain, similar size, <20% context each), assign them to a single worker with sequential sub-instructions and multiple bead IDs. This avoids wasting ~80% context per single-task worker spawn.
-7. **Reference identifiers, not line numbers** — use function/struct/class names in task descriptions (e.g., "update `update_session()` in `src/store.rs`"). Line numbers drift as parallel workers modify files.
-8. **Limit batch diversity** — 4+ domain-diverse tasks in one worker risks context exhaustion. Prefer 2-3 tasks per batch, all in the same domain. File-adjacent but conceptually distinct tasks can go to separate workers even if serialized.
 9. **Acceptance criteria** — every task must include acceptance criteria stating observable, testable behavior from the spec's perspective. "Function exists" is not acceptance; "function is called in the pipeline and produces observable result" is.
-10. **Cross-command features** — if a spec requirement spans multiple commands or modules, create one task per command/module with its own acceptance criteria. Never combine — cross-command tasks reliably produce one implementation and one omission.
-11. **Pre-surface technical obstacles** — when planning identifies technical friction (API shape mismatch, library constraints, ordering dependencies), write the obstacle and its resolution into the task description. Workers discovering obstacles mid-implementation defer; workers given the solution upfront implement it.
 12. **Spec-section references** — each task should cite the spec section it implements (e.g., `Spec: spec.md §3 — VAD preprocessing`). After all tasks are created, verify coverage: every spec section should map to at least one task.
-13. **Soft dependencies (depends_on)** — if task A creates types/interfaces that task B imports, add `depends_on:Task A title` in Task B's Dependencies section. This prevents batching them into the same parallel group without blocking readiness.
-14. **Every "implement package" task must produce tests** — add to the task description: "Write unit tests for all pure functions. Table-driven tests for normalization/conversion helpers are mandatory."
-15. **Producer tasks must name their consumer** — "implement `pkg/cache`" is incomplete without "used by Task N — `scan.go` to gate feed downloads on `cache.IsStale()`". Without an explicit consumer, the package becomes dead code. If no consumer task exists, create a corresponding "wire X into Y" task.
-16. **Never paraphrase spec identifiers** — flag names, command names, field names, and type names in worker prompts must be copied verbatim from the spec. Do not type `--date1` from memory when the spec says `--date-a`. Reference the spec section instead: "implement the diff command as defined in spec.md §CLI Surface — read that section and use the exact flag names."
 
-**Good treeflow task description:**
-> "Create `internal/workflow/oom_report.go`: OOMReportWorkflow(ctx) error — runs weekly. Files (new): `internal/workflow/oom_report.go`, `internal/workflow/oom_report_test.go`. Used by: Task 12 — `cmd/pipeline.go` calls OOMReportWorkflow in the weekly schedule. Spec: spec.md §4.2. [Go implementation]"
+Full planning rules (batching, soft-deps, verbatim identifiers, consumer naming, etc.): [PLANNING.md](PLANNING.md).
 
 After planning:
 
@@ -294,56 +251,9 @@ The orchestrator does NOT perform final acceptance verification itself — it ha
 
 The orchestrator's continuous verification (architect checkpoints + code review at phase gates) catches most issues. Independent verification catches anything that slipped through.
 
-## Error Handling
+## Troubleshooting
 
-**`bd` command fails with "not found":** Run `bd doctor`, inform user.
-
-**"no repository found":** Run `bd init` if user wants to start tracking.
-
-**Worker spawn fails:** Retry once. If still fails, notify user.
-
-**Duplicate dispatch (same worker name used twice):** The second spawn creates a new agent — the first is orphaned. Always check `tf.py registry` before dispatching to avoid name collisions.
-
-**SendMessage to dead worker:** If the agent no longer exists, spawn fresh.
-
-**Context file conflicts:** Only orchestrator writes context files — prevents conflicts.
-
-**All workers busy (at max concurrent):** Wait for completions before spawning more.
-
-**Dependency graph has cycles:** Detect via `bd graph --all`, report to user.
-
-## Anti-Patterns
-
-**Orchestrator behavior:**
-- Reading/writing project source code (delegate to workers always)
-- Running `git add`/`git commit` on source files (only `.beads/` files)
-- Running `git stash -u` or `git stash --include-untracked` — stashes `.beads/context-*/` files, breaking all state tracking
-- Accumulating full `<task-notification>` results in context (extract summary, discard rest)
-- Editing `registry.json` manually (always use `tf.py`)
-- Spawning workers for trivial tasks (batch them, or close directly with `tf.py close` for pure verification tasks like version checks or infrastructure confirmation)
-
-**Worker management:**
-- Spawning workers without `name` parameter (can't reuse unnamed workers)
-- Spawning more workers than independent ready tasks
-- Killing workers — let them complete or self-report
-- **Resuming a session without running `tf.py sync` first** — see [Entry Protocol → Sync on Resume](#sync-on-resume).
-- Reusing workers when remaining context is too small (sync handles this automatically)
-- Spawning N workers for N near-identical small tasks (batch into one worker)
-- **Routing a discovered fix worker-to-worker via `SendMessage` instead of through the orchestrator** — if a worker finds a bug and messages a peer to fix it while the orchestrator independently files+dispatches the same fix, both converge on duplicate work. Prefer reporting discovered fixes back to the orchestrator, which owns dedup and dispatch.
-
-**Planning:**
-- Tasks without target file paths in descriptions
-- Ignoring file conflicts when parallelizing
-- Not marking `[parallel]` groups during planning
-
-**Commands:**
-- Using `--json` without `| jq -c` for `bd` commands (wastes tokens)
-- Using `bd dep add A B` for blocking deps (reversed argument order) — use `tf.py dep A B` instead (idempotent)
-- Making separate Bash calls for related operations (chain with `&&`)
-- Dispatching integration before `tf.py phase-gate` returns `pass: true`
-- Validating `bd_path` with `Path.exists()` or `shutil.which()` — macOS sandbox blocks `stat()` on agent subprocess paths even when `execve` works. Trust the stored path.
-- Skipping the pre-dispatch smoke test (`tf.py bd-path`) — catch infrastructure bugs before workers hit them
-- Using bare `bd list --json` without `--limit 500` — bd defaults to 50 results, silently truncating large graphs. `tf.py` handles this internally; only matters when calling `bd` directly.
+Error handling and the full anti-pattern list: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ---
 

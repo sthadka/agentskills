@@ -18,20 +18,7 @@ You are a collaborative thinking partner. Your job is to help the user sculpt va
 
 ## Git Tracking
 
-Every sculptor session builds an iteration history through commits. Never squash or amend these commits — the iteration history is the point.
-
-1. **Commit after every AI write.** Whenever the skill creates or updates a document (research.md, idea.md, spec.md, plan.md, appendix files), commit the `{idea-name}/` directory with a message like:
-   - `my-idea: draft — initial idea document`
-   - `my-idea: revision — addressed round 2 annotations`
-   - `my-idea: spec — technical spec first draft`
-2. **Commit after user annotates.** When the user says they're done annotating and before the skill processes annotations, commit with:
-   - `my-idea: annotate — round 2 feedback on idea.md`
-   - This preserves the raw annotations before they get removed.
-3. **Commit message format:**
-   - Prefix: `<idea-name>`
-   - Phase: `research`, `draft`, `annotate`, `revision`, `spec`, `plan`, `finalize`, `feedback`
-   - Description: one short clause, no period
-4. **Only commit files inside `{idea-name}/`.** Don't stage anything outside the idea directory.
+Every sculptor session builds an iteration history through commits. See [GIT-TRACKING.md](GIT-TRACKING.md) for commit cadence and message format.
 
 <HARD-GATE>
 This skill NEVER scaffolds projects, creates source code files, or takes implementation actions.
@@ -173,6 +160,11 @@ Create additional artifacts once we have a crisp idea document, once the user ap
 
 Each artifact goes through its own annotation cycle if the user wants. If the user responds by requesting the next artifact instead of annotating (e.g., "create the plan" after the spec is written), treat that as implicit approval of the current artifact and proceed without re-asking.
 
+### Efficiency
+
+- **The escalation shortcut works.** When users declare upfront which artifacts they want ("give me spec and plan, skip PRD"), respect that and plan the session arc accordingly. Knowing the destination early helps pace the work.
+- **Don't re-research during escalation.** The spec and plan should build on research and idea doc findings, not trigger new exploration. Only research further if the user raises new questions the existing research doesn't cover.
+
 After the user approves each escalated artifact:
 1. Remove all annotation markers
 2. Polish formatting and consistency
@@ -217,7 +209,7 @@ Proceed to Phase 7 once user approves.
 Share feedback after the previous phase is finalized:
 
 1. Write `{idea-name}/feedback.md`. See [FEEDBACK-TEMPLATE.md](FEEDBACK-TEMPLATE.md) for the template.
-2. This captures learnings while they're fresh and feeds back into the Learnings section.
+2. This captures learnings while they're fresh for the next session.
 3. **Commit**: `<idea-name>: feedback — session retrospective`
 
 **The skill is complete. The polished documents are the deliverables. We'll not write any code from here onwards.**
@@ -234,54 +226,11 @@ When a user raises a concern in a later phase that affects an earlier artifact (
 
 This keeps the document chain internally consistent rather than letting later artifacts drift from earlier ones.
 
-## Validation Tool
+## Validation
 
-`sculptor.py` provides deterministic validation. Use it at the specified points — don't rely on manual grep or visual inspection for these checks.
+`sculptor.py` provides deterministic validation — run it at the specified points, never manual grep.
 
-```
-python3 ~/.claude/skills/sculptor/sculptor.py <command> [args]
-```
-
-| Command | When to use | What it checks |
-|---|---|---|
-| `phase <dir>` | Session resumption | Which files exist, which phase we're in, pending annotations |
-| `annotations <file>` | Before addressing annotations | Extracts all `>>` lines with line numbers and parsed prefixes |
-| `verify-clean <file>` | After addressing annotations | Confirms all `>>` lines were removed (returns PASS/FAIL) |
-| `lint-spec <spec.md>` | Before asking user to annotate spec | Dead types, path consistency, TODOs, untagged code blocks |
-| `lint-plan <plan.md> --spec <spec.md>` | Before asking user to annotate plan | Missing AC lines, missing sections, spec coverage table validation |
-| `lint-cross <dir>` | After writing spec + plan | Appendix link resolution, spec type coverage in plan, cross-reference consistency |
-| `export-beads <dir>` | Phase 6 (finalize) | Generates `.beads/beads-graph.jsonl` and `invariants.md`. Add `--run` to execute `bd create --graph` atomically |
-
-### Required integration points
-
-1. **Session resumption**: Run `phase <dir>` instead of manually checking files.
-2. **Before addressing annotations**: Run `annotations <file>` to get the full list — don't grep manually.
-3. **After addressing annotations**: Run `verify-clean <file>` before telling the user changes are done.
-4. **After writing spec.md**: Run `lint-spec <spec.md>` and fix any issues before presenting to user.
-5. **After writing plan.md**: Run `lint-plan <plan.md> --spec <spec.md>` and fix any issues before presenting to user.
-6. **After writing spec + plan**: Run `lint-cross <dir>` to catch cross-document drift (broken appendix links, spec types missing from plan, bad spec section refs).
-7. **Phase 6 (finalize)**: If the user wants beads integration, run `export-beads <dir> --run` to create issues with dependencies and parent-child relationships atomically via `bd create --graph`.
-
-## Session Continuity
-
-All state lives in the `{idea-name}/` directory. If a session ends and resumes later:
-
-1. Run `sculptor.py phase {idea-name}/` to detect current state
-2. Read files identified as present
-3. Tell the user where you're picking up and confirm before continuing
-
-## Learnings & Improvements
-
-_Captured from real sculptor sessions. Apply these patterns._
-
-### Spec Quality
-
-See [SPEC-TEMPLATE.md](SPEC-TEMPLATE.md) for detailed spec quality learnings.
-
-### Efficiency
-
-- **The escalation shortcut works.** When users declare upfront which artifacts they want ("give me spec and plan, skip PRD"), respect that and plan the session arc accordingly. Knowing the destination early helps pace the work.
-- **Don't re-research during escalation.** The spec and plan should build on research and idea doc findings, not trigger new exploration. Only research further if the user raises new questions the existing research doesn't cover.
+See [VALIDATION.md](VALIDATION.md) for the command table, required integration points, and session-resumption steps.
 
 ## Anti-Patterns (DO NOT DO)
 
