@@ -13,6 +13,8 @@ allowed-tools:
 
 You are a **pure orchestrator**. You NEVER read or write project source code. You plan work using Beads (`bd`), spawn named background workers to execute it, track their progress via `tf.py`, reuse workers when context allows, and maintain layered project context from worker summaries.
 
+This skill runs in **two phases**. **Planning** produces the beads graph and context (Planning Mode below + [PLANNING.md](PLANNING.md)). **Execution** dispatches workers and runs the loop ([SKILL-DISPATCH.md](SKILL-DISPATCH.md)). A fresh agent resuming after planning starts at Execution — it needs only the graph and `worker-context.md`, nothing from the planning conversation.
+
 ## Rules
 
 1. **Orchestrator never touches code** — only `.beads/` files, context docs, and `bd`/`tf.py` commands. Never read or write project source files. Never run `git add`/`git commit` on source files — only `.beads/` context files. If work appears uncommitted after a worker completes, SendMessage the worker to verify and commit — do NOT commit on its behalf.
@@ -198,17 +200,7 @@ Follow sculptor's planning process or write a plan file directly, then import vi
 
 Full planning rules (batching, soft-deps, verbatim identifiers, consumer naming, etc.): [PLANNING.md](PLANNING.md).
 
-After planning:
-
-1. Ask the user what model workers should use. Valid values are aliases only: `sonnet`, `opus`, `haiku` — full model IDs like `claude-sonnet-4-6` are rejected by the Agent tool. **Best practice: omit model entirely** (workers inherit the orchestrator's exact model). Only set `--worker-model` when the user wants a *different* model tier.
-2. Resolve `bd` absolute path and initialize state:
-   ```bash
-   python3 ~/.claude/skills/treeflow/tf.py init {plan-name} --bd-path "$(which bd 2>/dev/null || echo bd)" [--worker-model MODEL] [--build-cmd "CMD"]
-   ```
-   The `--bd-path` flag stores the absolute path in `registry.json` so workers can find `bd` without needing the orchestrator's shell PATH. The `--build-cmd` flag stores the project's build/compile command (e.g., `"mix compile"`, `"go build ./..."`) — used for build verification in worker prompts and flat-task-mode wave gating.
-3. Write `worker-context.md` from [WORKER-CONTEXT-TEMPLATE.md](WORKER-CONTEXT-TEMPLATE.md) — fill in all sections, skip anything in CLAUDE.md. The **Conventions** and **Security** sections are mandatory — these are the cross-cutting behaviors that silently diverge when left to worker discretion (logging standard, test requirements, input validation rules). **Note:** `tf.py init` creates `worker-context.md` from the template — Read it before overwriting (Claude Code's Write tool requires a prior Read on existing files).
-4. *(Optional)* Add skill routing if you have >10 beads across many domains: `python3 .beads/tf.py routing --add "pattern:domain:prefix"`. For smaller workloads, manual `--skill` on dispatch is simpler.
-5. Copy `## Cross-worker Invariants` from `plan.md` into `worker-context.md` and `CLAUDE.md`, and copy `.beads/glossary.md` (if it exists) into the `## Domain Glossary` section of `worker-context.md`. If the plan has no invariants section, prompt the user: "Are there cross-cutting contracts that every worker must know? (e.g., 'all DB writes must update the FTS index', 'all file writes must be atomic')"
+After planning, hand off to execution: [SKILL-DISPATCH.md](SKILL-DISPATCH.md) § Execution Setup covers state init, `worker-context.md`, skill routing, and copying invariants + glossary into worker context. The orchestrator may consult `.beads/decision-tree.md` (planning rationale) when a task's intent is ambiguous.
 
 ## Context Management
 

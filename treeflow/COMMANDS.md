@@ -129,42 +129,68 @@ python3 .beads/tf.py verify --build-cmd "go build ./..." --test-cmd "go test -sh
 
 ## `tf.py` Full Reference
 
-State management commands — all output compact JSON:
+All commands output compact JSON. Grouped by purpose.
 
+### Setup & state
 ```bash
-# Orchestrator commands
 python3 .beads/tf.py init {plan-name} [--bd-path PATH] [--worker-model MODEL] [--idle-timeout N]  # Create context dir + registry + gitignore (--bd-path auto-detected via shutil.which; idle-timeout: minutes before auto-retire, default 8)
-python3 .beads/tf.py dispatch {worker} {bead-id}[,bead-id2] --skill {domain} [--output-file path] [--agent-id ID]  # Record dispatch (agent-id stores the Agent tool's runtime ID for compaction resilience)
-python3 .beads/tf.py notify {worker} [bead] --context-pct N [--auto] [--summary "..."] [--skill domain] [--agent-id ID] [--files "f1,f2"] [--gotcha "..."] [--tokens N] [--duration-ms N]  # Record completion (--auto infers bead/files/skill from registry + git; --tokens/--duration-ms track cost)
-python3 .beads/tf.py batch-notify --pairs "w1:bead1,w2:bead2" --context-pct N [--summary "..."] [--files "f1,f2"] [--gotcha "..."]  # Batch completion for multiple worker:bead pairs
-python3 .beads/tf.py phase-gate {epic-id}                # Check phase complete
-python3 .beads/tf.py smoke-test --build-cmd "cmd" --beads a,b  # Build + wiring check
-python3 .beads/tf.py conflict-check --beads a,b,c                     # File-conflict analysis (section-aware: [section] annotations → low_risk)
-python3 .beads/tf.py wave-plan --beads a,b,c                          # Compute dispatch waves from ready beads (uses conflict-check + active worker files)
-python3 .beads/tf.py sync [--ready-count N]                           # Pre-dispatch: retire stale, flag stalled, return reusable workers
-python3 .beads/tf.py stalled [--threshold-mins N]              # List stalled active workers (default 20 min)
+python3 .beads/tf.py status                              # One-line overview
 python3 .beads/tf.py registry [--status idle] [--skill domain]  # Query workers
 python3 .beads/tf.py registry --worker-model              # Print configured worker model
-python3 .beads/tf.py retire {worker}                     # Mark worker retired
 python3 .beads/tf.py routing --add "pattern:domain:prefix"  # Add routing entry
-python3 .beads/tf.py status                              # One-line overview
-python3 .beads/tf.py close {bead_id} --reason "..."                    # Close bead with normalized JSON output
+python3 .beads/tf.py bd-path                                           # Print resolved bd binary path
+```
+
+### Find work
+```bash
 python3 .beads/tf.py ready                                             # Dispatchable tasks (filtered epics, supplemented from bd list)
 python3 .beads/tf.py recover                                           # Find orphaned in-progress beads (post-compaction recovery)
-python3 .beads/tf.py ad-hoc --name {name} --worker {worker} [--skill domain]  # Register informal task for stall detection
-python3 .beads/tf.py dep {blocker} {blocked} [--remove]                # Add (or --remove) dep idempotently; always emits JSON (bd dep remove does not)
-python3 .beads/tf.py validate-graph [--plan plan.md]                    # Detect suspected sculptor over-linearization (serial chains); cross-check plan [parallel] markers
-python3 .beads/tf.py archive-context [--file NAME] [--max-bytes N] [--force]  # Archive context files > ~48KB by BYTE size, replace with digest
-python3 .beads/tf.py import-graph {file}                                # Import beads-graph.jsonl via bd create --graph
+```
+
+### Dispatch & prompts
+```bash
+python3 .beads/tf.py dispatch {worker} {bead-id}[,bead-id2] --skill {domain} [--output-file path] [--agent-id ID]  # Record dispatch (agent-id stores the Agent tool's runtime ID for compaction resilience)
 python3 .beads/tf.py worker-prompt --beads {id}[,id2,id3] [--reuse --prior-bead {prev}] [--parallel-with bead1,bead2] [--prompt-only] [--write-file] [--inline-context]  # Assemble worker prompt
 # --prompt-only: print raw prompt to stdout (no JSON). --write-file: write prompt to temp file, return {"prompt_file": path} instead of inline prompt
-python3 .beads/tf.py update-context --bead {id} --worker {name} --summary "..." --files "..." [--gotcha "..."]  # Append to context
-python3 .beads/tf.py phase-complete --epic {id} [--build-cmd "cmd"] [--phase-num N]  # Gate + smoke test + summary (includes worker summaries)
-python3 .beads/tf.py verify --build-cmd "cmd" [--test-cmd "cmd"] [--live]           # Build-only by default; --test-cmd runs ONLY with --live (guards costly live tests). Log result in registry
-python3 .beads/tf.py git-cleanup {worker} [--commit]                               # List/commit uncommitted files from a worker's dispatch
-python3 .beads/tf.py bd-path                                           # Print resolved bd binary path
+python3 .beads/tf.py wave-plan --beads a,b,c                          # Compute dispatch waves from ready beads (uses conflict-check + active worker files)
+python3 .beads/tf.py conflict-check --beads a,b,c                     # File-conflict analysis (section-aware: [section] annotations → low_risk)
+python3 .beads/tf.py ad-hoc --name {name} --worker {worker} [--skill domain]  # Register informal task for stall detection
+```
 
-# Worker commands (workers call these — no direct bd usage)
+### Completion & context
+```bash
+python3 .beads/tf.py notify {worker} [bead] --context-pct N [--auto] [--summary "..."] [--skill domain] [--agent-id ID] [--files "f1,f2"] [--gotcha "..."] [--tokens N] [--duration-ms N]  # Record completion (--auto infers bead/files/skill from registry + git; --tokens/--duration-ms track cost)
+python3 .beads/tf.py batch-notify --pairs "w1:bead1,w2:bead2" --context-pct N [--summary "..."] [--files "f1,f2"] [--gotcha "..."]  # Batch completion for multiple worker:bead pairs
+python3 .beads/tf.py update-context --bead {id} --worker {name} --summary "..." --files "..." [--gotcha "..."]  # Append to context
+python3 .beads/tf.py archive-context [--file NAME] [--max-bytes N] [--force]  # Archive context files > ~48KB by BYTE size, replace with digest
+python3 .beads/tf.py close {bead_id} --reason "..."                    # Close bead with normalized JSON output
+```
+
+### Sync & stall
+```bash
+python3 .beads/tf.py sync [--ready-count N]                           # Pre-dispatch: retire stale, flag stalled, return reusable workers
+python3 .beads/tf.py stalled [--threshold-mins N]              # List stalled active workers (default 20 min)
+python3 .beads/tf.py retire {worker}                     # Mark worker retired
+```
+
+### Gates & verification
+```bash
+python3 .beads/tf.py phase-gate {epic-id}                # Check phase complete
+python3 .beads/tf.py phase-complete --epic {id} [--build-cmd "cmd"] [--phase-num N]  # Gate + smoke test + summary (includes worker summaries)
+python3 .beads/tf.py smoke-test --build-cmd "cmd" --beads a,b  # Build + wiring check
+python3 .beads/tf.py verify --build-cmd "cmd" [--test-cmd "cmd"] [--live]           # Build-only by default; --test-cmd runs ONLY with --live (guards costly live tests). Log result in registry
+```
+
+### Graph & deps
+```bash
+python3 .beads/tf.py import-graph {file}                                # Import beads-graph.jsonl via bd create --graph
+python3 .beads/tf.py validate-graph [--plan plan.md]                    # Detect suspected sculptor over-linearization (serial chains); cross-check plan [parallel] markers
+python3 .beads/tf.py dep {blocker} {blocked} [--remove]                # Add (or --remove) dep idempotently; always emits JSON (bd dep remove does not)
+python3 .beads/tf.py git-cleanup {worker} [--commit]                               # List/commit uncommitted files from a worker's dispatch
+```
+
+### Worker commands (workers call these — no direct bd usage)
+```bash
 python3 .beads/tf.py claim {bead_id} [--expected-mins N] # Claim task (with optional time estimate for stall detection)
 python3 .beads/tf.py block {bead_id} --question "..." [--context "..."]  # Mark blocked + create question
 python3 .beads/tf.py discover {bead_id} --title "..." [--description "..."]  # Create discovered work

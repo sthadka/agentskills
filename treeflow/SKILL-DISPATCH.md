@@ -2,6 +2,20 @@
 
 This module covers the full orchestration loop: wave planning, worker dispatch, completion processing, stall detection, and failure recovery. For core rules, quick paths, and entry protocol, see [SKILL.md](SKILL.md).
 
+## Execution Setup
+
+Run once after planning, before the loop. A fresh post-planning agent starts here.
+
+1. Ask the user what model workers should use. Valid values are aliases only: `sonnet`, `opus`, `haiku` — full model IDs like `claude-sonnet-4-6` are rejected by the Agent tool. **Best practice: omit model entirely** (workers inherit the orchestrator's exact model). Only set `--worker-model` when the user wants a *different* model tier.
+2. Resolve `bd` absolute path and initialize state:
+   ```bash
+   python3 ~/.claude/skills/treeflow/tf.py init {plan-name} --bd-path "$(which bd 2>/dev/null || echo bd)" [--worker-model MODEL] [--build-cmd "CMD"]
+   ```
+   The `--bd-path` flag stores the absolute path in `registry.json` so workers can find `bd` without needing the orchestrator's shell PATH. The `--build-cmd` flag stores the project's build/compile command (e.g., `"mix compile"`, `"go build ./..."`) — used for build verification in worker prompts and flat-task-mode wave gating.
+3. Write `worker-context.md` from [WORKER-CONTEXT-TEMPLATE.md](WORKER-CONTEXT-TEMPLATE.md) — fill in all sections, skip anything in CLAUDE.md. The **Conventions** and **Security** sections are mandatory — these are the cross-cutting behaviors that silently diverge when left to worker discretion (logging standard, test requirements, input validation rules). **Note:** `tf.py init` creates `worker-context.md` from the template — Read it before overwriting (Claude Code's Write tool requires a prior Read on existing files).
+4. *(Optional)* Add skill routing if you have >10 beads across many domains: `python3 .beads/tf.py routing --add "pattern:domain:prefix"`. For smaller workloads, manual `--skill` on dispatch is simpler.
+5. Copy `## Cross-worker Invariants` from `plan.md` into `worker-context.md` and `CLAUDE.md`, and copy `.beads/glossary.md` (if it exists) into the `## Domain Glossary` section of `worker-context.md`. If the plan has no invariants section, prompt the user: "Are there cross-cutting contracts that every worker must know? (e.g., 'all DB writes must update the FTS index', 'all file writes must be atomic')"
+
 ## Orchestration Loop
 
 Run continuously until all beads are closed or user input is needed.
