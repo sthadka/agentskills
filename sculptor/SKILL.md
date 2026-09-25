@@ -58,6 +58,8 @@ Seed the first frontier with: the problem and who it's for, what success looks l
 
 The interview is done when the frontier is empty — every branch visited, nothing silently assumed. Confirm shared understanding with the user before moving on.
 
+**Leave a paper trail as you go** — run the interview and the domain model together. As terms crystallize, capture the idea's ubiquitous language in `{idea-name}/glossary.md` right then, not in a batch at the end. Be opinionated: when the user reaches for a vague or overloaded term ("account" doing three jobs), propose one precise canonical name and list the rejected synonyms; when a term conflicts with what the glossary already says, call it out. When a decision is **hard to reverse, surprising without context, and a genuine trade-off**, record it with the alternatives you weighed so the "why" survives. See [GLOSSARY-TEMPLATE.md](GLOSSARY-TEMPLATE.md) for the format.
+
 ## Phase 2: RESEARCH
 
 Gather context from all available sources: codebase, web, user-provided docs, and targeted dialogue.
@@ -209,7 +211,8 @@ When the user approves the document:
    - Idea
    - Technical spec
    - Implementation plan
-3. **Export beads plan** — Run `sculptor.py export-beads {idea-name}/` to generate `.beads/beads-graph.jsonl` and `invariants.md`. These files are the handoff artifact for implementation — they travel with the idea directory when copied to a new project.
+   - Glossary (if one was built)
+3. **Export beads plan** — Run `sculptor.py export-beads {idea-name}/` to generate `.beads/beads-graph.jsonl`, `invariants.md`, and (when a `glossary.md` exists) `.beads/glossary.md`. These files are the handoff artifact for implementation — they travel with the idea directory when copied to a new project, and treeflow imports the glossary as a shared worker context layer.
 4. **Commit**: `<idea-name>: finalize — polished artifacts and beads export`
 
 Proceed to Phase 7 once user approves.

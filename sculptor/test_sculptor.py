@@ -1266,6 +1266,44 @@ class TestExportBeads:
         inv_content = (beads_dir / "invariants.md").read_text()
         assert "atomic" in inv_content
 
+    def test_copies_glossary_when_present(self, idea_dir):
+        write_file(idea_dir / "plan.md", """\
+            # Implementation Plan: Glossary Test
+
+            ## Phase 1: Build
+            - [ ] 1.1: A
+              - AC: A done
+        """)
+        write_file(idea_dir / "glossary.md", """\
+            # Glossary
+
+            ## Language
+
+            **Materialization**:
+            The cascade that resolves deferred values.
+        """)
+
+        r = sculptor(["export-beads", str(idea_dir)])
+        assert r["returncode"] == 0
+
+        glossary_out = idea_dir / ".beads" / "glossary.md"
+        assert glossary_out.exists()
+        assert "Materialization" in glossary_out.read_text()
+        assert ".beads/glossary.md" in r["stdout"]
+
+    def test_no_glossary_when_absent(self, idea_dir):
+        write_file(idea_dir / "plan.md", """\
+            # Implementation Plan: No Glossary
+
+            ## Phase 1: Build
+            - [ ] 1.1: A
+              - AC: A done
+        """)
+
+        r = sculptor(["export-beads", str(idea_dir)])
+        assert r["returncode"] == 0
+        assert not (idea_dir / ".beads" / "glossary.md").exists()
+
     def test_no_plan_file(self, idea_dir):
         r = sculptor(["export-beads", str(idea_dir)])
         assert r["returncode"] == 1

@@ -55,6 +55,7 @@ After running `/sculptor export-beads <idea-dir>`:
 1. `python3 .beads/tf.py import-graph .beads/beads-graph.jsonl`
 2. `python3 .beads/tf.py init <project> --epic <epic-id>`
 3. `python3 .beads/tf.py ready`
+4. Copy `.beads/glossary.md` (if present) into the `## Domain Glossary` section of `worker-context.md` so every worker speaks one language.
 
 ### Mode Detection
 - Bead management only (create/list/triage) → Quick Paths above. STOP.
@@ -210,7 +211,7 @@ After planning:
    The `--bd-path` flag stores the absolute path in `registry.json` so workers can find `bd` without needing the orchestrator's shell PATH. The `--build-cmd` flag stores the project's build/compile command (e.g., `"mix compile"`, `"go build ./..."`) — used for build verification in worker prompts and flat-task-mode wave gating.
 3. Write `worker-context.md` from [WORKER-CONTEXT-TEMPLATE.md](WORKER-CONTEXT-TEMPLATE.md) — fill in all sections, skip anything in CLAUDE.md. The **Conventions** and **Security** sections are mandatory — these are the cross-cutting behaviors that silently diverge when left to worker discretion (logging standard, test requirements, input validation rules). **Note:** `tf.py init` creates `worker-context.md` from the template — Read it before overwriting (Claude Code's Write tool requires a prior Read on existing files).
 4. *(Optional)* Add skill routing if you have >10 beads across many domains: `python3 .beads/tf.py routing --add "pattern:domain:prefix"`. For smaller workloads, manual `--skill` on dispatch is simpler.
-5. Copy `## Cross-worker Invariants` from `plan.md` into `worker-context.md` and `CLAUDE.md`. If the plan has no invariants section, prompt the user: "Are there cross-cutting contracts that every worker must know? (e.g., 'all DB writes must update the FTS index', 'all file writes must be atomic')"
+5. Copy `## Cross-worker Invariants` from `plan.md` into `worker-context.md` and `CLAUDE.md`, and copy `.beads/glossary.md` (if it exists) into the `## Domain Glossary` section of `worker-context.md`. If the plan has no invariants section, prompt the user: "Are there cross-cutting contracts that every worker must know? (e.g., 'all DB writes must update the FTS index', 'all file writes must be atomic')"
 
 ## Context Management
 
