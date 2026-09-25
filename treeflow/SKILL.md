@@ -100,6 +100,10 @@ Run `ToolSearch: "SendMessage"`.
 
 Note `sendmessage: false` in `worker-context.md` under Known Gotchas. Skip the reuse decision tree (section 3) for the entire session — always spawn fresh workers.
 
+### Sync on Resume
+
+When resuming a session (workers may already exist) or after any anomaly, run `python3 .beads/tf.py sync` before dispatching — it auto-retires stale workers and surfaces reuse candidates. A brand-new plan with no prior workers/registry skips this: a first-ever dispatch needs no sync.
+
 ### Find Work
 
 ```bash
@@ -203,16 +207,11 @@ python3 .beads/tf.py import-graph .beads/beads-graph.jsonl
 ```
 This calls `bd create --graph` which handles issues, parent-child hierarchy, and blocking deps atomically.
 
-**Post-import validation is EXPECTED, not optional** — sculptor emits a conservative serial chain whenever the plan's tasks lack `[parallel]` markers, so graph correction after import is the norm (this has recurred across many sessions). Run the automated detector before dispatching:
-```bash
-python3 .beads/tf.py validate-graph --plan plan.md
-```
-It flags suspected over-linearization (serial chains of ≥3 beads where each link has exactly one blocker and one dependent) and, with `--plan`, reports when the plan declares `[parallel]` the graph doesn't reflect. Review each flagged chain and break the false edges:
-```bash
-python3 .beads/tf.py dep <blocker> <blocked> --remove   # emits JSON (bd dep remove does not)
-python3 .beads/tf.py dep <blocker> <blocked>            # add a real edge (idempotent)
-```
-Keep genuinely-required ordering (e.g. `go mod init` before `go build`); only remove edges between independent tasks.
+After import, always validate and correct the graph before dispatching. Sculptor emits a conservative serial chain whenever the plan's tasks lack `[parallel]` markers, so the graph usually needs edges pruned:
+
+1. Run the detector: `python3 .beads/tf.py validate-graph --plan plan.md`. It flags over-linearization (serial chains of ≥3 beads where each link has exactly one blocker and one dependent) and, with `--plan`, reports `[parallel]` markers the graph doesn't reflect.
+2. Break each false edge: `python3 .beads/tf.py dep <blocker> <blocked> --remove` (emits JSON; `bd dep remove` does not).
+3. Add any genuinely-required edge: `python3 .beads/tf.py dep <blocker> <blocked>` (idempotent). Keep real ordering (e.g. `go mod init` before `go build`); only remove edges between independent tasks.
 
 For manual batch creation, use `bd create -f plan.md --json` directly.
 
@@ -327,7 +326,7 @@ The orchestrator's continuous verification (architect checkpoints + code review 
 - Spawning workers without `name` parameter (can't reuse unnamed workers)
 - Spawning more workers than independent ready tasks
 - Killing workers — let them complete or self-report
-- **Resuming an existing session without running `tf.py sync`** — sync auto-retires stale workers and shows reuse candidates. Required when resuming a session (workers may already exist) and after anomalies. **Not required for a brand-new plan** with no prior workers/registry — a first-ever dispatch can skip it. (This resolves the earlier doc contradiction with SKILL-DISPATCH.)
+- **Resuming a session without running `tf.py sync` first** — see [Entry Protocol → Sync on Resume](#sync-on-resume).
 - Reusing workers when remaining context is too small (sync handles this automatically)
 - Spawning N workers for N near-identical small tasks (batch into one worker)
 - **Routing a discovered fix worker-to-worker via `SendMessage` instead of through the orchestrator** — if a worker finds a bug and messages a peer to fix it while the orchestrator independently files+dispatches the same fix, both converge on duplicate work. Prefer reporting discovered fixes back to the orchestrator, which owns dedup and dispatch.
