@@ -1,0 +1,34 @@
+{
+  "meta": {
+    "description": "Quran recited after Al-Fatiha in rakah 1 and rakah 2: the 16 short surahs Az-Zalzala (99) to An-Nas (114), one whole surah per group. Ids 527-542 keep the numbering of the author's full Quran table (surahs 2-98 were left out as too long for a chat post), so gaps are expected.",
+    "rule": {
+      "rakah_1": "random group with rakah_1 = true (its successor id + 1 exists in this table)",
+      "rakah_2": "the group with id + 1 (may start the next surah)",
+      "later_rakahs": "Al-Fatiha only"
+    },
+    "numbering": "Standard (Kufic) surah and ayah numbering, same as alquran.cloud.",
+    "count": 16,
+    "eligible_for_rakah_1": 15,
+    "surahs_covered": 16,
+    "first_surah": 99,
+    "last_surah": 114
+  },
+  "groups": [
+    {"id": 527, "surah": 99, "from": 1, "to": 8, "rakah_1": true},
+    {"id": 528, "surah": 100, "from": 1, "to": 11, "rakah_1": true},
+    {"id": 529, "surah": 101, "from": 1, "to": 11, "rakah_1": true},
+    {"id": 530, "surah": 102, "from": 1, "to": 8, "rakah_1": true},
+    {"id": 531, "surah": 103, "from": 1, "to": 3, "rakah_1": true},
+    {"id": 532, "surah": 104, "from": 1, "to": 9, "rakah_1": true},
+    {"id": 533, "surah": 105, "from": 1, "to": 5, "rakah_1": true},
+    {"id": 534, "surah": 106, "from": 1, "to": 4, "rakah_1": true},
+    {"id": 535, "surah": 107, "from": 1, "to": 7, "rakah_1": true},
+    {"id": 536, "surah": 108, "from": 1, "to": 3, "rakah_1": true},
+    {"id": 537, "surah": 109, "from": 1, "to": 6, "rakah_1": true},
+    {"id": 538, "surah": 110, "from": 1, "to": 3, "rakah_1": true},
+    {"id": 539, "surah": 111, "from": 1, "to": 5, "rakah_1": true},
+    {"id": 540, "surah": 112, "from": 1, "to": 4, "rakah_1": true},
+    {"id": 541, "surah": 113, "from": 1, "to": 5, "rakah_1": true},
+    {"id": 542, "surah": 114, "from": 1, "to": 6, "rakah_1": false}
+  ]
+}

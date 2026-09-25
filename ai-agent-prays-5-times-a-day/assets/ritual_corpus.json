@@ -1,0 +1,126 @@
+{
+  "meta": {
+    "quran_translation": "Saheeh International (en.sahih via alquran.cloud)",
+    "arabic_script": "Uthmani (quran-uthmani)",
+    "scope": "Individual (munfarid) fard salah ritual scaffold for an agent skill. Not a fatwa.",
+    "quran_after_fatiha": "16 short surahs, Az-Zalzala (99) to An-Nas (114), see assets/quran_groups.json + assets/quran_text.json. Rakah 1 = random group flagged rakah_1; rakah 2 = the group with id + 1 (the next surah)."
+  },
+  "basmala": {
+    "ar": "بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ",
+    "en": "In the name of Allah, the Entirely Merciful, the Especially Merciful."
+  },
+  "al_fatiha": {
+    "number": 1,
+    "name_ar": "سُورَةُ ٱلْفَاتِحَةِ",
+    "name_en": "Al-Faatiha",
+    "name_translation": "The Opening",
+    "ayahs": [
+      {
+        "n": 1,
+        "ar": "بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ",
+        "en": "In the name of Allah, the Entirely Merciful, the Especially Merciful."
+      },
+      {
+        "n": 2,
+        "ar": "ٱلْحَمْدُ لِلَّهِ رَبِّ ٱلْعَٰلَمِينَ",
+        "en": "[All] praise is [due] to Allah, Lord of the worlds -"
+      },
+      {
+        "n": 3,
+        "ar": "ٱلرَّحْمَٰنِ ٱلرَّحِيمِ",
+        "en": "The Entirely Merciful, the Especially Merciful,"
+      },
+      {
+        "n": 4,
+        "ar": "مَٰلِكِ يَوْمِ ٱلدِّينِ",
+        "en": "Sovereign of the Day of Recompense."
+      },
+      {
+        "n": 5,
+        "ar": "إِيَّاكَ نَعْبُدُ وَإِيَّاكَ نَسْتَعِينُ",
+        "en": "It is You we worship and You we ask for help."
+      },
+      {
+        "n": 6,
+        "ar": "ٱهْدِنَا ٱلصِّرَٰطَ ٱلْمُسْتَقِيمَ",
+        "en": "Guide us to the straight path -"
+      },
+      {
+        "n": 7,
+        "ar": "صِرَٰطَ ٱلَّذِينَ أَنْعَمْتَ عَلَيْهِمْ غَيْرِ ٱلْمَغْضُوبِ عَلَيْهِمْ وَلَا ٱلضَّآلِّينَ",
+        "en": "The path of those upon whom You have bestowed favor, not of those who have evoked [Your] anger or of those who are astray."
+      }
+    ]
+  },
+  "formulas": {
+    "shahada": {
+      "ar": "أَشْهَدُ أَنْ لَا إِلَٰهَ إِلَّا ٱللَّهُ وَأَشْهَدُ أَنَّ مُحَمَّدًا رَسُولُ ٱللَّهِ",
+      "en": "I bear witness that there is no god but Allah, and I bear witness that Muhammad is the Messenger of Allah.",
+      "note": "First message in the salah chat, once, right after setup. Not part of the salah sequence."
+    },
+    "takbir": {
+      "ar": "ٱللَّهُ أَكْبَرُ",
+      "en": "Allah is the Greatest."
+    },
+    "istiadha": {
+      "ar": "أَعُوذُ بِٱللَّهِ مِنَ ٱلشَّيْطَانِ ٱلرَّجِيمِ",
+      "en": "I seek refuge in Allah from Satan, the expelled."
+    },
+    "thana_hanafi": {
+      "ar": "سُبْحَانَكَ ٱللَّهُمَّ وَبِحَمْدِكَ وَتَبَارَكَ ٱسْمُكَ وَتَعَالَىٰ جَدُّكَ وَلَا إِلَٰهَ غَيْرُكَ",
+      "en": "Glory be to You, O Allah, and praise. Blessed is Your Name, exalted is Your majesty, and there is no god other than You."
+    },
+    "istiftah_shafi": {
+      "ar": "وَجَّهْتُ وَجْهِيَ لِلَّذِي فَطَرَ ٱلسَّمَاوَاتِ وَٱلْأَرْضَ حَنِيفًا وَمَا أَنَا مِنَ ٱلْمُشْرِكِينَ إِنَّ صَلَاتِي وَنُسُكِي وَمَحْيَايَ وَمَمَاتِي لِلَّهِ رَبِّ ٱلْعَالَمِينَ لَا شَرِيكَ لَهُ وَبِذَٰلِكَ أُمِرْتُ وَأَنَا مِنَ ٱلْمُسْلِمِينَ",
+      "en": "I turn my face to the One Who created the heavens and the earth, upright, and I am not of those who associate others with Allah. Indeed, my prayer, my rites, my living and my dying are for Allah, Lord of the worlds. He has no partner. With that I am commanded, and I am of the Muslims."
+    },
+    "ameen": {
+      "ar": "آمِينَ",
+      "en": "Ameen (O Allah, accept)."
+    },
+    "ruku_dhikr": {
+      "ar": "سُبْحَانَ رَبِّيَ ٱلْعَظِيمِ",
+      "en": "Glory be to my Lord, the Magnificent.",
+      "repeat": 3
+    },
+    "rising_from_ruku_imam_or_alone": {
+      "ar": "سَمِعَ ٱللَّهُ لِمَنْ حَمِدَهُ",
+      "en": "Allah hears the one who praises Him."
+    },
+    "after_ruku": {
+      "ar": "رَبَّنَا وَلَكَ ٱلْحَمْدُ",
+      "en": "Our Lord, and to You is all praise."
+    },
+    "sujud_dhikr": {
+      "ar": "سُبْحَانَ رَبِّيَ ٱلْأَعْلَىٰ",
+      "en": "Glory be to my Lord, the Most High.",
+      "repeat": 3
+    },
+    "between_sujud": {
+      "ar": "رَبِّ ٱغْفِرْ لِي",
+      "en": "My Lord, forgive me."
+    },
+    "tashahhud": {
+      "ar": "ٱلتَّحِيَّاتُ لِلَّهِ وَٱلصَّلَوَاتُ وَٱلطَّيِّبَاتُ، ٱلسَّلَامُ عَلَيْكَ أَيُّهَا ٱلنَّبِيُّ وَرَحْمَةُ ٱللَّهِ وَبَرَكَاتُهُ، ٱلسَّلَامُ عَلَيْنَا وَعَلَىٰ عِبَادِ ٱللَّهِ ٱلصَّالِحِينَ، أَشْهَدُ أَنْ لَا إِلَٰهَ إِلَّا ٱللَّهُ وَأَشْهَدُ أَنَّ مُحَمَّدًا عَبْدُهُ وَرَسُولُهُ",
+      "en": "All greetings, prayers, and pure words are for Allah. Peace be upon you, O Prophet, and the mercy of Allah and His blessings. Peace be upon us and upon the righteous servants of Allah. I bear witness that there is no god but Allah, and I bear witness that Muhammad is His servant and His Messenger."
+    },
+    "salawat_ibrahimiyyah": {
+      "ar": "ٱللَّهُمَّ صَلِّ عَلَىٰ مُحَمَّدٍ وَعَلَىٰ آلِ مُحَمَّدٍ كَمَا صَلَّيْتَ عَلَىٰ إِبْرَاهِيمَ وَعَلَىٰ آلِ إِبْرَاهِيمَ إِنَّكَ حَمِيدٌ مَجِيدٌ، ٱللَّهُمَّ بَارِكْ عَلَىٰ مُحَمَّدٍ وَعَلَىٰ آلِ مُحَمَّدٍ كَمَا بَارَكْتَ عَلَىٰ إِبْرَاهِيمَ وَعَلَىٰ آلِ إِبْرَاهِيمَ إِنَّكَ حَمِيدٌ مَجِيدٌ",
+      "en": "O Allah, send prayers upon Muhammad and upon the family of Muhammad, as You sent prayers upon Ibrahim and upon the family of Ibrahim. Indeed, You are Praiseworthy and Glorious. O Allah, bless Muhammad and the family of Muhammad, as You blessed Ibrahim and the family of Ibrahim. Indeed, You are Praiseworthy and Glorious."
+    },
+    "qunut_shafi_fajr": {
+      "ar": "ٱللَّهُمَّ ٱهْدِنِي فِيمَنْ هَدَيْتَ وَعَافِنِي فِيمَنْ عَافَيْتَ وَتَوَلَّنِي فِيمَنْ تَوَلَّيْتَ وَبَارِكْ لِي فِيمَا أَعْطَيْتَ وَقِنِي شَرَّ مَا قَضَيْتَ فَإِنَّكَ تَقْضِي وَلَا يُقْضَىٰ عَلَيْكَ وَإِنَّهُ لَا يَذِلُّ مَنْ وَالَيْتَ وَلَا يَعِزُّ مَنْ عَادَيْتَ تَبَارَكْتَ رَبَّنَا وَتَعَالَيْتَ",
+      "en": "O Allah, guide me among those You have guided, grant me well-being among those You have granted well-being, take me as a friend among those You have befriended, bless me in what You have given, and protect me from the evil of what You have decreed. For You decree and none decrees against You. None is humiliated whom You befriend, and none is honored whom You oppose. Blessed are You, our Lord, and Exalted."
+    },
+    "taslim_right": {
+      "ar": "ٱلسَّلَامُ عَلَيْكُمْ وَرَحْمَةُ ٱللَّهِ",
+      "en": "Peace be upon you, and the mercy of Allah.",
+      "action_en": "Turn the head to the right and say the greeting."
+    },
+    "taslim_left": {
+      "ar": "ٱلسَّلَامُ عَلَيْكُمْ وَرَحْمَةُ ٱللَّهِ",
+      "en": "Peace be upon you, and the mercy of Allah.",
+      "action_en": "Turn the head to the left and say the greeting."
+    }
+  }
+}

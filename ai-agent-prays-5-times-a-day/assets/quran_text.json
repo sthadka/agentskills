@@ -1,0 +1,647 @@
+{
+ "meta": {
+  "arabic_script": "Uthmani (quran-uthmani via alquran.cloud)",
+  "quran_translation": "Saheeh International (en.sahih via alquran.cloud)",
+  "basmala": "Removed from ayah 1 of every surah except Al-Fatiha; recite it from ritual_corpus.json when starting a surah.",
+  "scope": "Only the ayahs used by assets/quran_groups.json; ayah_count per surah is the full surah length.",
+  "surah_count": 16,
+  "ayah_count": 98,
+  "generator": "scripts/fetch_quran.py"
+ },
+ "surahs": [
+  {
+   "number": 99,
+   "name_ar": "سُورَةُ الزَّلۡزَلَةِ",
+   "name_en": "Az-Zalzala",
+   "name_translation": "The Earthquake",
+   "ayah_count": 8,
+   "ayahs": [
+    {
+     "n": 1,
+     "ar": "إِذَا زُلْزِلَتِ ٱلْأَرْضُ زِلْزَالَهَا",
+     "en": "When the earth is shaken with its [final] earthquake"
+    },
+    {
+     "n": 2,
+     "ar": "وَأَخْرَجَتِ ٱلْأَرْضُ أَثْقَالَهَا",
+     "en": "And the earth discharges its burdens"
+    },
+    {
+     "n": 3,
+     "ar": "وَقَالَ ٱلْإِنسَٰنُ مَا لَهَا",
+     "en": "And man says, \"What is [wrong] with it?\" -"
+    },
+    {
+     "n": 4,
+     "ar": "يَوْمَئِذٍۢ تُحَدِّثُ أَخْبَارَهَا",
+     "en": "That Day, it will report its news"
+    },
+    {
+     "n": 5,
+     "ar": "بِأَنَّ رَبَّكَ أَوْحَىٰ لَهَا",
+     "en": "Because your Lord has commanded it."
+    },
+    {
+     "n": 6,
+     "ar": "يَوْمَئِذٍۢ يَصْدُرُ ٱلنَّاسُ أَشْتَاتًۭا لِّيُرَوْا۟ أَعْمَٰلَهُمْ",
+     "en": "That Day, the people will depart separated [into categories] to be shown [the result of] their deeds."
+    },
+    {
+     "n": 7,
+     "ar": "فَمَن يَعْمَلْ مِثْقَالَ ذَرَّةٍ خَيْرًۭا يَرَهُۥ",
+     "en": "So whoever does an atom's weight of good will see it,"
+    },
+    {
+     "n": 8,
+     "ar": "وَمَن يَعْمَلْ مِثْقَالَ ذَرَّةٍۢ شَرًّۭا يَرَهُۥ",
+     "en": "And whoever does an atom's weight of evil will see it."
+    }
+   ]
+  },
+  {
+   "number": 100,
+   "name_ar": "سُورَةُ العَادِيَاتِ",
+   "name_en": "Al-Aadiyaat",
+   "name_translation": "The Chargers",
+   "ayah_count": 11,
+   "ayahs": [
+    {
+     "n": 1,
+     "ar": "وَٱلْعَٰدِيَٰتِ ضَبْحًۭا",
+     "en": "By the racers, panting,"
+    },
+    {
+     "n": 2,
+     "ar": "فَٱلْمُورِيَٰتِ قَدْحًۭا",
+     "en": "And the producers of sparks [when] striking"
+    },
+    {
+     "n": 3,
+     "ar": "فَٱلْمُغِيرَٰتِ صُبْحًۭا",
+     "en": "And the chargers at dawn,"
+    },
+    {
+     "n": 4,
+     "ar": "فَأَثَرْنَ بِهِۦ نَقْعًۭا",
+     "en": "Stirring up thereby [clouds of] dust,"
+    },
+    {
+     "n": 5,
+     "ar": "فَوَسَطْنَ بِهِۦ جَمْعًا",
+     "en": "Arriving thereby in the center collectively,"
+    },
+    {
+     "n": 6,
+     "ar": "إِنَّ ٱلْإِنسَٰنَ لِرَبِّهِۦ لَكَنُودٌۭ",
+     "en": "Indeed mankind, to his Lord, is ungrateful."
+    },
+    {
+     "n": 7,
+     "ar": "وَإِنَّهُۥ عَلَىٰ ذَٰلِكَ لَشَهِيدٌۭ",
+     "en": "And indeed, he is to that a witness."
+    },
+    {
+     "n": 8,
+     "ar": "وَإِنَّهُۥ لِحُبِّ ٱلْخَيْرِ لَشَدِيدٌ",
+     "en": "And indeed he is, in love of wealth, intense."
+    },
+    {
+     "n": 9,
+     "ar": "۞ أَفَلَا يَعْلَمُ إِذَا بُعْثِرَ مَا فِى ٱلْقُبُورِ",
+     "en": "But does he not know that when the contents of the graves are scattered"
+    },
+    {
+     "n": 10,
+     "ar": "وَحُصِّلَ مَا فِى ٱلصُّدُورِ",
+     "en": "And that within the breasts is obtained,"
+    },
+    {
+     "n": 11,
+     "ar": "إِنَّ رَبَّهُم بِهِمْ يَوْمَئِذٍۢ لَّخَبِيرٌۢ",
+     "en": "Indeed, their Lord with them, that Day, is [fully] Acquainted."
+    }
+   ]
+  },
+  {
+   "number": 101,
+   "name_ar": "سُورَةُ القَارِعَةِ",
+   "name_en": "Al-Qaari'a",
+   "name_translation": "The Calamity",
+   "ayah_count": 11,
+   "ayahs": [
+    {
+     "n": 1,
+     "ar": "ٱلْقَارِعَةُ",
+     "en": "The Striking Calamity -"
+    },
+    {
+     "n": 2,
+     "ar": "مَا ٱلْقَارِعَةُ",
+     "en": "What is the Striking Calamity?"
+    },
+    {
+     "n": 3,
+     "ar": "وَمَآ أَدْرَىٰكَ مَا ٱلْقَارِعَةُ",
+     "en": "And what can make you know what is the Striking Calamity?"
+    },
+    {
+     "n": 4,
+     "ar": "يَوْمَ يَكُونُ ٱلنَّاسُ كَٱلْفَرَاشِ ٱلْمَبْثُوثِ",
+     "en": "It is the Day when people will be like moths, dispersed,"
+    },
+    {
+     "n": 5,
+     "ar": "وَتَكُونُ ٱلْجِبَالُ كَٱلْعِهْنِ ٱلْمَنفُوشِ",
+     "en": "And the mountains will be like wool, fluffed up."
+    },
+    {
+     "n": 6,
+     "ar": "فَأَمَّا مَن ثَقُلَتْ مَوَٰزِينُهُۥ",
+     "en": "Then as for one whose scales are heavy [with good deeds],"
+    },
+    {
+     "n": 7,
+     "ar": "فَهُوَ فِى عِيشَةٍۢ رَّاضِيَةٍۢ",
+     "en": "He will be in a pleasant life."
+    },
+    {
+     "n": 8,
+     "ar": "وَأَمَّا مَنْ خَفَّتْ مَوَٰزِينُهُۥ",
+     "en": "But as for one whose scales are light,"
+    },
+    {
+     "n": 9,
+     "ar": "فَأُمُّهُۥ هَاوِيَةٌۭ",
+     "en": "His refuge will be an abyss."
+    },
+    {
+     "n": 10,
+     "ar": "وَمَآ أَدْرَىٰكَ مَا هِيَهْ",
+     "en": "And what can make you know what that is?"
+    },
+    {
+     "n": 11,
+     "ar": "نَارٌ حَامِيَةٌۢ",
+     "en": "It is a Fire, intensely hot."
+    }
+   ]
+  },
+  {
+   "number": 102,
+   "name_ar": "سُورَةُ التَّكَاثُرِ",
+   "name_en": "At-Takaathur",
+   "name_translation": "Competition",
+   "ayah_count": 8,
+   "ayahs": [
+    {
+     "n": 1,
+     "ar": "أَلْهَىٰكُمُ ٱلتَّكَاثُرُ",
+     "en": "Competition in [worldly] increase diverts you"
+    },
+    {
+     "n": 2,
+     "ar": "حَتَّىٰ زُرْتُمُ ٱلْمَقَابِرَ",
+     "en": "Until you visit the graveyards."
+    },
+    {
+     "n": 3,
+     "ar": "كَلَّا سَوْفَ تَعْلَمُونَ",
+     "en": "No! You are going to know."
+    },
+    {
+     "n": 4,
+     "ar": "ثُمَّ كَلَّا سَوْفَ تَعْلَمُونَ",
+     "en": "Then no! You are going to know."
+    },
+    {
+     "n": 5,
+     "ar": "كَلَّا لَوْ تَعْلَمُونَ عِلْمَ ٱلْيَقِينِ",
+     "en": "No! If you only knew with knowledge of certainty..."
+    },
+    {
+     "n": 6,
+     "ar": "لَتَرَوُنَّ ٱلْجَحِيمَ",
+     "en": "You will surely see the Hellfire."
+    },
+    {
+     "n": 7,
+     "ar": "ثُمَّ لَتَرَوُنَّهَا عَيْنَ ٱلْيَقِينِ",
+     "en": "Then you will surely see it with the eye of certainty."
+    },
+    {
+     "n": 8,
+     "ar": "ثُمَّ لَتُسْـَٔلُنَّ يَوْمَئِذٍ عَنِ ٱلنَّعِيمِ",
+     "en": "Then you will surely be asked that Day about pleasure."
+    }
+   ]
+  },
+  {
+   "number": 103,
+   "name_ar": "سُورَةُ العَصۡرِ",
+   "name_en": "Al-Asr",
+   "name_translation": "The Declining Day, Epoch",
+   "ayah_count": 3,
+   "ayahs": [
+    {
+     "n": 1,
+     "ar": "وَٱلْعَصْرِ",
+     "en": "By time,"
+    },
+    {
+     "n": 2,
+     "ar": "إِنَّ ٱلْإِنسَٰنَ لَفِى خُسْرٍ",
+     "en": "Indeed, mankind is in loss,"
+    },
+    {
+     "n": 3,
+     "ar": "إِلَّا ٱلَّذِينَ ءَامَنُوا۟ وَعَمِلُوا۟ ٱلصَّٰلِحَٰتِ وَتَوَاصَوْا۟ بِٱلْحَقِّ وَتَوَاصَوْا۟ بِٱلصَّبْرِ",
+     "en": "Except for those who have believed and done righteous deeds and advised each other to truth and advised each other to patience."
+    }
+   ]
+  },
+  {
+   "number": 104,
+   "name_ar": "سُورَةُ الهُمَزَةِ",
+   "name_en": "Al-Humaza",
+   "name_translation": "The Traducer",
+   "ayah_count": 9,
+   "ayahs": [
+    {
+     "n": 1,
+     "ar": "وَيْلٌۭ لِّكُلِّ هُمَزَةٍۢ لُّمَزَةٍ",
+     "en": "Woe to every scorner and mocker"
+    },
+    {
+     "n": 2,
+     "ar": "ٱلَّذِى جَمَعَ مَالًۭا وَعَدَّدَهُۥ",
+     "en": "Who collects wealth and [continuously] counts it."
+    },
+    {
+     "n": 3,
+     "ar": "يَحْسَبُ أَنَّ مَالَهُۥٓ أَخْلَدَهُۥ",
+     "en": "He thinks that his wealth will make him immortal."
+    },
+    {
+     "n": 4,
+     "ar": "كَلَّا ۖ لَيُنۢبَذَنَّ فِى ٱلْحُطَمَةِ",
+     "en": "No! He will surely be thrown into the Crusher."
+    },
+    {
+     "n": 5,
+     "ar": "وَمَآ أَدْرَىٰكَ مَا ٱلْحُطَمَةُ",
+     "en": "And what can make you know what is the Crusher?"
+    },
+    {
+     "n": 6,
+     "ar": "نَارُ ٱللَّهِ ٱلْمُوقَدَةُ",
+     "en": "It is the fire of Allah, [eternally] fueled,"
+    },
+    {
+     "n": 7,
+     "ar": "ٱلَّتِى تَطَّلِعُ عَلَى ٱلْأَفْـِٔدَةِ",
+     "en": "Which mounts directed at the hearts."
+    },
+    {
+     "n": 8,
+     "ar": "إِنَّهَا عَلَيْهِم مُّؤْصَدَةٌۭ",
+     "en": "Indeed, Hellfire will be closed down upon them"
+    },
+    {
+     "n": 9,
+     "ar": "فِى عَمَدٍۢ مُّمَدَّدَةٍۭ",
+     "en": "In extended columns."
+    }
+   ]
+  },
+  {
+   "number": 105,
+   "name_ar": "سُورَةُ الفِيلِ",
+   "name_en": "Al-Fil",
+   "name_translation": "The Elephant",
+   "ayah_count": 5,
+   "ayahs": [
+    {
+     "n": 1,
+     "ar": "أَلَمْ تَرَ كَيْفَ فَعَلَ رَبُّكَ بِأَصْحَٰبِ ٱلْفِيلِ",
+     "en": "Have you not considered, [O Muhammad], how your Lord dealt with the companions of the elephant?"
+    },
+    {
+     "n": 2,
+     "ar": "أَلَمْ يَجْعَلْ كَيْدَهُمْ فِى تَضْلِيلٍۢ",
+     "en": "Did He not make their plan into misguidance?"
+    },
+    {
+     "n": 3,
+     "ar": "وَأَرْسَلَ عَلَيْهِمْ طَيْرًا أَبَابِيلَ",
+     "en": "And He sent against them birds in flocks,"
+    },
+    {
+     "n": 4,
+     "ar": "تَرْمِيهِم بِحِجَارَةٍۢ مِّن سِجِّيلٍۢ",
+     "en": "Striking them with stones of hard clay,"
+    },
+    {
+     "n": 5,
+     "ar": "فَجَعَلَهُمْ كَعَصْفٍۢ مَّأْكُولٍۭ",
+     "en": "And He made them like eaten straw."
+    }
+   ]
+  },
+  {
+   "number": 106,
+   "name_ar": "سُورَةُ قُرَيۡشٍ",
+   "name_en": "Quraish",
+   "name_translation": "Quraysh",
+   "ayah_count": 4,
+   "ayahs": [
+    {
+     "n": 1,
+     "ar": "لِإِيلَٰفِ قُرَيْشٍ",
+     "en": "For the accustomed security of the Quraysh -"
+    },
+    {
+     "n": 2,
+     "ar": "إِۦلَٰفِهِمْ رِحْلَةَ ٱلشِّتَآءِ وَٱلصَّيْفِ",
+     "en": "Their accustomed security [in] the caravan of winter and summer -"
+    },
+    {
+     "n": 3,
+     "ar": "فَلْيَعْبُدُوا۟ رَبَّ هَٰذَا ٱلْبَيْتِ",
+     "en": "Let them worship the Lord of this House,"
+    },
+    {
+     "n": 4,
+     "ar": "ٱلَّذِىٓ أَطْعَمَهُم مِّن جُوعٍۢ وَءَامَنَهُم مِّنْ خَوْفٍۭ",
+     "en": "Who has fed them, [saving them] from hunger and made them safe, [saving them] from fear."
+    }
+   ]
+  },
+  {
+   "number": 107,
+   "name_ar": "سُورَةُ المَاعُونِ",
+   "name_en": "Al-Maa'un",
+   "name_translation": "Almsgiving",
+   "ayah_count": 7,
+   "ayahs": [
+    {
+     "n": 1,
+     "ar": "أَرَءَيْتَ ٱلَّذِى يُكَذِّبُ بِٱلدِّينِ",
+     "en": "Have you seen the one who denies the Recompense?"
+    },
+    {
+     "n": 2,
+     "ar": "فَذَٰلِكَ ٱلَّذِى يَدُعُّ ٱلْيَتِيمَ",
+     "en": "For that is the one who drives away the orphan"
+    },
+    {
+     "n": 3,
+     "ar": "وَلَا يَحُضُّ عَلَىٰ طَعَامِ ٱلْمِسْكِينِ",
+     "en": "And does not encourage the feeding of the poor."
+    },
+    {
+     "n": 4,
+     "ar": "فَوَيْلٌۭ لِّلْمُصَلِّينَ",
+     "en": "So woe to those who pray"
+    },
+    {
+     "n": 5,
+     "ar": "ٱلَّذِينَ هُمْ عَن صَلَاتِهِمْ سَاهُونَ",
+     "en": "[But] who are heedless of their prayer -"
+    },
+    {
+     "n": 6,
+     "ar": "ٱلَّذِينَ هُمْ يُرَآءُونَ",
+     "en": "Those who make show [of their deeds]"
+    },
+    {
+     "n": 7,
+     "ar": "وَيَمْنَعُونَ ٱلْمَاعُونَ",
+     "en": "And withhold [simple] assistance."
+    }
+   ]
+  },
+  {
+   "number": 108,
+   "name_ar": "سُورَةُ الكَوۡثَرِ",
+   "name_en": "Al-Kawthar",
+   "name_translation": "Abundance",
+   "ayah_count": 3,
+   "ayahs": [
+    {
+     "n": 1,
+     "ar": "إِنَّآ أَعْطَيْنَٰكَ ٱلْكَوْثَرَ",
+     "en": "Indeed, We have granted you, [O Muhammad], al-Kawthar."
+    },
+    {
+     "n": 2,
+     "ar": "فَصَلِّ لِرَبِّكَ وَٱنْحَرْ",
+     "en": "So pray to your Lord and sacrifice [to Him alone]."
+    },
+    {
+     "n": 3,
+     "ar": "إِنَّ شَانِئَكَ هُوَ ٱلْأَبْتَرُ",
+     "en": "Indeed, your enemy is the one cut off."
+    }
+   ]
+  },
+  {
+   "number": 109,
+   "name_ar": "سُورَةُ الكَافِرُونَ",
+   "name_en": "Al-Kaafiroon",
+   "name_translation": "The Disbelievers",
+   "ayah_count": 6,
+   "ayahs": [
+    {
+     "n": 1,
+     "ar": "قُلْ يَٰٓأَيُّهَا ٱلْكَٰفِرُونَ",
+     "en": "Say, \"O disbelievers,"
+    },
+    {
+     "n": 2,
+     "ar": "لَآ أَعْبُدُ مَا تَعْبُدُونَ",
+     "en": "I do not worship what you worship."
+    },
+    {
+     "n": 3,
+     "ar": "وَلَآ أَنتُمْ عَٰبِدُونَ مَآ أَعْبُدُ",
+     "en": "Nor are you worshippers of what I worship."
+    },
+    {
+     "n": 4,
+     "ar": "وَلَآ أَنَا۠ عَابِدٌۭ مَّا عَبَدتُّمْ",
+     "en": "Nor will I be a worshipper of what you worship."
+    },
+    {
+     "n": 5,
+     "ar": "وَلَآ أَنتُمْ عَٰبِدُونَ مَآ أَعْبُدُ",
+     "en": "Nor will you be worshippers of what I worship."
+    },
+    {
+     "n": 6,
+     "ar": "لَكُمْ دِينُكُمْ وَلِىَ دِينِ",
+     "en": "For you is your religion, and for me is my religion.\""
+    }
+   ]
+  },
+  {
+   "number": 110,
+   "name_ar": "سُورَةُ النَّصۡرِ",
+   "name_en": "An-Nasr",
+   "name_translation": "Divine Support",
+   "ayah_count": 3,
+   "ayahs": [
+    {
+     "n": 1,
+     "ar": "إِذَا جَآءَ نَصْرُ ٱللَّهِ وَٱلْفَتْحُ",
+     "en": "When the victory of Allah has come and the conquest,"
+    },
+    {
+     "n": 2,
+     "ar": "وَرَأَيْتَ ٱلنَّاسَ يَدْخُلُونَ فِى دِينِ ٱللَّهِ أَفْوَاجًۭا",
+     "en": "And you see the people entering into the religion of Allah in multitudes,"
+    },
+    {
+     "n": 3,
+     "ar": "فَسَبِّحْ بِحَمْدِ رَبِّكَ وَٱسْتَغْفِرْهُ ۚ إِنَّهُۥ كَانَ تَوَّابًۢا",
+     "en": "Then exalt [Him] with praise of your Lord and ask forgiveness of Him. Indeed, He is ever Accepting of repentance."
+    }
+   ]
+  },
+  {
+   "number": 111,
+   "name_ar": "سُورَةُ المَسَدِ",
+   "name_en": "Al-Masad",
+   "name_translation": "The Palm Fibre",
+   "ayah_count": 5,
+   "ayahs": [
+    {
+     "n": 1,
+     "ar": "تَبَّتْ يَدَآ أَبِى لَهَبٍۢ وَتَبَّ",
+     "en": "May the hands of Abu Lahab be ruined, and ruined is he."
+    },
+    {
+     "n": 2,
+     "ar": "مَآ أَغْنَىٰ عَنْهُ مَالُهُۥ وَمَا كَسَبَ",
+     "en": "His wealth will not avail him or that which he gained."
+    },
+    {
+     "n": 3,
+     "ar": "سَيَصْلَىٰ نَارًۭا ذَاتَ لَهَبٍۢ",
+     "en": "He will [enter to] burn in a Fire of [blazing] flame"
+    },
+    {
+     "n": 4,
+     "ar": "وَٱمْرَأَتُهُۥ حَمَّالَةَ ٱلْحَطَبِ",
+     "en": "And his wife [as well] - the carrier of firewood."
+    },
+    {
+     "n": 5,
+     "ar": "فِى جِيدِهَا حَبْلٌۭ مِّن مَّسَدٍۭ",
+     "en": "Around her neck is a rope of [twisted] fiber."
+    }
+   ]
+  },
+  {
+   "number": 112,
+   "name_ar": "سُورَةُ الإِخۡلَاصِ",
+   "name_en": "Al-Ikhlaas",
+   "name_translation": "Sincerity",
+   "ayah_count": 4,
+   "ayahs": [
+    {
+     "n": 1,
+     "ar": "قُلْ هُوَ ٱللَّهُ أَحَدٌ",
+     "en": "Say, \"He is Allah, [who is] One,"
+    },
+    {
+     "n": 2,
+     "ar": "ٱللَّهُ ٱلصَّمَدُ",
+     "en": "Allah, the Eternal Refuge."
+    },
+    {
+     "n": 3,
+     "ar": "لَمْ يَلِدْ وَلَمْ يُولَدْ",
+     "en": "He neither begets nor is born,"
+    },
+    {
+     "n": 4,
+     "ar": "وَلَمْ يَكُن لَّهُۥ كُفُوًا أَحَدٌۢ",
+     "en": "Nor is there to Him any equivalent.\""
+    }
+   ]
+  },
+  {
+   "number": 113,
+   "name_ar": "سُورَةُ الفَلَقِ",
+   "name_en": "Al-Falaq",
+   "name_translation": "The Dawn",
+   "ayah_count": 5,
+   "ayahs": [
+    {
+     "n": 1,
+     "ar": "قُلْ أَعُوذُ بِرَبِّ ٱلْفَلَقِ",
+     "en": "Say, \"I seek refuge in the Lord of daybreak"
+    },
+    {
+     "n": 2,
+     "ar": "مِن شَرِّ مَا خَلَقَ",
+     "en": "From the evil of that which He created"
+    },
+    {
+     "n": 3,
+     "ar": "وَمِن شَرِّ غَاسِقٍ إِذَا وَقَبَ",
+     "en": "And from the evil of darkness when it settles"
+    },
+    {
+     "n": 4,
+     "ar": "وَمِن شَرِّ ٱلنَّفَّٰثَٰتِ فِى ٱلْعُقَدِ",
+     "en": "And from the evil of the blowers in knots"
+    },
+    {
+     "n": 5,
+     "ar": "وَمِن شَرِّ حَاسِدٍ إِذَا حَسَدَ",
+     "en": "And from the evil of an envier when he envies.\""
+    }
+   ]
+  },
+  {
+   "number": 114,
+   "name_ar": "سُورَةُ النَّاسِ",
+   "name_en": "An-Naas",
+   "name_translation": "Mankind",
+   "ayah_count": 6,
+   "ayahs": [
+    {
+     "n": 1,
+     "ar": "قُلْ أَعُوذُ بِرَبِّ ٱلنَّاسِ",
+     "en": "Say, \"I seek refuge in the Lord of mankind,"
+    },
+    {
+     "n": 2,
+     "ar": "مَلِكِ ٱلنَّاسِ",
+     "en": "The Sovereign of mankind."
+    },
+    {
+     "n": 3,
+     "ar": "إِلَٰهِ ٱلنَّاسِ",
+     "en": "The God of mankind,"
+    },
+    {
+     "n": 4,
+     "ar": "مِن شَرِّ ٱلْوَسْوَاسِ ٱلْخَنَّاسِ",
+     "en": "From the evil of the retreating whisperer -"
+    },
+    {
+     "n": 5,
+     "ar": "ٱلَّذِى يُوَسْوِسُ فِى صُدُورِ ٱلنَّاسِ",
+     "en": "Who whispers [evil] into the breasts of mankind -"
+    },
+    {
+     "n": 6,
+     "ar": "مِنَ ٱلْجِنَّةِ وَٱلنَّاسِ",
+     "en": "From among the jinn and mankind.\""
+    }
+   ]
+  }
+ ]
+}
