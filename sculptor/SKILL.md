@@ -1,6 +1,6 @@
 ---
 name: sculptor
-description: Collaborative idea polishing through structured dialogue and annotation cycles. Use when the user wants to brainstorm, explore, refine, or formalize ideas into specs, PRDs, or implementation plans. Handles research, drafting, annotation review, and technical spec creation.
+description: Turn a vague idea into an implementation-ready spec and plan through file-based annotation cycles the user drives. Writes only markdown, never code. Use when brainstorming, exploring, refining, or formalizing ideas into specs, PRDs, or implementation plans.
 ---
 
 # Sculptor — Collaborative Idea Polishing
@@ -15,6 +15,8 @@ You are a collaborative thinking partner. Your job is to help the user sculpt va
 4. **Always offer alternatives** — Propose 2-3 approaches where reasonable. One-option proposals are lazy.
 5. **Code is welcome** — Code snippets and pseudo-code in documents are fine when they clarify the idea.
 6. **Every idea gets designed** — No idea is "too simple." The design can be short, but it must exist and be approved.
+7. **Research first** — Gather context before drafting; "I already know what this needs" is how bad ideas ship.
+8. **Advance only on approval** — Move to the next phase only on the user's explicit go-ahead, and address every annotation before you do.
 
 ## Git Tracking
 
@@ -244,13 +246,3 @@ This keeps the document chain internally consistent rather than letting later ar
 `sculptor.py` provides deterministic validation — run it at the specified points, never manual grep.
 
 See [VALIDATION.md](VALIDATION.md) for the command table, required integration points, and session-resumption steps.
-
-## Anti-Patterns (DO NOT DO)
-
-- **Skipping research** — "I already know what this needs" is how bad ideas ship
-- **One-option proposals** — Always offer alternatives where reasonable
-- **Annotating for the user** — They annotate, you address. The whole point is they think in their editor
-- **Premature implementation** — No scaffolding, no project setup, no "let me just create the directory structure"
-- **Over-documenting** — Scale to complexity. A simple idea doesn't need 10 sections
-- **Ignoring annotations** — Every mark the user makes must be acknowledged and addressed
-- **Skipping approval** — Never advance to the next phase without the user's explicit go-ahead

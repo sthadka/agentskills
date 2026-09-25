@@ -1,6 +1,6 @@
 ---
 name: treeflow
-description: Orchestrates parallel execution using Beads issue graph and background AI workers. Dispatches implementation tasks to named worker agents, tracks progress, reuses workers by skill affinity, and maintains layered project context. Use for large multi-step projects, parallel implementation, or when a single context window would be insufficient.
+description: Pure orchestrator for parallel execution — plans work in a Beads issue graph and dispatches it to named background worker agents, never writing code itself. Tracks progress, reuses workers by skill affinity, maintains layered project context. Use for large multi-step projects, parallel implementation, or when one context window is insufficient.
 allowed-tools:
   - Read
   - Write
@@ -57,28 +57,25 @@ After running `/sculptor export-beads <idea-dir>`:
 3. `python3 .beads/tf.py ready`
 4. Copy `.beads/glossary.md` (if present) into the `## Domain Glossary` section of `worker-context.md` so every worker speaks one language.
 
-### Mode Detection
-- Bead management only (create/list/triage) → Quick Paths above. STOP.
-- Sculptor import (input has `plan.md`, `spec.md`, `idea.md`) → Run `/sculptor export-beads`, then Sculptor Import above
-- Raw plan.md without sculptor artifacts → invoke `/sculptor` to generate contract-first plan, spec coverage matrix, and beads graph. Then import and proceed.
-- Worker dispatch needed → Read [SKILL-DISPATCH.md](SKILL-DISPATCH.md) for full orchestration loop
+### Routing
+
+| Input shape | Path |
+|---|---|
+| Only creating/listing/updating/closing beads (no implement/build/dispatch) | Quick Paths → use `bd` directly. Don't init `tf.py` or context. STOP. |
+| `plan.md` + `spec.md` + `idea.md` (sculptor artifacts) | Run `/sculptor export-beads`, then Sculptor Import above. |
+| Raw `plan.md`, no sculptor artifacts | Invoke `/sculptor` to generate a contract-first plan, spec coverage matrix, and beads graph; then import. |
+| `beads-graph.jsonl` given as argument | `tf.py import-graph <file>` → `init` → dispatch. |
+| Worker dispatch needed | Read [SKILL-DISPATCH.md](SKILL-DISPATCH.md) for the full orchestration loop. |
+
+Trust the plan: a prior planning session already explored the codebase. Workers read source when they execute; re-deriving architecture from source is wasted orchestrator context.
 
 ### Dispatch Modes
-- `--mode parallel` (default): Workers dispatch in parallel waves via `tf.py wave-plan`. Up to 6 concurrent workers.
-- `--mode sequential`: One worker (or one verified-safe batch) at a time. After each worker completes, an architect checkpoint verifies coherence and refines pending tasks. Use when quality > speed.
-- `--mode auto`: Sequential within a phase, parallel across truly independent phases (frontend + backend with no shared code).
 
-### Scope Detection
-If the user's request is purely about creating, listing, updating, or closing beads — and does NOT mention implementing, building, or dispatching work — use the Quick Paths above. Do not initialize `tf.py`, worker context, or the full orchestration loop. Use `bd` commands directly.
-
-### Plan File Provided
-When a `beads-graph.jsonl` file is given as argument:
-1. `python3 .beads/tf.py import-graph beads-graph.jsonl`
-2. Proceed to `init` → dispatch
-
-When a `.md` plan file is given, run `/sculptor export-beads` first to generate the graph file.
-
-Do NOT read project source files to validate or understand the plan — trust it. The plan was written by a prior planning session that already explored the codebase. Workers will read source files when they execute tasks. Re-deriving architecture from source is wasted orchestrator context.
+| Mode | Behavior |
+|---|---|
+| `parallel` (default) | Parallel waves via `tf.py wave-plan`; up to 6 concurrent workers. |
+| `sequential` | One worker (or one verified-safe batch) at a time; an architect checkpoint verifies coherence and refines pending tasks after each. Use when quality > speed. |
+| `auto` | Sequential within a phase, parallel across truly independent phases (e.g. frontend + backend with no shared code). |
 
 ## Entry Protocol
 
@@ -254,7 +251,7 @@ The orchestrator's continuous verification (architect checkpoints + code review 
 
 ## Troubleshooting
 
-Error handling and the full anti-pattern list: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+Error handling and the full practices checklist: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ---
 
