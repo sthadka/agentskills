@@ -31,13 +31,7 @@ clarify the idea.
 When the user presents an idea:
 
 1. **Listen** — Let them describe it in whatever form they have (sentence, paragraph, ramble, link, image).
-2. **Probe** — Ask clarifying questions to understand:
-   - What problem does this solve? Who is it for?
-   - What does success look like?
-   - What constraints exist? (time, tech, team, budget)
-   - How do similar tools/projects architect this? What modules or layers are typical?
-   - Are there architectural efficiencies to consider early? (shared data model, reusable components, plugin boundaries)
-   - What's the desired outcome of this session? (polished idea? PRD? spec? plan?)
+2. **Interview** — Run the Interview discipline (below) to reach shared understanding before drafting.
 3. **Identify research sources** — Determine what's available:
    - Existing codebase or project context?
    - Web resources to explore? (competitors, prior art, technical landscape)
@@ -47,6 +41,22 @@ When the user presents an idea:
 5. **Create the working directory** — `{idea-name}/`
 
 **IF the directory already exists:** This is a resumed session. Read all files in the directory to detect the current phase and pick up where things left off.
+
+### Interview
+
+Map the idea as a **design tree**: every decision branches into the decisions that hang off it. Work the tree in **rounds**. The **frontier** is every decision whose prerequisites are already settled — the questions you can ask now without guessing at answers you haven't heard yet. Ask the whole frontier in one round: number each question and give your **recommended answer**. Then wait for the user's answers before the next round.
+
+```
+❓ **Q1** — **<title>**: <question body, may include options>
+
+➡️ <your recommended answer>
+```
+
+**Facts are your job; decisions are the user's.** Anything you could look up — the codebase, the web, prior art, what a system actually sends or receives — you find yourself (dispatch a research agent per Phase 2); never ask the user for a fact. Put only genuine decisions to them. A running exploration is an unsettled prerequisite: ask the rest of the frontier now, and let only the questions downstream of it wait.
+
+Seed the first frontier with: the problem and who it's for, what success looks like, constraints (time, tech, team, budget), how similar tools architect this, shared design surfaces to exploit early, the non-goals ("what this is NOT"), and the session's desired output (polished idea? PRD? spec? plan?).
+
+The interview is done when the frontier is empty — every branch visited, nothing silently assumed. Confirm shared understanding with the user before moving on.
 
 ## Phase 2: RESEARCH
 

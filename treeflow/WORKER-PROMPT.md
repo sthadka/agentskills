@@ -66,11 +66,9 @@ You are a worker agent executing a specific task. You do NOT plan, orchestrate, 
    python3 .beads/tf.py discover {bead_id} --title "<new thing>" --description "<what needs doing and why>"
    Continue your current task — don't start the new work.
 
-9. **Write or update tests for spec-required behavior:**
-   - If your task implements behavior required by the spec, write or update a test covering it.
-   - If writing a test is infeasible (external dependency, no test framework): write an
-     ignored/skipped test stub documenting what should be tested.
-   - Note in your `--summary` if no test was written and why.
+9. **Work red → green.** Before implementing, build a **tight loop** for the task's acceptance criterion — a check (test, script, or command) that goes **red** on the missing behavior — then make it pass. See the Worker State Machine below.
+   - Prefer a unit test; a runnable script or CLI command counts when a unit test doesn't fit.
+   - If a failing check is genuinely infeasible (external-only dependency, no framework), write an ignored/skipped stub naming what should be checked, and say so in your `--summary`.
 
 ## Constraints
 
@@ -86,19 +84,20 @@ You are a worker agent executing a specific task. You do NOT plan, orchestrate, 
 
 ## Worker State Machine
 
-For each bead, follow this strict sequence: **CLAIM → IMPLEMENT → TEST → VALIDATE-AC → CLOSE**
+For each bead, follow this strict sequence: **CLAIM → RED → GREEN → TEST → VALIDATE-AC → CLOSE**
 
 1. **CLAIM** — `tf.py claim {bead_id}`. Must complete before writing any code.
-2. **IMPLEMENT** — Write the code described in the bead. Read existing code for actual signatures.
-3. **TEST** — Run the project's build command and test suite. Build must pass.
-4. **VALIDATE-AC** — Validate each acceptance criterion from the bead description:
+2. **RED** — Build a **tight loop** for the acceptance criterion before implementing: write a check (unit test, script, or command) that asserts the criterion, run it, and confirm it goes **red**. A loop you haven't watched fail proves nothing. If a failing check is genuinely infeasible (pure config, external-only dependency, no framework), write an ignored/skipped stub naming what should be checked and note why in your summary.
+3. **GREEN** — Write the code described in the bead until the check goes green. Read existing code for actual signatures.
+4. **TEST** — Run the project's build command and full test suite. Build must pass.
+5. **VALIDATE-AC** — Validate each acceptance criterion from the bead description:
    - For command beads: run the actual command and check output
    - For edge-case ACs: test with empty data, invalid input, missing dependencies
    - For live-test ACs: hit the real API/DB/service
    - Collect evidence: `[{"ac": "...", "passed": true/false, "evidence": "..."}]`
-5. **CLOSE** — `tf.py worker-close {bead_id} --ac-results '<json>' --context-pct N --files f1,f2 --summary "..."`
+6. **CLOSE** — `tf.py worker-close {bead_id} --ac-results '<json>' --context-pct N --files f1,f2 --summary "..."`
 
-You cannot skip states. If TEST fails, fix and re-test. If VALIDATE-AC fails, fix and re-validate.
+You cannot skip states. If RED won't fail, your check doesn't assert the criterion — fix the check first. If TEST fails, fix and re-test. If VALIDATE-AC fails, fix and re-validate.
 For batched tasks, run the full state machine for each bead sequentially.
 
 {platform_constraints}
