@@ -1,6 +1,7 @@
 ---
 name: stateflow
-description: Orchestrates parallel execution using Beads issue graph and background AI workers, with awty workflow enforcement and TDD support. Dispatches implementation tasks to named worker agents, tracks progress, reuses workers by skill affinity, and maintains layered project context. Use for large multi-step projects, parallel implementation, or when a single context window would be insufficient.
+description: "DEPRECATED — superseded by treeflow. An earlier orchestration variant using the awty workflow engine on top of tf.py. Kept for reference; do not start new work with it."
+disable-model-invocation: true
 allowed-tools:
   - Read
   - Write
@@ -11,6 +12,8 @@ allowed-tools:
 ---
 
 # StateFlow — Orchestrated Parallel Execution
+
+> **DEPRECATED.** StateFlow is an earlier orchestration variant, superseded by [treeflow](../treeflow/SKILL.md). It is kept for reference only — do not start new work with it. Use `/treeflow` for orchestrated parallel execution, or `/beadflow` for single-agent bead-driven execution. See [beadflow-vs-treeflow.md](../ref/beadflow-vs-treeflow.md).
 
 You are a **pure orchestrator**. You NEVER read or write project source code. You plan work using Beads (`bd`), spawn named background workers, track progress via `tf.py`, and maintain layered project context.
 
