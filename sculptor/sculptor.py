@@ -10,6 +10,19 @@ from pathlib import Path
 
 ANNOTATION_RE = re.compile(r'^[ \t]*(>>)\s*(.*)', re.MULTILINE)
 ANNOTATION_PREFIX_RE = re.compile(r'^([?+\-*])?\s*(.*)')
+LINE_ANNOTATION_RE = re.compile(r'^[ \t]*>>\s*(.*)')
+# Span fences: `>>` + optional space + an opening delimiter ALONE on the line,
+# closed by `>>` + optional space + the matching delimiter followed by the comment.
+# Families: {}  []  ()  and symmetric //  — spaces after >> are optional throughout.
+OPEN_FENCE_RE = re.compile(r'^[ \t]*>>[ \t]*(\{|\[|\(|//)[ \t]*$')
+CLOSE_FENCE_RE = re.compile(r'^[ \t]*>>[ \t]*(\}|\]|\)|//)[ \t]*(.*?)[ \t]*$')
+OPEN_TO_CLOSE = {'{': '}', '[': ']', '(': ')', '//': '//'}
+# Inline span on the PRECEDING content line: either a leading quoted phrase
+# (`>> "goes on and on" -> ...`) or a caret pointer aligned to the columns
+# (`>>            ^^^^^^^^^ ...`). Carets use absolute column offsets.
+CARET_ANNOTATION_RE = re.compile(r'^[ \t]*>>[ \t]*(\^+)[ \t]*(.*?)[ \t]*$')
+INLINE_QUOTE_RE = re.compile(r'''^(["'`])(.+?)\1[ \t]*(.*)$''')
+HEADING_RE = re.compile(r'^[ \t]*#{1,6}\s+(.*?)\s*$')
 
 PHASE_FILES = {
     'research.md': 2,
@@ -32,68 +45,366 @@ PHASE_NAMES = {
 CODE_BLOCK_RE = re.compile(r'^```(\w*)\s*$', re.MULTILINE)
 
 
+def _preceding_anchor(lines: list[str], idx: int) -> str | None:
+    """Nearest non-blank, non-annotation content line above idx (0-based)."""
+    j = idx - 1
+    while j >= 0:
+        if not lines[j].strip():
+            j -= 1
+            continue
+        if re.match(r'^[ \t]*>>', lines[j]):
+            j -= 1
+            continue
+        return lines[j].strip()
+    return None
+
+
+def _enclosing_heading(lines: list[str], idx: int) -> str | None:
+    """Nearest markdown heading at or above idx (0-based)."""
+    j = idx
+    while j >= 0:
+        m = HEADING_RE.match(lines[j])
+        if m:
+            return m.group(1).strip()
+        j -= 1
+    return None
+
+
 def parse_annotations(filepath: Path) -> list[dict]:
     text = filepath.read_text()
     lines = text.splitlines()
-    annotations = []
+    annotations: list[dict] = []
 
     in_code_block = False
+    current: dict | None = None  # an open span fence awaiting its close
+
     for i, line in enumerate(lines, 1):
         stripped = line.strip()
         if stripped.startswith('```'):
             in_code_block = not in_code_block
+            if current is not None:
+                current['block'].append(line)
             continue
         if in_code_block:
+            if current is not None:
+                current['block'].append(line)
             continue
 
-        match = re.match(r'^[ \t]*(>>)\s*(.*)', line)
-        if match:
-            rest = match.group(2)
-            prefix_match = ANNOTATION_PREFIX_RE.match(rest)
-            prefix = prefix_match.group(1) if prefix_match and prefix_match.group(1) else ''
-            text = prefix_match.group(2) if prefix_match else rest
+        # Inside a span: only the matching close delimiter ends it; spans do not nest.
+        if current is not None:
+            mc = CLOSE_FENCE_RE.match(line)
+            if mc and mc.group(1) == current['close']:
+                block = current['block']
+                nonblank = [b.strip() for b in block if b.strip()]
+                pm = ANNOTATION_PREFIX_RE.match(mc.group(2))
+                annotations.append({
+                    'line': current['open_line'],
+                    'end_line': i,
+                    'kind': 'span',
+                    'prefix': pm.group(1) or '',
+                    'text': pm.group(2),
+                    'raw': line,
+                    'anchor': nonblank[0] if nonblank else '',
+                    'target': None,
+                    'heading': _enclosing_heading(lines, current['open_line'] - 1),
+                    'block': block,
+                })
+                current = None
+            else:
+                current['block'].append(line)
+            continue
 
+        # A span opener (delimiter alone on the line)?
+        mo = OPEN_FENCE_RE.match(line)
+        if mo:
+            current = {'close': OPEN_TO_CLOSE[mo.group(1)], 'open_line': i, 'block': []}
+            continue
+
+        # Caret pointer to an inline span on the preceding content line.
+        mcaret = CARET_ANNOTATION_RE.match(line)
+        if mcaret:
+            anchor_line = _preceding_anchor(lines, i - 1)
+            cs, ce = mcaret.start(1), mcaret.end(1)
+            target = anchor_line[cs:ce].strip() if anchor_line and cs < len(anchor_line) else None
+            pm = ANNOTATION_PREFIX_RE.match(mcaret.group(2))
             annotations.append({
                 'line': i,
-                'prefix': prefix,
-                'text': text,
+                'end_line': None,
+                'kind': 'line',
+                'prefix': pm.group(1) or '',
+                'text': pm.group(2),
                 'raw': line,
+                'anchor': anchor_line,
+                'target': target or None,
+                'heading': _enclosing_heading(lines, i - 1),
+                'block': None,
             })
+            continue
+
+        # Plain line annotation, optionally naming an inline span with a leading quote.
+        m = LINE_ANNOTATION_RE.match(line)
+        if m:
+            pm = ANNOTATION_PREFIX_RE.match(m.group(1))
+            prefix = pm.group(1) or ''
+            body = pm.group(2)
+            target = None
+            qm = INLINE_QUOTE_RE.match(body)
+            if qm:
+                target = qm.group(2)
+                body = qm.group(3)
+            annotations.append({
+                'line': i,
+                'end_line': None,
+                'kind': 'line',
+                'prefix': prefix,
+                'text': body,
+                'raw': line,
+                'anchor': _preceding_anchor(lines, i - 1),
+                'target': target,
+                'heading': _enclosing_heading(lines, i - 1),
+                'block': None,
+            })
+
+    # Unterminated span: surface it so verify-clean stays honest.
+    if current is not None:
+        open_idx = current['open_line'] - 1
+        annotations.append({
+            'line': current['open_line'],
+            'end_line': None,
+            'kind': 'line',
+            'prefix': '',
+            'text': '(unterminated span fence)',
+            'raw': lines[open_idx] if 0 <= open_idx < len(lines) else '>>',
+            'anchor': None,
+            'target': None,
+            'heading': _enclosing_heading(lines, open_idx),
+            'block': None,
+        })
 
     return annotations
 
 
-def cmd_annotations(args: list[str]) -> int:
-    if not args:
-        print('Usage: sculptor annotations <file.md>')
-        return 1
+def _run_git(cwd: Path, *args: str) -> tuple[int, str, str]:
+    try:
+        r = subprocess.run(
+            ['git', '-C', str(cwd), *args], capture_output=True, text=True
+        )
+        return r.returncode, r.stdout, r.stderr
+    except FileNotFoundError:
+        return 127, '', 'git not found'
 
-    filepath = Path(args[0])
-    if not filepath.exists():
-        print(f'File not found: {filepath}')
-        return 1
 
+def _git_annotatable(cwd: Path, ref: str, name: str) -> bool:
+    """True when cwd is a work tree, ref resolves, and name is a tracked file."""
+    if _run_git(cwd, 'rev-parse', '--is-inside-work-tree')[0] != 0:
+        return False
+    if _run_git(cwd, 'rev-parse', '--verify', '--quiet', f'{ref}^{{commit}}')[0] != 0:
+        return False
+    return _run_git(cwd, 'ls-files', '--error-unmatch', '--', name)[0] == 0
+
+
+def _annotations_git(filepath: Path, ref: str, context: int = 3) -> int:
+    """Primary mode: the user's changes since `ref` ARE the annotations.
+
+    A word-diff shows direct prose edits AND any marker-wrapped phrase in
+    surrounding context, so git — not an in-file convention — is the anchor.
+    """
+    cwd = filepath.parent
+    name = filepath.name
+    rc, out, err = _run_git(
+        cwd, 'diff', f'-U{context}', '--word-diff=plain', ref, '--', name
+    )
+    if rc != 0:
+        print(f'git diff failed: {err.strip() or rc}')
+        return 1
+    if not out.strip():
+        print(f'No changes to {name} since {ref}.')
+        print('  Annotate by editing the prose, or wrap a phrase with any marker,')
+        print('  then re-run. To compare a different baseline: --since <ref>.')
+        print('  For in-file >> markers instead of git: --no-git.')
+        return 0
+    print(f'Annotations = your changes to {name} since {ref} (git word-diff):')
+    print('  {+added+} / [-removed-] are your marks; surrounding lines are context.')
+    print('  Read these hunks (or the file) before editing — never act on the list alone.\n')
+    print(out.rstrip())
+    return 0
+
+
+def _is_marker_line(line: str) -> bool:
+    return re.match(r'^[ \t]*>>', line) is not None
+
+
+def _preceding_anchor_index(lines: list[str], idx: int) -> int | None:
+    """Index of the nearest non-blank, non-annotation line above idx (0-based)."""
+    j = idx - 1
+    while j >= 0:
+        if not lines[j].strip() or _is_marker_line(lines[j]):
+            j -= 1
+            continue
+        return j
+    return None
+
+
+def _block_bounds(lines: list[str], idx: int) -> tuple[int, int]:
+    """Blank-line-bounded block containing idx, not crossing marker lines (0-based)."""
+    if idx < 0 or idx >= len(lines) or not lines[idx].strip() or _is_marker_line(lines[idx]):
+        return (idx, idx)
+    s = idx
+    while s - 1 >= 0 and lines[s - 1].strip() and not _is_marker_line(lines[s - 1]):
+        s -= 1
+    e = idx
+    while e + 1 < len(lines) and lines[e + 1].strip() and not _is_marker_line(lines[e + 1]):
+        e += 1
+    return (s, e)
+
+
+def _focus_range(lines: list[str], a: dict) -> tuple[int, int]:
+    """1-based inclusive line range an annotation targets (the content, not the mark)."""
+    if a.get('kind') == 'span' and a.get('end_line'):
+        return (a['line'], a['end_line'])
+    idx = _preceding_anchor_index(lines, a['line'] - 1)
+    if idx is None:
+        return (a['line'], a['line'])
+    s, e = _block_bounds(lines, idx)
+    return (s + 1, e + 1)
+
+
+def _print_window(lines: list[str], focus: tuple[int, int],
+                  ann_lines: set[int], context: int) -> None:
+    fs, fe = focus
+    ws = max(1, fs - context)
+    we = min(len(lines), fe + context)
+    for n in range(ws, we + 1):
+        if n in ann_lines:
+            mark = '#'   # the >> / fence marker line
+        elif fs <= n <= fe:
+            mark = '>'   # the content being commented on
+        else:
+            mark = ' '
+        print(f'    {n:>4} {mark} {lines[n - 1]}')
+
+
+PREFIX_LABELS = {
+    '': 'correction/statement',
+    '?': 'question',
+    '+': 'addition',
+    '-': 'remove',
+    '*': 'strong opinion',
+}
+
+
+def _annotations_json(filepath: Path, context: int) -> int:
+    lines = filepath.read_text().splitlines()
+    payload = []
+    for a in parse_annotations(filepath):
+        fs, fe = _focus_range(lines, a)
+        ws, we = max(1, fs - context), min(len(lines), fe + context)
+        payload.append({
+            **{k: a.get(k) for k in
+               ('line', 'end_line', 'kind', 'prefix', 'text', 'heading', 'anchor', 'target')},
+            'focus_start': fs,
+            'focus_end': fe,
+            'context': [{'n': n, 'text': lines[n - 1]} for n in range(ws, we + 1)],
+        })
+    print(json.dumps({'mode': 'infile', 'file': filepath.name, 'annotations': payload}, indent=2))
+    return 0
+
+
+def _annotations_infile(filepath: Path, context: int = 3) -> int:
+    lines = filepath.read_text().splitlines()
     annotations = parse_annotations(filepath)
     if not annotations:
         print(f'No annotations found in {filepath.name}')
         return 0
 
-    print(f'{len(annotations)} annotation(s) in {filepath.name}:\n')
-
-    prefix_labels = {
-        '': 'correction/statement',
-        '?': 'question',
-        '+': 'addition',
-        '-': 'remove',
-        '*': 'strong opinion',
-    }
+    print(f'{len(annotations)} annotation(s) in {filepath.name} '
+          f'(±{context} lines of context — read the file before editing):\n')
 
     for a in annotations:
-        prefix_str = f' [{prefix_labels.get(a["prefix"], a["prefix"])}]' if a['prefix'] else ''
-        text_preview = a['text'][:80] + ('...' if len(a['text']) > 80 else '')
-        print(f'  L{a["line"]}{prefix_str}: {text_preview}')
+        prefix_str = f' [{PREFIX_LABELS.get(a["prefix"], a["prefix"])}]' if a['prefix'] else ''
+        if a.get('kind') == 'span' and a.get('end_line'):
+            loc = f'L{a["line"]}-{a["end_line"]}'
+        else:
+            loc = f'L{a["line"]}'
+        print(f'  {loc}{prefix_str}: {a["text"]}')
+        if a.get('heading'):
+            print(f'       under "{a["heading"]}"')
+        if a.get('target'):
+            print(f'       inline phrase: "{a["target"]}"')
+        ann_lines = {a['line']}
+        if a.get('end_line'):
+            ann_lines.add(a['end_line'])
+        _print_window(lines, _focus_range(lines, a), ann_lines, context)
+        print()
 
     return 0
+
+
+def cmd_annotations(args: list[str]) -> int:
+    since = 'HEAD'
+    since_explicit = False
+    force_no_git = False
+    force_git = False
+    as_json = False
+    context = 3
+    positional: list[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == '--since' and i + 1 < len(args):
+            since = args[i + 1]
+            since_explicit = True
+            i += 2
+            continue
+        if a == '--context' and i + 1 < len(args):
+            try:
+                context = max(0, int(args[i + 1]))
+            except ValueError:
+                pass
+            i += 2
+            continue
+        if a == '--no-git':
+            force_no_git = True
+        elif a in ('--diff', '--git'):
+            force_git = True
+        elif a == '--json':
+            as_json = True
+        else:
+            positional.append(a)
+        i += 1
+
+    if not positional:
+        print('Usage: sculptor annotations <file.md> '
+              '[--since <ref>] [--no-git] [--context N] [--json]')
+        return 1
+
+    filepath = Path(positional[0])
+    if not filepath.exists():
+        print(f'File not found: {filepath}')
+        return 1
+
+    cwd, name = filepath.parent, filepath.name
+    if force_no_git:
+        use_git = False
+    elif force_git:
+        use_git = _git_annotatable(cwd, since, name)
+        if not use_git:
+            print(f'No git baseline for {name} at {since} '
+                  f'(untracked, or ref/repo missing). Use --no-git for in-file markers.')
+            return 1
+    else:
+        use_git = _git_annotatable(cwd, since, name)
+
+    # Baseline auto-pick: if the marks were committed (clean work tree), diff HEAD~1.
+    if use_git and not since_explicit:
+        clean = _run_git(cwd, 'diff', '--quiet', 'HEAD', '--', name)[0] == 0
+        has_parent = _run_git(cwd, 'rev-parse', '--verify', '--quiet', 'HEAD~1^{commit}')[0] == 0
+        if clean and has_parent:
+            since = 'HEAD~1'
+
+    if as_json:
+        return _annotations_json(filepath, context)
+    return _annotations_git(filepath, since, context) if use_git else _annotations_infile(filepath, context)
 
 
 def cmd_verify_clean(args: list[str]) -> int:
@@ -1351,9 +1662,73 @@ def cmd_export_beads(args: list[str]) -> int:
     return 0
 
 
+def cmd_report(args: list[str]) -> int:
+    since = 'HEAD'
+    round_no: int | None = None
+    positional: list[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == '--since' and i + 1 < len(args):
+            since = args[i + 1]
+            i += 2
+            continue
+        if a == '--round' and i + 1 < len(args):
+            try:
+                round_no = int(args[i + 1])
+            except ValueError:
+                pass
+            i += 2
+            continue
+        positional.append(a)
+        i += 1
+
+    if not positional:
+        print('Usage: sculptor report <file.md> [--round N] [--since <ref>]')
+        return 1
+
+    filepath = Path(positional[0])
+    if not filepath.exists():
+        print(f'File not found: {filepath}')
+        return 1
+
+    cwd, name = filepath.parent, filepath.name
+    if round_no is None:
+        fb = cwd / 'feedback'
+        existing = sorted(fb.glob('round-*.md')) if fb.exists() else []
+        round_no = len(existing) + 1
+
+    annotations = parse_annotations(filepath)
+    print(f'# Round {round_no} resolutions — {name} (baseline {since})')
+    print()
+    print('_status: addressed / partial / declined / deferred (declined & deferred need a reason)_')
+    print()
+
+    if _git_annotatable(cwd, since, name):
+        rc, out, _ = _run_git(cwd, 'diff', '--stat', since, '--', name)
+        if rc == 0 and out.strip():
+            print('Changed (git diff --stat):')
+            print('```')
+            print(out.rstrip())
+            print('```')
+            print()
+
+    if not annotations:
+        print('_No `>>` comment rows — direct-edit round; summarize the diff above._')
+        return 0
+
+    for n, a in enumerate(annotations, 1):
+        loc = f'L{a["line"]}-{a["end_line"]}' if a.get('end_line') else f'L{a["line"]}'
+        head = f' under "{a["heading"]}"' if a.get('heading') else ''
+        print(f'{n}. [ ] {a["text"] or "(marker)"}  ({loc}{head})')
+
+    return 0
+
+
 COMMANDS = {
     'annotations': cmd_annotations,
     'verify-clean': cmd_verify_clean,
+    'report': cmd_report,
     'phase': cmd_phase,
     'lint-spec': cmd_lint_spec,
     'lint-plan': cmd_lint_plan,
@@ -1366,8 +1741,11 @@ USAGE = """sculptor — validation tool for sculptor sessions
 Usage: sculptor <command> [args]
 
 Commands:
-  annotations <file.md>              Extract and parse >> annotations
-  verify-clean <file.md>             Verify all annotations were removed
+  annotations <file.md> [flags]      Show annotations. Git word-diff when the file is
+                                     tracked (context-complete), else in-file >> markers.
+                                     Flags: --since <ref>, --no-git, --context N, --json
+  verify-clean <file.md>             Verify all in-file >> / fence markers were removed
+  report <file.md> [--round N]       Scaffold a round resolution report (annotations + stat)
   phase <idea-dir>                   Detect current session phase
   lint-spec <spec.md>                Lint spec for dead types, path issues, TODOs
   lint-plan <plan.md> [--spec X]     Lint plan for missing AC, sections, spec refs

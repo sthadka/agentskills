@@ -127,9 +127,18 @@ This is the core cycle. Repeat 1-6 times until the user is satisfied.
 
 ### Annotation Format
 
-Annotations use `>>` at the start of a line. This is unambiguous — it won't collide with markdown blockquotes (`>`), code comments (`//`, `#`), or any language syntax inside fenced code blocks.
+The user marks up the document however is convenient; `sculptor.py annotations <file>`
+surfaces every mark with its surrounding context (the agent just runs the command — how
+it gathers context is the tool's concern). Ways to annotate:
 
-**Prefixes** (optional but useful):
+1. **Fix small things directly in the text.** Just edit the prose — the tool picks it up.
+2. **Leave a `>>` comment** for anything the agent should handle. A `>>` attaches to the
+   thing directly above it — under a line for a phrase, under a heading for a whole
+   section, or wrap a block in a span fence (below).
+3. **Wrap an inline phrase** with any marker (`// like this //`, `[[ ]]`) to point at a
+   span you want to discuss.
+
+**Prefixes** on `>>` (optional but useful):
 
 | Prefix | Meaning | Example |
 |--------|---------|---------|
@@ -140,32 +149,56 @@ Annotations use `>>` at the start of a line. This is unambiguous — it won't co
 | `>> *` | Strong opinion | `>> * must be backwards compatible` |
 | `>> explain` | Create explainer | `>> explain what is CRDT convergence` |
 
-Bare `>> free text` is always fine — intent can be inferred from context.
+Bare `>> free text` is always fine. When a passage is marked `>> explain`, create an
+explainer appendix (see [EXPLAINER-TEMPLATE.md](EXPLAINER-TEMPLATE.md)) and link it.
 
-When the user marks a passage with `>> explain`, create an explainer appendix for that concept. See [EXPLAINER-TEMPLATE.md](EXPLAINER-TEMPLATE.md) for the format. Link the explainer from the annotated passage.
+**Span fences** (multi-line block) — open with `>>` + a delimiter alone, close with the
+matching delimiter + comment. Families: `{} [] () //`; space after `>>` optional:
+```
+>>{
+first target line
+second target line
+>>} cut this block, out of scope
+```
+
+**Inline phrase** — name it with a leading quote (`>> "goes on and on" -> goes forever`)
+or point at it with column-aligned carets on the next line.
 
 ### The Cycle
 
 1. **Prompt the user**:
-   > Open `{idea-name}/idea.md` in your editor. Annotate with `>>` lines wherever you have feedback. One thorough pass is ideal. Tell me when you're done.
+   > Open `{idea-name}/idea.md`. Edit anything you'd fix yourself; mark what you want to
+   > discuss with `>>` or by wrapping a phrase. One thorough pass is ideal. Tell me when done.
 
 2. **Wait** for the user to signal they've annotated the file.
 
-3. **Before running `sculptor.py annotations`, commit the annotated file** to preserve raw annotations: `<idea-name>: annotate — round N feedback on <file>`. Then **run `sculptor.py annotations <file>`** to get the full structured list of annotations with line numbers and parsed prefixes. Do not grep manually.
-   - Also look for fallback annotations: inserted text that doesn't match the document's voice (`//`, `NOTE:`, `TODO:`, `<!-- -->`, etc.)
+3. **Commit the raw annotations** (preserves the round's marks in history):
+   `<idea-name>: annotate — round N feedback on <file>`. Then **run
+   `sculptor.py annotations <file>`** — never grep manually. It returns every mark with
+   its surrounding context.
 
-4. **Address every annotation**:
-   - Respond to questions (`>> ?`)
-   - Incorporate corrections (`>>`)
-   - Add requested content (`>> +`)
-   - Remove flagged sections (`>> -`)
-   - Respect strong opinions (`>> *`) — these are non-negotiable constraints
+4. **Read the file before editing.** The `annotations` output is an INDEX into the
+   content, not a substitute for it — load the real context, then address each mark.
+   Never edit from the list alone.
 
-5. **Update the document** — Remove all `>>` annotation lines and integrate the changes into the document. **Commit** the cleaned version: `<idea-name>: revision — addressed round N annotations`
+5. **Address every annotation**: answer questions (`>> ?`), incorporate corrections,
+   add requested content (`>> +`), remove flagged sections (`>> -`), and respect strong
+   opinions (`>> *`) as non-negotiable constraints.
 
-6. **Run `sculptor.py verify-clean <file>`** to confirm all annotations were removed. Fix any remaining ones before proceeding.
+6. **Update the document and REMOVE every marker** — `>>` lines, span fences, inline
+   quotes/carets, AND any wrap markers. The revised file must be clean; markers are
+   agent/human-review only and are never persisted. **Commit**:
+   `<idea-name>: revision — addressed round N annotations`.
 
-7. **Summarize changes** — Tell the user what you changed and why, so they can decide whether another round is needed.
+7. **Run `sculptor.py verify-clean <file>`** to confirm no markers remain. Fix any
+   stragglers before proceeding.
+
+8. **Write a round resolution report** so the user can see, per annotation, whether and
+   how it was addressed. Run `sculptor.py report <file>` to scaffold
+   `feedback/round-N.md` (one row per annotation); fill each row's status (addressed /
+   partial / declined / deferred, with a reason for the last two) and how, then commit it
+   with the revision. Only annotations that trigger a genuine design decision also update
+   `decision-tree.md`.
 
 ### Guard
 
