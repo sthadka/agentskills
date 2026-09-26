@@ -110,6 +110,72 @@ class TestParseAnnotations:
 
         assert result == []
 
+    def test_span_fence_all_delimiters(self):
+        from sculptor_mod import parse_annotations
+
+        p = Path("/tmp/test_span.md")
+        p.write_text(
+            ">>{\nbody a\n>>} curly\n"
+            ">> [\nbody b\n>> ] bracket\n"
+            ">>(\nbody c\n>>) paren\n"
+            ">> //\nbody d\n>> // slash\n"
+        )
+        r = parse_annotations(p)
+        p.unlink()
+
+        spans = [a for a in r if a["kind"] == "span"]
+        assert len(spans) == 4
+        assert [s["text"] for s in spans] == ["curly", "bracket", "paren", "slash"]
+        assert spans[0]["anchor"] == "body a"
+        assert spans[0]["line"] == 1 and spans[0]["end_line"] == 3
+
+    def test_unterminated_span_surfaces(self):
+        from sculptor_mod import parse_annotations
+
+        p = Path("/tmp/test_unterminated.md")
+        p.write_text(">>{\nbody with no close\n")
+        r = parse_annotations(p)
+        p.unlink()
+
+        assert len(r) == 1
+        assert "unterminated" in r[0]["text"]
+
+    def test_inline_quote_target(self):
+        from sculptor_mod import parse_annotations
+
+        p = Path("/tmp/test_inline_quote.md")
+        p.write_text("a line that goes on and on here\n"
+                     '>> "goes on and on" should be forever\n')
+        r = parse_annotations(p)
+        p.unlink()
+
+        assert r[0]["target"] == "goes on and on"
+        assert r[0]["text"] == "should be forever"
+
+    def test_caret_inline_slice(self):
+        from sculptor_mod import parse_annotations
+
+        p = Path("/tmp/test_caret.md")
+        # carets aligned to absolute columns of "polling" (index 9..15)
+        p.write_text("The word polling is wrong\n" + ">>" + " " * 7 + "^" * 7 + " fix this\n")
+        r = parse_annotations(p)
+        p.unlink()
+
+        assert r[0]["target"] == "polling"
+        assert r[0]["text"] == "fix this"
+
+    def test_anchor_and_heading_capture(self):
+        from sculptor_mod import parse_annotations
+
+        p = Path("/tmp/test_anchor.md")
+        p.write_text("## Data Model\nStores token in SQLite.\n>> ? why SQLite\n")
+        r = parse_annotations(p)
+        p.unlink()
+
+        assert r[0]["heading"] == "Data Model"
+        assert r[0]["anchor"] == "Stores token in SQLite."
+        assert r[0]["prefix"] == "?"
+
 
 # ── cmd_annotations Tests (CLI) ──────────────────────────────────
 
@@ -153,6 +219,69 @@ class TestVerifyClean:
         assert r["returncode"] == 1
         assert "FAIL" in r["stdout"]
         assert "1 unaddressed" in r["stdout"]
+
+
+# ── git-aware annotations + report ────────────────────────────────
+
+
+def _git_repo(tmp_path):
+    import subprocess as sp
+    d = tmp_path / "repo"
+    d.mkdir()
+    for a in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+        sp.run(["git", "-C", str(d), *a], check=True, capture_output=True)
+    return d
+
+
+def _git(d, *a):
+    import subprocess as sp
+    sp.run(["git", "-C", str(d), *a], check=True, capture_output=True)
+
+
+class TestAnnotationsGitMode:
+    def test_tracked_file_uses_word_diff(self, tmp_path):
+        d = _git_repo(tmp_path)
+        f = d / "idea.md"
+        f.write_text("# I\n\nUses polling.\n")
+        _git(d, "add", "idea.md")
+        _git(d, "commit", "-qm", "base")
+        f.write_text("# I\n\nUses websockets.\n")  # uncommitted edit = the annotation
+        r = sculptor(["annotations", str(f)])
+        assert r["returncode"] == 0
+        assert "word-diff" in r["stdout"]
+        assert "websockets" in r["stdout"]
+
+    def test_untracked_file_falls_back_to_infile_with_context(self, tmp_path):
+        d = _git_repo(tmp_path)
+        f = d / "idea.md"
+        f.write_text("Uses polling to sync.\n>> switch to websockets\n")  # never added
+        r = sculptor(["annotations", str(f)])
+        assert r["returncode"] == 0
+        assert "annotation(s)" in r["stdout"]           # in-file mode header
+        assert "switch to websockets" in r["stdout"]
+        assert "Uses polling to sync." in r["stdout"]   # context window present
+
+    def test_no_git_flag_forces_infile(self, tmp_path):
+        d = _git_repo(tmp_path)
+        f = d / "idea.md"
+        f.write_text("Body line here.\n>> a note\n")
+        _git(d, "add", "idea.md")
+        _git(d, "commit", "-qm", "base")
+        r = sculptor(["annotations", str(f), "--no-git"])
+        assert r["returncode"] == 0
+        assert "annotation(s)" in r["stdout"]
+        assert "a note" in r["stdout"]
+
+
+class TestReportCLI:
+    def test_report_scaffold(self, tmp_path):
+        f = tmp_path / "idea.md"
+        f.write_text("## Model\nStores in SQLite.\n>> ? why SQLite\n>> * must scale\n")
+        r = sculptor(["report", str(f), "--round", "2"])
+        assert r["returncode"] == 0
+        assert "Round 2 resolutions" in r["stdout"]
+        assert "why SQLite" in r["stdout"]
+        assert "[ ]" in r["stdout"]
 
 
 # ── cmd_phase Tests ──────────────────────────────────────────────
