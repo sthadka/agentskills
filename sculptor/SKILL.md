@@ -127,48 +127,18 @@ This is the core cycle. Repeat 1-6 times until the user is satisfied.
 
 ### Annotation Format
 
-The user marks up the document however is convenient; `sculptor.py annotations <file>`
-surfaces every mark with its surrounding context (the agent just runs the command — how
-it gathers context is the tool's concern). Ways to annotate:
-
-1. **Fix small things directly in the text.** Just edit the prose — the tool picks it up.
-2. **Leave a `>>` comment** for anything the agent should handle. A `>>` attaches to the
-   thing directly above it — under a line for a phrase, under a heading for a whole
-   section, or wrap a block in a span fence (below).
-3. **Wrap an inline phrase** with any marker (`// like this //`, `[[ ]]`) to point at a
-   span you want to discuss.
-
-**Prefixes** on `>>` (optional but useful):
-
-| Prefix | Meaning | Example |
-|--------|---------|---------|
-| `>>` | Correction / statement | `>> this should use WebSocket, not polling` |
-| `>> ?` | Question | `>> ? why not use Redis instead of SQLite` |
-| `>> +` | Addition | `>> + also needs to handle pagination` |
-| `>> -` | Remove this | `>> - cut this section, out of scope` |
-| `>> *` | Strong opinion | `>> * must be backwards compatible` |
-| `>> explain` | Create explainer | `>> explain what is CRDT convergence` |
-
-Bare `>> free text` is always fine. When a passage is marked `>> explain`, create an
-explainer appendix (see [EXPLAINER-TEMPLATE.md](EXPLAINER-TEMPLATE.md)) and link it.
-
-**Span fences** (multi-line block) — open with `>>` + a delimiter alone, close with the
-matching delimiter + comment. Families: `{} [] () //`; space after `>>` optional:
-```
->>{
-first target line
-second target line
->>} cut this block, out of scope
-```
-
-**Inline phrase** — name it with a leading quote (`>> "goes on and on" -> goes forever`)
-or point at it with column-aligned carets on the next line.
+How the user marks up the document is documented for THEM in [README.md](README.md)
+(edit prose directly, `>>` comment lines with prefixes, span fences, inline phrases).
+The agent never parses markers by hand — `sculptor.py annotations <file>` surfaces every
+mark with its surrounding context. One marker drives agent behavior: when a passage is
+tagged `>> explain`, create an explainer appendix (see
+[EXPLAINER-TEMPLATE.md](EXPLAINER-TEMPLATE.md)) and link it from the passage.
 
 ### The Cycle
 
 1. **Prompt the user**:
-   > Open `{idea-name}/idea.md`. Edit anything you'd fix yourself; mark what you want to
-   > discuss with `>>` or by wrapping a phrase. One thorough pass is ideal. Tell me when done.
+   > Open `{idea-name}/idea.md` and annotate it (see README.md): edit anything you'd fix
+   > yourself, and mark what you want to discuss. One thorough pass is ideal. Tell me when done.
 
 2. **Wait** for the user to signal they've annotated the file.
 
